@@ -6,6 +6,7 @@ mod collaudo;
 mod bankfiles;
 mod config;
 mod demo;
+mod easyfatt;
 mod printing;
 mod reports;
 mod mailer;
@@ -30,6 +31,27 @@ fn main() -> eframe::Result<()> {
             }
         };
         std::process::exit(code);
+    }
+    // openfatt --importa-easyfatt <archivio Easyfatt .eft> <archivio openFatt .gadb> [cartella motore Firebird]
+    if (args.len() == 4 || args.len() == 5) && args[1] == "--importa-easyfatt" {
+        let engine = args.get(4).map(std::path::PathBuf::from).or_else(|| easyfatt::default_engine_dirs().into_iter().next());
+        let r = (|| -> Result<String, String> {
+            let engine = engine.ok_or("Motore Firebird di Easyfatt non trovato: indicarne la cartella")?;
+            let dump = easyfatt::read_archive(std::path::Path::new(&args[2]), &engine)?;
+            let store = openfatt_store::Store::open(&args[3]).map_err(|e| e.to_string())?;
+            let rep = store.import_easyfatt(&dump).map_err(|e| e.to_string())?;
+            Ok(easyfatt::report_text(&rep))
+        })();
+        match r {
+            Ok(t) => {
+                println!("{}", t);
+                std::process::exit(0)
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1)
+            }
+        }
     }
     if args.len() == 3 && args[1] == "--crea-demo" {
         let r = openfatt_store::Store::open(&args[2]).and_then(|s| demo::populate(&s));

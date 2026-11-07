@@ -165,6 +165,11 @@ impl OpenFattApp {
                         Some(Screen::Dues)
                     }
                     "banco" => Some(Screen::Counter),
+                    "editor-stampe" => {
+                        app.settings = ui::settings::State::on_print_tab();
+                        app.settings.print_state().layouts.start_new(false);
+                        Some(Screen::Settings)
+                    }
                     "ricorrenti" => Some(Screen::Extra(ui::business::Extra::Recurring)),
                     "agenti" => Some(Screen::Extra(ui::business::Extra::Agents)),
                     "statistiche" => Some(Screen::Extra(ui::business::Extra::Stats)),

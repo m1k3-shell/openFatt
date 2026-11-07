@@ -631,3 +631,12 @@ pub fn load_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<egui::TextureHa
     let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
     Some(ctx.load_texture(format!("foto-{}", bytes.len()), ci, egui::TextureOptions::LINEAR))
 }
+
+/// Immagine a grandezza utile per lo sfondo dell'editor delle stampe (lato massimo 1600 px).
+pub fn load_texture_full(ctx: &egui::Context, bytes: &[u8]) -> Option<egui::TextureHandle> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = if img.width().max(img.height()) > 1600 { img.thumbnail(1600, 1600) } else { img };
+    let img = img.to_rgba8();
+    let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+    Some(ctx.load_texture(format!("sfondo-{}", bytes.len()), ci, egui::TextureOptions::LINEAR))
+}

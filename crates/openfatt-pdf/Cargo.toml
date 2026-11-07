@@ -11,3 +11,8 @@ openfatt-fatturapa.workspace = true
 rust_decimal.workspace = true
 png = "0.17"
 miniz_oxide = "0.8"
+serde.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

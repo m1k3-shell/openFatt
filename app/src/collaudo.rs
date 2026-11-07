@@ -204,6 +204,31 @@ fn collaudo_completo() {
     assert!(!liq.is_empty());
     r.ok("IVA", format!("liquidazioni {} calcolate: {}", year, liq.len()));
 
+    // dichiarazione annuale: prospetto per il commercialista
+    let annual = s.annual_vat(year).unwrap();
+    assert_eq!(annual.value("VL1", 0), annual.value("VE26", 0) + annual.value("VJ19", 0));
+    assert!(annual.value("VE50", 0) > Decimal::ZERO);
+    r.file("pdf", "prospetto_iva_annuale.pdf", &crate::reports::annual_vat_pdf(&s, &annual).unwrap());
+    crate::reports::annual_vat_xlsx(&dir.join("prospetto_iva_annuale.xlsx"), &annual).unwrap();
+    r.ok("IVA", format!("prospetto della dichiarazione annuale {}: volume d'affari € {}, IVA a debito € {}, detraibile € {}", year, annual.value("VE50", 0), annual.value("VL1", 0), annual.value("VL2", 0)));
+
+    // modelli di stampa liberi e moduli prestampati
+    let mut layout = openfatt_pdf::freeform::FreeLayout::standard_a4("Collaudo");
+    layout.kinds = vec!["FAT".into()];
+    crate::printing::save_layouts(&s, std::slice::from_ref(&layout)).unwrap();
+    let inv_doc = s.document(d.id).unwrap();
+    let free = crate::printing::document_pdf(&s, &inv_doc).unwrap();
+    assert!(pdf_ok(&free));
+    r.file("pdf", "modello_libero.pdf", &free);
+    layout.preprinted = true;
+    layout.offset_x = 1.5;
+    crate::printing::save_layouts(&s, std::slice::from_ref(&layout)).unwrap();
+    let pre = crate::printing::document_pdf(&s, &inv_doc).unwrap();
+    assert!(pdf_ok(&pre));
+    r.file("pdf", "modulo_prestampato.pdf", &pre);
+    crate::printing::save_layouts(&s, &[]).unwrap();
+    r.ok("Stampe", "modello libero e modulo prestampato (solo i dati, con correzione dell'allineamento)");
+
     // ------------------------------------------------------------- agenti, statistiche, agenda
     let ag = s.agents(false).unwrap()[0].clone();
     let rows = s.commissions(ag.id, NaiveDate::from_ymd_opt(year - 1, 1, 1).unwrap(), today, today).unwrap();

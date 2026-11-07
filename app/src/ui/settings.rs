@@ -499,6 +499,10 @@ impl State {
     pub fn on_sign_tab() -> Self {
         State { tab: Tab::Sign, ..Default::default() }
     }
+    pub fn print_state(&mut self) -> &mut super::print::SettingsState {
+        &mut self.print
+    }
+
     pub fn on_print_tab() -> Self {
         State { tab: Tab::Print, ..Default::default() }
     }

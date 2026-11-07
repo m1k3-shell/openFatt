@@ -2389,6 +2389,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "openfatt"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "eframe",
  "egui-phosphor",
@@ -2449,6 +2450,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "openfatt-fbread"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "openfatt-interop"
 version = "0.1.0"
 dependencies = [
@@ -2467,11 +2476,14 @@ dependencies = [
 name = "openfatt-pdf"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "miniz_oxide 0.8.9",
  "openfatt-core",
  "openfatt-fatturapa",
  "png 0.17.16",
  "rust_decimal",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2520,6 +2532,7 @@ dependencies = [
  "getrandom 0.2.17",
  "openfatt-core",
  "openfatt-fatturapa",
+ "openfatt-fbread",
  "openfatt-interop",
  "pbkdf2",
  "rusqlite",

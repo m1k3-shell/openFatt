@@ -15,8 +15,9 @@ use crate::services;
 
 #[derive(Default)]
 pub struct SettingsState {
-    s: Option<PrintSettings>,
+    pub(crate) s: Option<PrintSettings>,
     kind: Option<DocKind>,
+    pub(crate) layouts: super::layout_editor::EditorState,
 }
 
 const KINDS: [DocKind; 9] = [DocKind::Invoice, DocKind::AccompanyingInvoice, DocKind::CreditNote, DocKind::Quote, DocKind::CustomerOrder, DocKind::DeliveryNote, DocKind::Proforma, DocKind::Fee, DocKind::SupplierOrder];
@@ -158,6 +159,8 @@ pub fn settings_tab(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut SettingsState) {
         s.kinds.retain(|_, v| *v != KindPrint::default());
         cx.msgs.check(cx.store.set_setting("print", &*s), "Impostazioni di stampa salvate");
     }
+    ui.add_space(10.0);
+    super::layout_editor::section(ui, cx, &mut st.layouts);
 }
 
 // ----------------------------------------------------------------------

@@ -58,7 +58,8 @@ impl Store {
         let mut sql = String::from(
             "SELECT d.id, d.kind, d.status, d.number, d.series, d.year, d.date, d.party_id, d.party_name, d.external_number,
                     d.total, d.net_to_pay,
-                    (SELECT e.status FROM einvoices e WHERE e.document_id = d.id AND e.direction = 'OUT' ORDER BY e.id DESC LIMIT 1)
+                    (SELECT e.status FROM einvoices e WHERE e.document_id = d.id AND e.direction = 'OUT' ORDER BY e.id DESC LIMIT 1),
+                    COALESCE(json_extract(d.data, '$.legacy_fe'), 0)
              FROM documents d WHERE 1=1",
         );
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
@@ -117,12 +118,13 @@ impl Store {
                 r.get::<_, Option<String>>(10)?,
                 r.get::<_, Option<String>>(11)?,
                 r.get::<_, Option<String>>(12)?,
+                r.get::<_, i64>(13)?,
             ))
         })?;
         let open = self.open_amounts_by_doc()?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, kind, status, number, series, year, date, party_id, party_name, ext, total, net, fe) = row?;
+            let (id, kind, status, number, series, year, date, party_id, party_name, ext, total, net, fe, legacy) = row?;
             let kind = DocKind::from_code(&kind).unwrap_or_default();
             let number_label = match number {
                 Some(n) if series.is_empty() => n.to_string(),
@@ -143,7 +145,7 @@ impl Store {
                 external_number: ext.unwrap_or_default(),
                 total: dec_from_sql(total),
                 net_to_pay: dec_from_sql(net),
-                fe_status: fe,
+                fe_status: if fe.is_none() && legacy == 1 { Some("PRECEDENTE".into()) } else { fe },
                 open_amount: open.get(&id).copied().unwrap_or_default(),
             });
         }
@@ -204,6 +206,10 @@ impl Store {
             if d.retail.as_ref().map(|r| matches!(r.rt_status, RtStatus::Printed | RtStatus::Manual)).unwrap_or(false) {
                 return Ok(Some("documento commerciale emesso dal registratore: per correggere registrare un reso".into()));
             }
+        }
+        let legacy: Option<i64> = self.conn().query_row("SELECT COALESCE(json_extract(data, '$.legacy_fe'), 0) FROM documents WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        if legacy == Some(1) {
+            return Ok(Some("documento importato: la fattura elettronica è stata gestita dal programma precedente".into()));
         }
         let fe: Option<String> = self
             .conn()

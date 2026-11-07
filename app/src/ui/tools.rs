@@ -16,6 +16,7 @@ pub struct State {
     csv_role: Option<PartyRole>,
     export_year: Option<i32>,
     show_audit: bool,
+    easyfatt_confirm: Option<std::path::PathBuf>,
 }
 
 pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
@@ -49,6 +50,64 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             });
             ui.label(RichText::new("Per ripristinare un backup basta aprirlo con 'Apri un altro archivio'.").small().color(GRAY));
         });
+
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.label(RichText::new("Passaggio da Easyfatt").strong());
+            ui.label("Importa in un colpo l'archivio di Easyfatt (file .eft): clienti e fornitori, articoli, documenti con scadenze e pagamenti, movimenti di magazzino. L'archivio viene letto in sola lettura, da una copia, con il motore Firebird installato insieme a Easyfatt.");
+            let engines = crate::easyfatt::default_engine_dirs();
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(format!("{} Importa archivio Easyfatt...", super::theme::icon::DATABASE)).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Archivio Easyfatt", &["eft", "ef_"]).pick_file() {
+                        st.easyfatt_confirm = Some(p);
+                    }
+                }
+                match (engines.first(), crate::easyfatt::helper_path()) {
+                    (Some(e), Some(_)) => {
+                        ui.label(RichText::new(format!("motore: {}", e.display())).small().color(GRAY));
+                    }
+                    (None, _) => {
+                        ui.label(RichText::new("Easyfatt non risulta installato su questo computer: verrà chiesta la cartella del motore Firebird (FirebirdEmbedded).").small().color(ORANGE));
+                    }
+                    (_, None) => {
+                        ui.label(RichText::new("Manca il lettore openfatt-easyfatt.exe accanto al programma.").small().color(RED));
+                    }
+                }
+            });
+        });
+        if let Some(path) = st.easyfatt_confirm.clone() {
+            let has_docs = cx.store.documents(&Default::default()).map(|d| !d.is_empty()).unwrap_or(false);
+            let text = if has_docs {
+                format!("Importare {}?
+
+Questo archivio contiene già dei documenti: conviene importare in un archivio nuovo (Apri un altro archivio > nuovo). I documenti con numeri già usati verranno messi in una serie a parte.", path.display())
+            } else {
+                format!("Importare {}?
+
+Si consiglia una copia di sicurezza prima di procedere.", path.display())
+            };
+            match super::widgets::confirm(ui.ctx(), "Importazione da Easyfatt", &text) {
+                Some(true) => {
+                    st.easyfatt_confirm = None;
+                    let engine = crate::easyfatt::default_engine_dirs().into_iter().next().or_else(|| rfd::FileDialog::new().set_title("Cartella del motore Firebird di Easyfatt (FirebirdEmbedded)").pick_folder());
+                    if let Some(engine) = engine {
+                        match crate::easyfatt::read_archive(&path, &engine) {
+                            Ok(dump) => match cx.store.import_easyfatt(&dump) {
+                                Ok(r) => {
+                                    cx.msgs.ok(format!("Importati {} documenti da Easyfatt", r.documents));
+                                    cx.msgs.info_dialog("Importazione da Easyfatt completata", crate::easyfatt::report_text(&r));
+                                    cx.nav.push(Nav::Refresh);
+                                }
+                                Err(e) => cx.msgs.err(format!("Importazione non riuscita (nessun dato modificato): {}", e)),
+                            },
+                            Err(e) => cx.msgs.err(e),
+                        }
+                    }
+                }
+                Some(false) => st.easyfatt_confirm = None,
+                None => {}
+            }
+        }
 
         ui.add_space(8.0);
         ui.group(|ui| {

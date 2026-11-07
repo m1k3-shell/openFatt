@@ -72,6 +72,9 @@ impl Store {
             c.drafts.push(format!("{} {} del {}", d.kind.label(), d.number_label, d.date.format("%d/%m/%Y")));
         }
         for d in self.documents(&DocFilter { kinds: fiscal, status: Some(DocStatus::Issued), from: Some(from), to: Some(to), ..Default::default() })? {
+            if self.document(d.id)?.legacy_fe {
+                continue;
+            }
             match self.einvoice_for_document(d.id)? {
                 None => c.not_sent.push(format!("{} {} - {}", d.kind.label(), d.number_label, d.party_name)),
                 Some(e) if e.status == crate::EInvoiceStatus::Rejected => c.rejected.push(format!("{} {}", d.kind.label(), d.number_label)),

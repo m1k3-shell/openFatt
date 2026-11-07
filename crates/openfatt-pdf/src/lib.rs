@@ -2,6 +2,7 @@
 //! Entrambe le stampe passano da `PrintDoc`, una rappresentazione neutra già calcolata.
 
 pub mod barcode;
+pub mod freeform;
 pub mod labels;
 pub mod table;
 pub mod writer;

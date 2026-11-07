@@ -136,3 +136,76 @@ pub fn inventory_valuation_xlsx(store: &Store, year: i32, path: &Path) -> Result
     ];
     export_table(path, "Inventario", &format!("Inventario al 31/12/{}", year), &cols, &rows)
 }
+
+/// Prospetto della dichiarazione IVA annuale (PDF).
+pub fn annual_vat_pdf(store: &Store, a: &openfatt_store::AnnualVat) -> Result<Vec<u8>, String> {
+    let mut rows = Vec::new();
+    for q in &a.quadri {
+        rows.push(TableRow { cells: vec![q.code.clone(), format!("QUADRO {} - {}", q.code, q.title), String::new(), String::new()], bold: true, shaded: true });
+        for r in &q.righi {
+            if r.values.len() <= 2 {
+                let v: Vec<String> = r.values.iter().map(|(t, v)| format!("{} {}", t, fmt_it(*v, 2))).collect();
+                let (a1, a2) = match v.len() {
+                    0 => (String::new(), String::new()),
+                    1 => (String::new(), v[0].clone()),
+                    _ => (v[0].clone(), v[1].clone()),
+                };
+                rows.push(TableRow { cells: vec![r.code.clone(), r.label.clone(), a1, a2], ..Default::default() });
+            } else {
+                // righi con molte colonne: una riga per colonna
+                rows.push(TableRow { cells: vec![r.code.clone(), r.label.clone(), String::new(), String::new()], ..Default::default() });
+                for (t, v) in &r.values {
+                    rows.push(TableRow { cells: vec![String::new(), format!("    {}", t), String::new(), fmt_it(*v, 2)], ..Default::default() });
+                }
+            }
+        }
+    }
+    if !a.warnings.is_empty() {
+        rows.push(TableRow { cells: vec!["".into(), "Da verificare".into(), "".into(), "".into()], bold: true, shaded: true });
+        for w in &a.warnings {
+            // gli avvisi lunghi vanno su più righe
+            let mut line = String::new();
+            for word in w.split(' ') {
+                if line.chars().count() + word.chars().count() > 95 {
+                    rows.push(TableRow { cells: vec!["".into(), std::mem::take(&mut line), "".into(), "".into()], ..Default::default() });
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+            }
+            rows.push(TableRow { cells: vec!["".into(), line, "".into(), "".into()], ..Default::default() });
+        }
+    }
+    let doc = TableDoc {
+        title: format!("Prospetto per la dichiarazione IVA {} - anno d'imposta {}", a.year + 1, a.year),
+        subtitle: vec![company_line(store), "Valori calcolati dai registri IVA e dalle liquidazioni periodiche; righi secondo le istruzioni ufficiali del modello IVA".into()],
+        columns: vec![TableColumn::new("Rigo", 0.8, false), TableColumn::new("Descrizione", 6.2, false), TableColumn::new("", 2.0, true), TableColumn::new("", 2.0, true)],
+        rows,
+        footer: "Prospetto di lavoro per il commercialista: non è la dichiarazione".into(),
+        page_prefix: String::new(),
+    };
+    Ok(render_table(&doc))
+}
+
+pub fn annual_vat_xlsx(path: &Path, a: &openfatt_store::AnnualVat) -> Result<(), String> {
+    let cols = vec![
+        XColumn { title: "Quadro".into(), width: 8.0, total: false },
+        XColumn { title: "Rigo".into(), width: 8.0, total: false },
+        XColumn { title: "Descrizione".into(), width: 60.0, total: false },
+        XColumn { title: "Colonna".into(), width: 24.0, total: false },
+        XColumn { title: "Importo".into(), width: 16.0, total: false },
+    ];
+    let mut data = Vec::new();
+    for q in &a.quadri {
+        for r in &q.righi {
+            for (t, v) in &r.values {
+                data.push(vec![XValue::Text(q.code.clone()), XValue::Text(r.code.clone()), XValue::Text(r.label.clone()), XValue::Text(t.clone()), XValue::Money(f(*v))]);
+            }
+        }
+    }
+    for w in &a.warnings {
+        data.push(vec![XValue::Text("Avviso".into()), XValue::Empty, XValue::Text(w.clone()), XValue::Empty, XValue::Empty]);
+    }
+    export_table(path, "Dichiarazione IVA", &format!("Prospetto dichiarazione IVA - anno {}", a.year), &cols, &data)
+}

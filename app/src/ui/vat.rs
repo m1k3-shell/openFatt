@@ -21,6 +21,7 @@ pub enum Tab {
     Sales,
     Purchases,
     Retail,
+    Annual,
 }
 
 impl Tab {
@@ -29,6 +30,7 @@ impl Tab {
             "vendite" => Tab::Sales,
             "acquisti" => Tab::Purchases,
             "corrispettivi" => Tab::Retail,
+            "annuale" => Tab::Annual,
             _ => Tab::Liquidation,
         }
     }
@@ -106,7 +108,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         ui.add_space(10.0);
     }
     ui.horizontal(|ui| {
-        for (t, label) in [(Tab::Liquidation, "Liquidazione"), (Tab::Sales, "Registro vendite"), (Tab::Purchases, "Registro acquisti"), (Tab::Retail, "Registro corrispettivi")] {
+        for (t, label) in [(Tab::Liquidation, "Liquidazione"), (Tab::Sales, "Registro vendite"), (Tab::Purchases, "Registro acquisti"), (Tab::Retail, "Registro corrispettivi"), (Tab::Annual, "Dichiarazione annuale")] {
             ui.selectable_value(&mut st.tab, t, label);
         }
     });
@@ -134,6 +136,69 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Tab::Sales => register_view(ui, cx, Register::Sales, period),
         Tab::Purchases => register_view(ui, cx, Register::Purchases, period),
         Tab::Retail => retail_view(ui, cx, period),
+        Tab::Annual => {
+            egui::ScrollArea::vertical().id_salt("vat_annual").auto_shrink([false, false]).show(ui, |ui| annual_view(ui, cx, st.year));
+        }
+    }
+}
+
+/// Prospetto della dichiarazione IVA annuale per il commercialista.
+fn annual_view(ui: &mut egui::Ui, cx: &mut Ctx, year: i32) {
+    let key = egui::Id::new(("annual_vat", year, cx.store.generation()));
+    let cached: Option<openfatt_store::AnnualVat> = ui.data(|d| d.get_temp(key));
+    let res = match cached {
+        Some(a) => Ok(a),
+        None => cx.store.annual_vat(year).inspect(|a| ui.data_mut(|d| d.insert_temp(key, a.clone()))),
+    };
+    let a = match res {
+        Ok(a) => a,
+        Err(e) => {
+            ui.label(RichText::new(e.to_string()).color(theme::NEGATIVE));
+            return;
+        }
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Valori per la dichiarazione IVA {} (anno d'imposta {}), calcolati dai registri e dalle liquidazioni. La dichiarazione la presenta il commercialista: questo prospetto gli dà i righi già compilati.", year + 1, year)).color(theme::MUTED));
+    });
+    ui.horizontal(|ui| {
+        if theme::primary(ui, icon::FILE_PDF, "Prospetto PDF per il commercialista").clicked() {
+            match crate::reports::annual_vat_pdf(cx.store, &a).and_then(|pdf| crate::services::open_bytes(&format!("prospetto_IVA_{}.pdf", year), &pdf)) {
+                Ok(_) => {}
+                Err(e) => cx.msgs.err(e),
+            }
+        }
+        if theme::button(ui, icon::FILE_XLS, "Excel").clicked() {
+            if let Some(p) = rfd::FileDialog::new().add_filter("Excel", &["xlsx"]).set_file_name(format!("prospetto_IVA_{}.xlsx", year)).save_file() {
+                cx.msgs.check(crate::reports::annual_vat_xlsx(&p, &a), "Prospetto esportato");
+            }
+        }
+    });
+    ui.add_space(8.0);
+    for q in &a.quadri {
+        theme::card(ui, &format!("Quadro {} - {}", q.code, q.title), |_| {}, |ui| {
+            egui::Grid::new(("annual", q.code.clone())).striped(true).num_columns(3).spacing([18.0, 4.0]).show(ui, |ui| {
+                for r in &q.righi {
+                    ui.label(theme::medium(&r.code));
+                    ui.label(&r.label);
+                    ui.horizontal_wrapped(|ui| {
+                        for (t, v) in &r.values {
+                            ui.label(RichText::new(format!("{}:", t)).color(theme::MUTED));
+                            ui.label(super::widgets::eur(*v));
+                            ui.add_space(8.0);
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(8.0);
+    }
+    if !a.warnings.is_empty() {
+        theme::card(ui, "Da verificare con il commercialista", |_| {}, |ui| {
+            for w in &a.warnings {
+                ui.label(RichText::new(format!("•  {}", w)).color(theme::WARNING));
+            }
+        });
     }
 }
 

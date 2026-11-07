@@ -41,6 +41,7 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 - Scadenzario con incassi parziali e **solleciti** a tre livelli, prima nota.
 - Distinte **Ri.Ba.**, addebiti **SDD** e **bonifici** SEPA nei formati CBI per l'home banking.
 - Registri IVA, **liquidazione** mensile o trimestrale e file della **Comunicazione LIPE**.
+- **Prospetto per la dichiarazione IVA annuale** da dare al commercialista: quadri VE, VF, VJ, VL e VT (anche per regione) calcolati da registri e liquidazioni secondo le istruzioni ufficiali del modello IVA, in PDF ed Excel, con l'elenco delle voci da verificare a mano.
 - **Operazioni di fine anno**: controlli, inventario valorizzato al 31/12, copia di sicurezza e blocco dell'anno.
 
 **Analisi e organizzazione**
@@ -49,6 +50,11 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 - **Agenda** con appuntamenti, telefonate, attività e scadenze di pagamento.
 - **Email** dei documenti in PDF e comunicazioni (SMTP, PEC o programma di posta).
 - Stampe con tre modelli, logo e colore aziendale; etichette con codici a barre (A4 o rotolo).
+- **Editor grafico dei modelli di stampa**: ogni elemento (dati dell'azienda e del cliente, numero, data, righe, totali, scadenze, testi fissi, logo, riquadri) si sposta e si ridimensiona col mouse, in millimetri; le righe continuano nelle pagine seguenti. **Moduli prestampati**: si carica la scansione del modulo come sfondo, si posizionano i campi sopra le caselle e si stampano solo i dati, con la correzione dell'allineamento della stampante.
+
+**Passaggio da Easyfatt**
+- **Importazione diretta dell'archivio** (file `.eft`): azienda, aliquote, pagamenti, agenti, clienti e fornitori, articoli con distinte base, tutti i documenti con righe, spese, cassa previdenziale e ritenute, scadenze con incassi e pagamenti, movimenti di magazzino e spese fuori campo IVA. Le fatture importate restano bloccate perché la fattura elettronica l'ha già trasmessa Easyfatt. Provata sui due archivi dimostrativi distribuiti con Easyfatt: tutti i documenti importati e tutti i totali ricalcolati uguali a quelli di Easyfatt, tranne gli acquisti in reverse charge (l'integrazione IVA va registrata a parte).
+- L'archivio si legge **in sola lettura, da una copia**, con il motore Firebird già installato insieme a Easyfatt (a 32 bit), tramite il piccolo lettore `openfatt-easyfatt.exe`. Anche da riga di comando: `openfatt.exe --importa-easyfatt archivio.eft nuovo.gadb`.
 
 **Più utenti e negozi online**
 - Utenti con password e **permessi per area** (nessuno, lettura, modifica), registro delle operazioni firmato con l'utente, postazioni collegate, documento aperto altrove in sola lettura.
@@ -103,11 +109,21 @@ cargo build --release
 target/release/openfatt.exe
 ```
 
+Il lettore degli archivi Easyfatt è a 32 bit come il motore Firebird di Easyfatt, e va messo accanto a `openfatt.exe`:
+
+```bash
+rustup target add i686-pc-windows-msvc
+```
+
+```bash
+cargo build --release --target i686-pc-windows-msvc -p openfatt-fbread
+```
+
 Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con dati di prova. Da riga di comando: `openfatt.exe --crea-demo prova.gadb`.
 
 ## Verifiche
 
-- **160 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
+- **165 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
 - **Collaudo completo** (`cargo test -p openfatt collaudo -- --nocapture`): percorre tutte le funzioni (righe speciali, valuta, dichiarazione d'intento, NSO, produzione, distinte bancarie, LIPE, agenti, statistiche, ricorrenti, carte, negozio online, utenti e blocchi, fine anno, conservazione, interscambio, copie di sicurezza) e salva i file prodotti in `target/collaudo` con un rapporto.
 - I file prodotti sono **validi contro gli schemi ufficiali**: fatture elettroniche (`tools/valida-xsd.ps1`, schema VFPR12 1.2.3), bonifici e SDD CBI (`tools/valida-cbi.ps1`), Comunicazione LIPE (`tools/valida-lipe.ps1`).
 - Codici a barre riletti con un decodificatore indipendente (ZXing); firme verificate con il validatore di .NET.
@@ -120,6 +136,8 @@ Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con
 - Registratori telematici reali: i driver Epson e a modelli vanno collaudati sul modello in uso.
 - Caricamento delle distinte in un home banking reale, invio della LIPE all'Agenzia, ordini NSO reali da un intermediario PEPPOL, negozi WooCommerce/Shopify reali.
 - Più postazioni su una vera cartella di rete (provato con due connessioni sullo stesso file).
+- Importazione da Easyfatt su archivi reali diversi dai due dimostrativi e da versioni di Easyfatt con motore Firebird diverso dal 2.5.
+- Stampa dei moduli prestampati su una stampante e un modulo reali (va regolata la correzione dell'allineamento).
 
 ## Struttura
 
@@ -133,6 +151,7 @@ crates/openfatt-bank       Ri.Ba. CBI, SDD e bonifici SEPA in XML CBI
 crates/openfatt-pos        registratori telematici (INI, Epson XML, comandi a modelli, simulatore)
 crates/openfatt-pdf        stampe PDF, etichette, codici a barre
 crates/openfatt-interop    Easyfatt-XML, CSV, Excel, Metel, ordini NSO, WooCommerce/Shopify
+crates/openfatt-fbread     lettura in sola lettura degli archivi Firebird (lettore openfatt-easyfatt, 32 bit)
 app/                       applicazione desktop (egui)
 specs/                     schemi XSD ufficiali ed esempi (vedi specs/README.md)
 tools/                     validatori XSD e catture dello schermo
@@ -147,6 +166,8 @@ openFatt è una **reimplementazione indipendente** («stanza pulita») delle fun
 | Specifiche pubbliche dell'Agenzia delle Entrate (FatturaPA, SdI, LIPE) e del MEF (NSO) | formati, regole di calcolo e controlli |
 | Standard CBI, SEPA, Metel, UBL/PEPPOL, API pubbliche WooCommerce e Shopify | file e collegamenti |
 | Formato pubblico Easyfatt-XML | importazione ed esportazione (interoperabilità) |
+| Interfaccia pubblica di Firebird e struttura dell'archivio letta dal catalogo del database | importazione dei propri dati da Easyfatt (interoperabilità, art. 64-quater L. 633/1941) |
+| Modello e istruzioni ufficiali IVA 2026 dell'Agenzia delle Entrate | prospetto della dichiarazione annuale |
 | Manuale pubblico e uso della versione di prova di un programma commerciale | solo l'elenco delle funzioni da offrire |
 
 Non sono stati usati codice, codice decompilato, risorse grafiche, testi o marchi di software commerciali. I protocolli proprietari non pubblicati dei registratori non sono stati ricostruiti: il driver «a modelli» va configurato con il manuale del produttore.
@@ -156,6 +177,7 @@ Non sono stati usati codice, codice decompilato, risorse grafiche, testi o march
 ## Componenti di terzi
 
 - Carattere **Geist** (SIL Open Font License 1.1, `app/assets/fonts/OFL-Geist.txt`); icone **Phosphor** (MIT) tramite `egui-phosphor`.
+- Il motore **Firebird** (licenza IPL/IDPL) non è incluso: il lettore usa quello installato con Easyfatt.
 - Schemi XSD CBI come pubblicati nel progetto OCA/l10n-italy (AGPL-3.0); schemi ed esempi dell'Agenzia delle Entrate (documenti pubblici).
 - Librerie Rust elencate nei `Cargo.toml`, con le rispettive licenze.
 

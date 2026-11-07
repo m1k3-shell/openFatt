@@ -6,6 +6,7 @@ use openfatt_core::calc;
 use openfatt_core::model::{DocKind, Document, LineKind, Party, Product};
 use openfatt_core::money::fmt_eur;
 use openfatt_pdf::labels::LabelContent;
+use openfatt_pdf::freeform::{self, FreeLayout};
 use openfatt_pdf::{Image, PrintDoc, PrintStyle, Template};
 use openfatt_store::Store;
 use rust_decimal::Decimal;
@@ -112,7 +113,32 @@ pub fn print_doc(store: &Store, doc: &Document, s: &PrintSettings, st: &PrintSty
     Ok(p)
 }
 
+/// Modelli di stampa liberi (anche per moduli prestampati).
+pub fn layouts(store: &Store) -> Vec<FreeLayout> {
+    store.get_setting("print_layouts").unwrap_or_default()
+}
+
+pub fn save_layouts(store: &Store, l: &[FreeLayout]) -> Result<(), String> {
+    store.set_setting("print_layouts", &l).map_err(|e| e.to_string())
+}
+
+/// Modello libero assegnato a un tipo di documento, se c'è.
+pub fn layout_for(store: &Store, kind: DocKind) -> Option<FreeLayout> {
+    layouts(store).into_iter().find(|l| l.applies_to(kind.code()))
+}
+
+/// PDF di un documento con un modello libero.
+pub fn free_pdf(store: &Store, l: &FreeLayout, doc: &Document) -> Result<Vec<u8>, String> {
+    let s = settings(store);
+    let st = style(store, &s);
+    let p = print_doc(store, doc, &s, &st)?;
+    Ok(freeform::render(l, &[&p], logo_image(store).as_ref()))
+}
+
 pub fn document_pdf(store: &Store, doc: &Document) -> Result<Vec<u8>, String> {
+    if let Some(l) = layout_for(store, doc.kind) {
+        return free_pdf(store, &l, doc);
+    }
     let s = settings(store);
     let st = style(store, &s);
     Ok(openfatt_pdf::render(&print_doc(store, doc, &s, &st)?))
@@ -129,6 +155,14 @@ pub fn documents_pdf(store: &Store, ids: &[i64]) -> Result<Vec<u8>, String> {
     }
     if docs.is_empty() {
         return Err("Nessun documento".into());
+    }
+    // tutti dello stesso tipo con un modello libero: un solo PDF con quel modello
+    let kinds: Vec<DocKind> = ids.iter().filter_map(|id| store.document(*id).ok().map(|d| d.kind)).collect();
+    if let Some(l) = kinds.first().and_then(|k| layout_for(store, *k)) {
+        if kinds.iter().all(|k| l.applies_to(k.code())) {
+            let refs: Vec<&PrintDoc> = docs.iter().collect();
+            return Ok(freeform::render(&l, &refs, logo_image(store).as_ref()));
+        }
     }
     Ok(openfatt_pdf::render_many(&docs))
 }

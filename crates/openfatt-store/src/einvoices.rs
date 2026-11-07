@@ -509,7 +509,7 @@ impl Store {
     pub fn documents_without_einvoice(&self) -> Result<Vec<i64>> {
         let kinds: Vec<String> = DocKind::ALL.iter().filter(|k| k.is_fiscal()).map(|k| format!("'{}'", k.code())).collect();
         let mut st = self.conn().prepare(&format!(
-            "SELECT d.id FROM documents d WHERE d.status = 'EMESSO' AND d.kind IN ({})
+            "SELECT d.id FROM documents d WHERE d.status = 'EMESSO' AND d.kind IN ({}) AND COALESCE(json_extract(d.data, '$.legacy_fe'), 0) = 0
              AND NOT EXISTS (SELECT 1 FROM einvoices e WHERE e.document_id = d.id AND e.direction = 'OUT' AND e.status <> 'DA_INVIARE')
              ORDER BY d.date",
             kinds.join(",")

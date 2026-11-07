@@ -16,6 +16,7 @@ sha2.workspace = true
 base64.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 openfatt-interop.workspace = true
+openfatt-fbread = { path = "../openfatt-fbread" }
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 getrandom = "0.2"
 zip = { version = "2.6", default-features = false, features = ["deflate"] }

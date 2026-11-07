@@ -13,6 +13,7 @@ pub mod einvoices;
 pub mod grid;
 pub mod home;
 pub mod inventory;
+pub mod layout_editor;
 pub mod linetools;
 pub mod ledger;
 pub mod mail;

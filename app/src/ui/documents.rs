@@ -18,6 +18,7 @@ pub struct State {
     pub dirty: bool,
     search: String,
     year: Option<i32>,
+    year_checked: bool,
     selected: BTreeSet<i64>,
     last_group: Option<DocGroup>,
     confirm: Option<(String, Action)>,
@@ -57,6 +58,7 @@ impl Default for State {
             dirty: true,
             search: String::new(),
             year: Some(chrono::Local::now().year()),
+            year_checked: false,
             selected: BTreeSet::new(),
             last_group: None,
             confirm: None,
@@ -147,6 +149,15 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
     }
 
     let years = cx.store.document_years().unwrap_or_default();
+    // archivio senza documenti nell'anno corrente (es. appena importato): si parte dall'ultimo anno con documenti
+    if !st.year_checked {
+        st.year_checked = true;
+        if let (Some(y), Some(last)) = (st.year, years.iter().max()) {
+            if !years.contains(&y) && *last < y {
+                st.year = Some(*last);
+            }
+        }
+    }
     let filter = DocFilter { kinds: kinds.clone(), year: st.year, search: st.search.clone(), status: st.status, ..Default::default() };
     let fkey = (format!("{:?}", filter.kinds), filter.year, filter.search.clone(), filter.status.map(|s| s.code()));
     let all_rc = st.data.get(cx.store.generation(), &fkey, || cx.store.documents(&filter).unwrap_or_default());

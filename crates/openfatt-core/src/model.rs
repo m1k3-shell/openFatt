@@ -1252,6 +1252,8 @@ pub struct Document {
     pub intent_protocol: String,
     /// Ordine del negozio online da cui nasce il documento
     pub shop_order: String,
+    /// Documento importato da un altro programma, che ne ha già gestito la fattura elettronica
+    pub legacy_fe: bool,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub version: i64,
@@ -1297,6 +1299,7 @@ impl Default for Document {
             commission_rate: None,
             intent_protocol: String::new(),
             shop_order: String::new(),
+            legacy_fe: false,
             created_at: None,
             updated_at: None,
             version: 0,

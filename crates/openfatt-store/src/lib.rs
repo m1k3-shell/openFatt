@@ -8,8 +8,10 @@
 //! - le operazioni rilevanti sono registrate nel registro `audit`.
 
 mod agenda;
+mod annual;
 mod agents;
 mod archive;
+mod import_easyfatt;
 mod imports;
 mod stats;
 mod users;
@@ -40,8 +42,11 @@ use serde::{de::DeserializeOwned, Serialize};
 
 pub use documents::{DocSummary, DocFilter, DdtSource};
 pub use extras::{add_months, copy_line, intent_amount, period_text, Attachment, IntentUsage, LastPrice, ProductImport, Recurrence};
+pub use annual::{region_of, AnnualVat, Quadro, Rigo, REGIONS};
 pub use agenda::{AgendaItem, AgendaKind, Card, CardKind, CardMove, LoyaltySettings};
 pub use archive::{ConservationPackage, ConservationRecord};
+pub use import_easyfatt::EasyfattImport;
+pub use openfatt_fbread::Dump as EasyfattDump;
 pub use imports::{MetelImport, ShopImport};
 pub use stats::{month_label, FlowRow, StatBy, StatRow};
 pub use users::{hash_password, verify_password, Access, Area, Session, User, SESSION_TIMEOUT_SECS};

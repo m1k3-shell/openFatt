@@ -314,6 +314,9 @@ pub fn pill(ui: &mut Ui, text: &str, tone: Tone) -> Response {
 
 /// Fasi della fattura elettronica: (tacche completate, tacca corrente, esito negativo, descrizione).
 pub fn sdi_progress(code: Option<&str>) -> (usize, bool, bool, &'static str) {
+    if code == Some("PRECEDENTE") {
+        return (3, false, false, "Trasmessa dal programma precedente");
+    }
     match code.map(EInvoiceStatus::from_code) {
         None => (0, true, false, "Da generare e inviare"),
         Some(EInvoiceStatus::ToSend) => (1, true, false, "XML pronto, da inviare"),
