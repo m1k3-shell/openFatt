@@ -1,0 +1,15 @@
+[package]
+name = "openfatt-pec"
+description = "Invio e ricezione via PEC con il Sistema di Interscambio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openfatt-fatturapa.workspace = true
+serde.workspace = true
+chrono.workspace = true
+mail-parser = "0.9"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls", "hostname"] }
+imap = "2.4"
+native-tls = "0.2"

@@ -1,0 +1,15 @@
+[package]
+name = "openfatt-bank"
+description = "File per la banca: RiBa (CBI), addebiti SEPA SDD e bonifici SEPA (XML CBI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openfatt-core.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+roxmltree.workspace = true

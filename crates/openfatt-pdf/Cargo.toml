@@ -1,0 +1,13 @@
+[package]
+name = "openfatt-pdf"
+description = "Stampa PDF di documenti e fatture elettroniche"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openfatt-core.workspace = true
+openfatt-fatturapa.workspace = true
+rust_decimal.workspace = true
+png = "0.17"
+miniz_oxide = "0.8"

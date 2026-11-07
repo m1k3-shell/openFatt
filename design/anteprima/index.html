@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openFatt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css">
+<style>
+/* Stile "registro": cromatura senza colore, un solo tono (#1d5fbf) sul dato principale.
+   Fondo grigio-azzurro da libro contabile; cifre tabulari (nell'app: font Geist con tnum incorporato). */
+:root {
+  --ground: #f2f4f7; --surface: #ffffff; --raised: #f6f7f9; --active: #e4e7ec;
+  --border: #e3e6ea; --rule: #eef0f3; --control: #cfd4db;
+  --text: #0a0a0a; --muted: #5e636b; --faint: #6b6b6b;
+  --primary: #141414; --secondary: #e5e5e5;
+  --accent: #1d5fbf; --chart-1: #141414; --chart-2: #8a8a8a; --chart-3: #1d5fbf; --chart-muted: #c3c8cf;
+  --positive: #2e7d32; --negative: #c4242a; --warning: #92400e;
+  --pill-positive-bg: #dcfae5; --pill-positive-ink: #04250e;
+  --pill-negative-bg: #ffedea; --pill-negative-ink: #831c1e;
+  --pill-warning-bg: #fffbeb; --pill-warning-ink: #92400e;
+  --pill-neutral-bg: #eceef1; --pill-neutral-ink: #3d3d3d;
+  --grid: #e5e7eb; --axis-ink: #5e636b; --ink: #0a0a0a;
+  --radius-card: 8px; --radius-control: 6px; --radius-chip: 4px;
+  --gap: 12px; --pad: 24px; --card-pad: 20px; --control-height: 36px; --row-height: 44px;
+  --font: "Geist", Inter, system-ui, sans-serif;
+  --fs-title: 24px; --fs-section: 16px; --fs-kpi: 30px; --fs-body: 14px; --fs-small: 12px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { display: flex; flex-direction: column; min-height: 100vh; background: var(--ground); color: var(--text); font: 400 var(--fs-body)/20px var(--font); min-width: 0; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; }
+.num, .money { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.ph { font-size: 18px; line-height: 1; }
+
+/* ---------- barra dei menu ---------- */
+.topbar { position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--border); }
+.bar1 { height: 52px; display: grid; grid-template-columns: 1fr minmax(260px, 460px) 1fr; align-items: center; gap: 16px; padding: 0 var(--pad); border-bottom: 1px solid var(--rule); }
+.bar2 { height: 46px; display: flex; align-items: center; padding: 0 calc(var(--pad) - 10px); }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mark { width: 28px; height: 28px; flex: none; }
+.company { display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 6px 8px; margin-left: -4px; border-radius: var(--radius-control); cursor: pointer; white-space: nowrap; }
+.company:hover { background: var(--raised); }
+.company b { font-weight: 700; font-size: 15px; }
+.company .ph { font-size: 14px; color: var(--muted); }
+.tools { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
+.menu { display: flex; align-items: center; gap: 2px; }
+.mi { position: relative; }
+.mi > a, .mi > button { display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 10px; border: 0; background: none; border-radius: var(--radius-control);
+  font-size: 14px; font-weight: 500; color: #33373d; cursor: pointer; white-space: nowrap; }
+.mi > a:hover, .mi > button:hover, .mi.open > button { background: var(--raised); color: var(--text); }
+.mi.current > a, .mi.current > button { background: var(--active); color: var(--text); }
+.mi .ph-caret-down { font-size: 12px; color: var(--muted); }
+.count { font: 500 11px/18px var(--font); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--negative); color: #fff; text-align: center; }
+.drop { display: none; position: absolute; top: 41px; left: 0; min-width: 360px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
+  box-shadow: 0 10px 30px rgba(16, 24, 40, .12); padding: 6px; }
+.mi.open .drop { display: block; }
+.drop a { display: grid; grid-template-columns: 22px 1fr auto; column-gap: 10px; align-items: start; padding: 9px 10px; border-radius: var(--radius-control); }
+.drop a:hover, .drop a.hl { background: var(--raised); }
+.drop a .ph { color: #4a4f57; margin-top: 1px; }
+.drop a b { font-weight: 500; display: block; }
+.drop a small { font-size: 12px; color: var(--muted); line-height: 16px; }
+.drop a kbd { font: 400 12px var(--font); color: var(--muted); }
+.drop hr { border: 0; border-top: 1px solid var(--rule); margin: 6px 4px; }
+.spacer { flex: 1; }
+.search { display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px; border: 1px solid var(--control); border-radius: var(--radius-control); background: var(--surface); color: var(--faint); }
+.search span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.search kbd { font: 400 12px var(--font); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--muted); }
+.iconbtn { width: 36px; height: 36px; display: grid; place-items: center; border: 0; background: none; border-radius: var(--radius-control); color: #33373d; cursor: pointer; position: relative; }
+.iconbtn:hover { background: var(--raised); }
+.iconbtn .dot { position: absolute; top: 7px; right: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--negative); }
+.burger { display: none; }
+
+/* ---------- pulsanti ---------- */
+.btn { display: inline-flex; align-items: center; gap: 8px; height: var(--control-height); padding: 0 14px; border-radius: var(--radius-control); border: 1px solid transparent;
+  font-weight: 500; font-size: 14px; cursor: pointer; white-space: nowrap; background: var(--secondary); color: var(--text); transition: background .12s, transform .06s; }
+.btn:hover { background: #dadada; }
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible, .iconbtn:focus-visible, .mi > *:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn.primary { background: var(--primary); color: #fff; }
+.btn.primary:hover { background: #2b2b2b; }
+.btn.ghost { background: none; }
+.btn.ghost:hover { background: var(--raised); }
+.btn.outline { background: var(--surface); border-color: var(--control); }
+.btn.outline:hover { background: var(--raised); }
+.btn.sm { height: 30px; padding: 0 10px; font-size: 13px; gap: 6px; }
+.btn.sm .ph { font-size: 16px; }
+.btn[disabled] { color: #8a8f96; background: var(--raised); cursor: not-allowed; }
+.btn.danger { color: var(--negative); }
+.split { display: inline-flex; }
+.split .btn:first-child { border-radius: var(--radius-control) 0 0 var(--radius-control); }
+.split .btn:last-child { border-radius: 0 var(--radius-control) var(--radius-control) 0; border-left: 1px solid #3a3a3a; padding: 0 9px; }
+
+/* ---------- area di lavoro ---------- */
+main { padding: 28px var(--pad) 40px; width: 100%; max-width: 1560px; margin: 0 auto; flex: 1; }
+.crumbs { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.crumbs .ph { font-size: 12px; }
+.titlerow { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+h1 { font-size: var(--fs-title); line-height: 30px; font-weight: 700; letter-spacing: -0.02em; margin: 0; display: flex; align-items: center; gap: 12px; }
+.sub { margin: 4px 0 0; color: var(--muted); font-size: 15px; }
+.sub strong { color: var(--text); font-weight: 500; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.grid { display: grid; grid-template-columns: 2fr 1fr; gap: var(--gap); align-items: start; }
+.grid.home { grid-template-rows: auto 1fr; }
+.grid.home > .col { grid-column: 2; grid-row: 1 / span 2; }
+.col { display: grid; gap: var(--gap); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); }
+.card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px var(--card-pad) 10px; }
+.card h2 { font-size: var(--fs-section); line-height: 22px; font-weight: 500; margin: 0; }
+.card .period { font-size: 12px; color: var(--muted); }
+.card .body { padding: 0 var(--card-pad) var(--card-pad); }
+.link { font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; color: var(--text); }
+.link:hover { text-decoration: underline; }
+
+/* coda delle cose da fare */
+.todo { list-style: none; margin: 0; padding: 0 8px 8px; }
+.todo li { display: grid; grid-template-columns: 34px minmax(0, 1fr) 120px 168px; align-items: center; gap: 12px; min-height: 64px; padding: 10px 12px; border-top: 1px solid var(--rule); }
+.todo li:first-child { border-top: 0; }
+.todo .ic { width: 34px; height: 34px; display: grid; place-items: center; color: #3d4148; }
+.todo .ic.bad { color: var(--negative); }
+.todo b { font-weight: 500; display: block; }
+.todo small { color: var(--muted); font-size: 13px; display: block; margin-top: 2px; }
+.todo .money { text-align: right; }
+.todo .btn { justify-self: end; width: 100%; justify-content: center; }
+
+/* cifre principali */
+.figs { display: grid; grid-template-columns: 1fr 1fr; gap: 0; padding: 4px var(--card-pad) 16px; }
+.fig + .fig { border-left: 1px solid var(--rule); padding-left: 16px; }
+.fig label { font-size: 13px; color: var(--muted); display: block; }
+.fig .money { font-size: 22px; line-height: 30px; font-weight: 500; }
+.fig.lead .money { font-size: var(--fs-kpi); line-height: 38px; font-weight: 700; }
+.fig .neg { color: var(--negative); }
+.dues { list-style: none; margin: 0; padding: 0 var(--card-pad) 8px; }
+.dues li { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 48px; border-top: 1px solid var(--rule); }
+.dues .d { font-size: 13px; }
+.dues .d b { display: block; font-weight: 500; font-size: 14px; }
+.dues .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dues .who small { display: block; color: var(--muted); font-size: 12px; }
+.dues .money { text-align: right; }
+.dues .late { color: var(--negative); }
+.card footer { padding: 10px var(--card-pad) 14px; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; align-items: center; }
+
+/* tabelle */
+table { width: 100%; border-collapse: collapse; }
+th:first-child, td:first-child { padding-left: var(--card-pad); } th:last-child, td:last-child { padding-right: var(--card-pad); }
+th { font-size: 12px; font-weight: 400; color: var(--muted); text-align: left; height: 38px; padding: 0 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { height: var(--row-height); padding: 0 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+th.r, td.r { text-align: right; }
+tbody tr { cursor: default; }
+tbody tr:hover td { background: #fafbfc; }
+tbody tr.sel td { background: #eef3fb; }
+td .name { font-weight: 500; }
+td .dash { color: var(--faint); }
+.pill { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 12px; font-weight: 500; white-space: nowrap; flex: none; }
+.pill.pos { background: var(--pill-positive-bg); color: var(--pill-positive-ink); }
+.pill.neg { background: var(--pill-negative-bg); color: var(--pill-negative-ink); }
+.pill.warn { background: var(--pill-warning-bg); color: var(--pill-warning-ink); }
+.pill.neu { background: var(--pill-neutral-bg); color: var(--pill-neutral-ink); }
+.cb { width: 18px; height: 18px; border: 1.5px solid var(--control); border-radius: 4px; display: inline-grid; place-items: center; background: var(--surface); vertical-align: middle; }
+.cb.on { background: var(--primary); border-color: var(--primary); color: #fff; font-size: 12px; }
+
+/* percorso SdI (l'elemento proprio del prodotto) */
+.sdi { display: inline-flex; align-items: center; gap: 10px; }
+.sdi .steps { display: inline-flex; gap: 3px; }
+.sdi .steps i { width: 16px; height: 6px; border-radius: 2px; background: #dfe3e8; }
+.sdi .steps i.done { background: var(--chart-1); }
+.sdi .steps i.now { background: var(--accent); }
+.sdi .steps i.ko { background: var(--negative); }
+.sdi span { font-size: 13px; }
+.sdi span.ko { color: var(--negative); font-weight: 500; }
+
+.track { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; padding: 6px var(--card-pad) 18px; }
+.track div { position: relative; padding-top: 22px; padding-right: 12px; }
+.track div::before { content: ""; position: absolute; top: 6px; left: 0; right: 0; height: 2px; background: #dfe3e8; }
+.track div::after { content: ""; position: absolute; top: 1px; left: 0; width: 12px; height: 12px; border-radius: 50%; background: var(--surface); border: 2px solid #c3c8cf; }
+.track div.done::before { background: var(--chart-1); }
+.track div.done::after { background: var(--chart-1); border-color: var(--chart-1); }
+.track div.now::after { background: var(--accent); border-color: var(--accent); }
+.track div.next::before { background: #dfe3e8; }
+.track b { display: block; font-weight: 500; }
+.track small { color: var(--muted); font-size: 13px; }
+
+/* barra filtri e selezione */
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 14px var(--card-pad); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.field { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; border: 1px solid var(--control); border-radius: var(--radius-control); background: var(--surface); color: var(--text); }
+.field .ph { font-size: 16px; color: var(--muted); }
+.field.search-f { width: 300px; color: var(--faint); }
+.seg { display: inline-flex; background: var(--raised); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 2px; height: 36px; }
+.seg a { display: flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: 4px; border: 1px solid transparent; font-weight: 500; color: var(--muted); }
+.seg a.on { background: var(--surface); color: var(--text); border-color: var(--border); }
+.seg a .num { font-size: 12px; color: var(--muted); }
+.selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px var(--card-pad); background: #f7f9fc; border-bottom: 1px solid var(--border); }
+.selbar .what { font-weight: 500; margin-right: 10px; }
+
+/* modulo documento */
+.form { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 4px var(--card-pad) var(--card-pad); }
+.form .wide { grid-column: span 2; }
+.form label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+.input { height: 38px; border: 1px solid var(--border); border-radius: var(--radius-control); padding: 0 10px; display: flex; align-items: center; gap: 8px; background: var(--surface); }
+.input.sel { justify-content: space-between; }
+.input .ph { font-size: 16px; color: var(--muted); }
+.party { padding: 4px var(--card-pad) var(--card-pad); display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; }
+.party b { font-size: 16px; font-weight: 500; }
+.party p { margin: 0; color: var(--muted); }
+.lines td { height: 48px; }
+.lines td.desc { white-space: normal; width: 40%; }
+.lines tr.text td { color: var(--muted); font-style: normal; }
+.addline { display: flex; gap: 8px; padding: 12px var(--card-pad); border-top: 1px solid var(--border); align-items: center; }
+.addline .field { flex: 1; color: var(--faint); }
+.kv { list-style: none; margin: 0; padding: 0 var(--card-pad) 12px; }
+.kv li { display: flex; justify-content: space-between; align-items: baseline; min-height: 32px; }
+.kv li.total { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 10px; }
+.kv li.total .money { font-size: var(--fs-kpi); line-height: 38px; font-weight: 700; }
+.kv li.total span:first-child { font-weight: 500; }
+
+/* barra di stato */
+.status { position: sticky; bottom: 0; height: 30px; display: flex; align-items: center; gap: 18px; padding: 0 var(--pad); font-size: 12px; color: var(--muted);
+  background: var(--surface); border-top: 1px solid var(--border); }
+.status .ok::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--positive); margin-right: 6px; vertical-align: 1px; }
+.status .r { margin-left: auto; }
+
+.view { display: none !important; }
+.view.on { display: block !important; }
+
+/* finestre strette (la finestra dell'app scende fino a 1000px) */
+@media (max-width: 1120px) {
+  .mi > a .lbl-long, .mi > button .lbl-long { display: none; }
+}
+@media (max-width: 1000px) {
+  .bar2, .search, .tools .btn { display: none; }
+  .bar1 { grid-template-columns: auto 1fr auto; }
+  .burger { display: grid; }
+  .grid { grid-template-columns: 1fr; }
+  .grid.home > .col, .grid.home > .card { grid-column: auto !important; grid-row: auto; }
+  .titlerow { flex-direction: column; align-items: flex-start; }
+  .actions { justify-content: flex-start; }
+  .todo li { grid-template-columns: 34px minmax(0, 1fr) auto; }
+  .todo .btn { grid-column: 2 / -1; width: auto; justify-self: start; }
+  .scroll { overflow-x: auto; }
+  .form { grid-template-columns: 1fr 1fr; }
+  .track { grid-template-columns: 1fr 1fr; row-gap: 14px; }
+  .field.search-f { width: 100%; }
+  .status .r, .status .path { display: none; }
+}
+@media (max-width: 560px) {
+  :root { --pad: 16px; --card-pad: 16px; }
+  .todo li { grid-template-columns: 28px minmax(0, 1fr); }
+  .todo .money { grid-column: 2; text-align: left; }
+  .form { grid-template-columns: 1fr; }
+  .form .wide { grid-column: auto; }
+  .figs { grid-template-columns: 1fr; row-gap: 12px; }
+  .fig + .fig { border-left: 0; padding-left: 0; }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="bar1">
+    <button class="iconbtn burger" aria-label="Menu"><i class="ph ph-list"></i></button>
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="6" fill="#141414"/><path d="M7 9h14M7 14h14M7 19h8" stroke="#fff" stroke-width="2" stroke-linecap="round"/><rect x="17" y="17" width="4" height="4" rx="1" fill="#1d5fbf"/></svg>
+      <button class="company" title="Cambia archivio"><b>Bottega Demo S.r.l.</b><i class="ph ph-caret-up-down"></i></button>
+    </div>
+    <div class="search" role="search"><i class="ph ph-magnifying-glass"></i><span>Cerca clienti, articoli, documenti</span><kbd>Ctrl K</kbd></div>
+    <div class="tools">
+      <button class="btn ghost sm" title="Scarica fatture e notifiche dalla casella PEC (F5)"><i class="ph ph-envelope-simple"></i>Ricevi PEC</button>
+      <button class="iconbtn" title="Impostazioni" aria-label="Impostazioni"><i class="ph ph-gear-six"></i></button>
+      <button class="iconbtn" title="Archivio, copie di sicurezza e strumenti" aria-label="Archivio e strumenti"><i class="ph ph-database"></i></button>
+      <button class="iconbtn" title="Guida" aria-label="Guida"><i class="ph ph-question"></i></button>
+    </div>
+  </div>
+  <div class="bar2">
+  <nav class="menu" aria-label="Menu principale">
+    <div class="mi" data-route="scrivania"><a href="#scrivania"><i class="ph ph-house"></i>Scrivania</a></div>
+    <div class="mi" data-menu="anagrafiche"><button aria-haspopup="true"><i class="ph ph-address-book"></i>Anagrafiche<i class="ph ph-caret-down"></i></button>
+      <div class="drop">
+        <a href="#"><i class="ph ph-users"></i><span><b>Clienti</b><small>Anagrafiche, condizioni e listino</small></span></a>
+        <a href="#"><i class="ph ph-truck"></i><span><b>Fornitori</b><small>Anagrafiche e documenti di acquisto</small></span></a>
+        <hr>
+        <a href="#"><i class="ph ph-package"></i><span><b>Articoli</b><small>Prezzi, varianti, lotti e codici a barre</small></span></a>
+        <a href="#"><i class="ph ph-tag"></i><span><b>Listini prezzi</b><small>Rivenditori, ingrosso, pubblico</small></span></a>
+      </div></div>
+    <div class="mi" data-menu="vendite" data-route="fatture fattura"><button aria-haspopup="true"><i class="ph ph-receipt"></i>Vendite<i class="ph ph-caret-down"></i></button>
+      <div class="drop">
+        <a href="#"><i class="ph ph-cash-register"></i><span><b>Vendita al banco</b><small>Scontrino tramite registratore telematico</small></span><kbd>F9</kbd></a>
+        <hr>
+        <a href="#"><i class="ph ph-note-pencil"></i><span><b>Preventivi</b><small>1 in bozza</small></span></a>
+        <a href="#"><i class="ph ph-clipboard-text"></i><span><b>Ordini clienti</b><small>1 da evadere</small></span></a>
+        <a href="#"><i class="ph ph-truck-trailer"></i><span><b>DDT</b><small>Documenti di trasporto</small></span></a>
+        <a href="#fatture" class="hl"><i class="ph ph-file-text"></i><span><b>Fatture e note</b><small>Fatture, note di credito e di debito, parcelle</small></span><kbd>Ctrl F</kbd></a>
+        <a href="#"><i class="ph ph-file-dashed"></i><span><b>Proforma</b><small>Senza valore fiscale</small></span></a>
+        <a href="#"><i class="ph ph-arrows-counter-clockwise"></i><span><b>Autofatture e integrazioni</b><small>TD16–TD29 per reverse charge</small></span></a>
+      </div></div>
+    <div class="mi" data-menu="acquisti"><button aria-haspopup="true"><i class="ph ph-shopping-cart"></i>Acquisti<i class="ph ph-caret-down"></i></button>
+      <div class="drop">
+        <a href="#"><i class="ph ph-clipboard-text"></i><span><b>Ordini fornitori</b></span></a>
+        <a href="#"><i class="ph ph-package"></i><span><b>Arrivi merce</b><small>Carico a magazzino</small></span></a>
+        <a href="#"><i class="ph ph-file-text"></i><span><b>Fatture di acquisto</b></span></a>
+      </div></div>
+    <div class="mi" data-menu="fe"><button aria-haspopup="true"><i class="ph ph-paper-plane-tilt"></i><span>Fattura <span class="lbl-long">elettronica</span></span><span class="count" title="1 fattura scartata dallo SdI">1</span><i class="ph ph-caret-down"></i></button>
+      <div class="drop">
+        <a href="#"><i class="ph ph-paper-plane-tilt"></i><span><b>Inviate allo SdI</b><small>1 scartata, 1 in attesa di esito</small></span></a>
+        <a href="#"><i class="ph ph-tray-arrow-down"></i><span><b>Ricevute dai fornitori</b><small>2 da registrare</small></span></a>
+        <hr>
+        <a href="#"><i class="ph ph-envelope-simple"></i><span><b>Ricevi dalla PEC</b><small>Fatture e notifiche SdI</small></span><kbd>F5</kbd></a>
+      </div></div>
+    <div class="mi" data-menu="magazzino"><button aria-haspopup="true"><i class="ph ph-warehouse"></i>Magazzino<i class="ph ph-caret-down"></i></button>
+      <div class="drop">
+        <a href="#"><i class="ph ph-stack"></i><span><b>Giacenze</b><small>Per magazzino, variante e lotto</small></span></a>
+        <a href="#"><i class="ph ph-arrows-left-right"></i><span><b>Trasferimenti</b><small>Tra Principale e Negozio</small></span></a>
+        <a href="#"><i class="ph ph-list-checks"></i><span><b>Inventario</b><small>Negozio: contati 5 di 12</small></span></a>
+        <a href="#"><i class="ph ph-barcode"></i><span><b>Tracciabilità</b><small>Lotti, scadenze e numeri di serie</small></span></a>
+      </div></div>
+    <div class="mi" data-menu="contabilita"><button aria-haspopup="true"><i class="ph ph-bank"></i>Contabilità<i class="ph ph-caret-down"></i></button>
+      <div class="drop">
+        <a href="#"><i class="ph ph-calendar-check"></i><span><b>Scadenzario</b><small>Incassi e pagamenti</small></span></a>
+        <a href="#"><i class="ph ph-wallet"></i><span><b>Prima nota</b><small>Cassa e banca</small></span></a>
+        <a href="#"><i class="ph ph-chart-bar"></i><span><b>Corrispettivi</b><small>Riepilogo giornaliero del banco</small></span></a>
+      </div></div>
+  </nav>
+  </div>
+</header>
+
+<!-- ======================= SCRIVANIA ======================= -->
+<main class="view" id="v-scrivania">
+  <div class="titlerow">
+    <div>
+      <h1>Scrivania</h1>
+      <p class="sub" id="home-sub"></p>
+    </div>
+    <div class="actions">
+      <button class="btn outline"><i class="ph ph-cash-register"></i>Vendita al banco</button>
+      <button class="btn outline"><i class="ph ph-note-pencil"></i>Nuovo preventivo</button>
+      <div class="split"><button class="btn primary"><i class="ph ph-plus"></i>Nuova fattura</button><button class="btn primary" aria-label="Altri documenti"><i class="ph ph-caret-down"></i></button></div>
+    </div>
+  </div>
+  <div class="grid home">
+    <section class="card">
+      <header><h2>Da fare</h2><span class="period" id="todo-count"></span></header>
+      <ul class="todo" id="todo"></ul>
+    </section>
+    <section class="card" style="grid-column:1">
+      <header><h2>Ultimi documenti</h2><a class="link" href="#fatture">Tutti i documenti <i class="ph ph-arrow-right"></i></a></header>
+      <table><thead><tr><th>Documento</th><th>Data</th><th>Cliente</th><th class="r">Totale</th><th>Stato</th></tr></thead><tbody id="recent"></tbody></table>
+    </section>
+    <div class="col">
+      <section class="card">
+        <header><h2>Incassi</h2><span class="period">al 7 novembre 2026</span></header>
+        <div class="figs">
+          <div class="fig lead"><label>Da incassare</label><div class="money" id="k-open"></div></div>
+          <div class="fig"><label>di cui scaduti</label><div class="money neg" id="k-overdue"></div></div>
+        </div>
+        <ul class="dues" id="dues"></ul>
+        <footer><span class="muted" id="k-30"></span><a class="link" href="#">Scadenzario <i class="ph ph-arrow-right"></i></a></footer>
+      </section>
+      <section class="card">
+        <header><h2>Fatturato</h2><span class="period">imponibile, ultimi 6 mesi</span></header>
+        <div class="body"><div id="chart"></div><p class="muted" style="margin:10px 0 0;font-size:13px" id="k-year"></p></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<!-- ======================= ELENCO FATTURE ======================= -->
+<main class="view" id="v-fatture">
+  <div class="crumbs">Vendite <i class="ph ph-caret-right"></i> Fatture e note</div>
+  <div class="titlerow">
+    <div>
+      <h1>Fatture e note</h1>
+      <p class="sub" id="list-sub"></p>
+    </div>
+    <div class="actions">
+      <button class="btn outline"><i class="ph ph-upload-simple"></i>Importa XML</button>
+      <button class="btn outline"><i class="ph ph-download-simple"></i>Esporta</button>
+      <div class="split"><button class="btn primary"><i class="ph ph-plus"></i>Nuova fattura</button><button class="btn primary" aria-label="Nota di credito, parcella e altri"><i class="ph ph-caret-down"></i></button></div>
+    </div>
+  </div>
+  <section class="card">
+    <div class="toolbar">
+      <div class="field search-f"><i class="ph ph-magnifying-glass"></i>Cliente, numero, articolo…</div>
+      <div class="field"><i class="ph ph-calendar-blank"></i>2026<i class="ph ph-caret-down"></i></div>
+      <div class="seg" id="seg"></div>
+    </div>
+    <div class="selbar">
+      <span class="what">1 selezionata</span>
+      <button class="btn sm ghost"><i class="ph ph-pencil-simple"></i>Apri</button>
+      <button class="btn sm ghost"><i class="ph ph-paper-plane-tilt"></i>Genera e invia allo SdI</button>
+      <button class="btn sm ghost"><i class="ph ph-file-pdf"></i>PDF</button>
+      <button class="btn sm ghost"><i class="ph ph-copy"></i>Duplica</button>
+      <button class="btn sm ghost"><i class="ph ph-hand-coins"></i>Registra incasso</button>
+      <button class="btn sm ghost"><i class="ph ph-envelope-simple"></i>Invia per email</button>
+      <span class="spacer"></span>
+      <button class="btn sm ghost danger"><i class="ph ph-trash"></i>Elimina</button>
+    </div>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:44px"><span class="cb"></span></th><th>Numero</th><th>Data</th><th>Cliente</th><th class="r">Totale</th><th class="r">Da incassare</th><th>Scadenza</th><th>Fattura elettronica</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    </div>
+  </section>
+</main>
+
+<!-- ======================= DOCUMENTO ======================= -->
+<main class="view" id="v-fattura">
+  <div class="crumbs">Vendite <i class="ph ph-caret-right"></i> <a href="#fatture">Fatture e note</a> <i class="ph ph-caret-right"></i> Fattura 6/2026</div>
+  <div class="titlerow">
+    <div>
+      <h1>Fattura 6/2026 <span class="pill pos">Emessa</span></h1>
+      <p class="sub" id="doc-sub"></p>
+    </div>
+    <div class="actions">
+      <button class="btn outline"><i class="ph ph-file-pdf"></i>PDF</button>
+      <button class="btn outline"><i class="ph ph-copy"></i>Duplica</button>
+      <button class="btn outline"><i class="ph ph-printer"></i>Stampa</button>
+      <button class="btn ghost" aria-label="Altre azioni"><i class="ph ph-dots-three"></i></button>
+      <button class="btn primary"><i class="ph ph-hand-coins"></i>Registra incasso</button>
+    </div>
+  </div>
+  <section class="card" style="margin-bottom:var(--gap)">
+    <header><h2>Fattura elettronica</h2><span class="period">IT01234567890_00006.xml · via PEC</span></header>
+    <div class="track">
+      <div class="done"><b>Emessa</b><small>20/10/2026</small></div>
+      <div class="done"><b>XML generato</b><small>validato, 0 errori</small></div>
+      <div class="done"><b>Inviata allo SdI</b><small>20/10/2026 16:42</small></div>
+      <div class="done"><b>Consegnata</b><small>21/10/2026 09:03, ricevuta RC</small></div>
+      <div class="now"><b>Da incassare</b><small>prima rata il 30/11/2026</small></div>
+    </div>
+  </section>
+  <div class="grid">
+    <div class="col">
+      <section class="card">
+        <header><h2>Cliente</h2><a class="link" href="#">Scheda cliente <i class="ph ph-arrow-up-right"></i></a></header>
+        <div class="party">
+          <b>Rossi Arredamenti S.p.A.</b><span class="pill neu">Listino Rivenditori</span>
+          <p>Viale Europa 10, 00144 Roma (RM)</p><span></span>
+          <p>P. IVA <span class="num">IT06363391001</span> · Codice SdI <span class="num">ABC1234</span></p>
+        </div>
+        <div class="form">
+          <div><label>Data</label><div class="input"><i class="ph ph-calendar-blank"></i><span class="num">20/10/2026</span></div></div>
+          <div><label>Numero</label><div class="input num">6 / 2026</div></div>
+          <div class="wide"><label>Pagamento</label><div class="input sel">RiBa 30-60 gg d.f. f.m.<i class="ph ph-caret-down"></i></div></div>
+          <div><label>Magazzino</label><div class="input sel">Principale<i class="ph ph-caret-down"></i></div></div>
+          <div><label>Banca d'appoggio</label><div class="input sel">Banca del Territorio<i class="ph ph-caret-down"></i></div></div>
+          <div class="wide"><label>Note in fattura</label><div class="input"><span class="muted">Nessuna</span></div></div>
+        </div>
+      </section>
+      <section class="card">
+        <header><h2>Righe</h2><span class="period" id="lines-count"></span></header>
+        <div class="scroll">
+        <table class="lines">
+          <thead><tr><th>Codice</th><th>Descrizione</th><th class="r">Q.tà</th><th>U.m.</th><th class="r">Prezzo</th><th class="r">Sconto</th><th class="r">IVA</th><th class="r">Importo</th></tr></thead>
+          <tbody id="lines"></tbody>
+        </table>
+        </div>
+        <div class="addline">
+          <div class="field"><i class="ph ph-barcode"></i>Cerca un articolo o leggi il codice a barre…</div>
+          <button class="btn outline"><i class="ph ph-plus"></i>Riga libera</button>
+          <button class="btn outline"><i class="ph ph-text-aa"></i>Descrizione</button>
+        </div>
+      </section>
+    </div>
+    <div class="col">
+      <section class="card">
+        <header><h2>Totali</h2></header>
+        <ul class="kv" id="totals"></ul>
+      </section>
+      <section class="card">
+        <header><h2>Scadenze</h2><span class="period">RiBa</span></header>
+        <ul class="dues" id="doc-dues"></ul>
+      </section>
+      <section class="card">
+        <header><h2>Margine</h2><span class="period">sul costo d'acquisto</span></header>
+        <ul class="kv" id="margin"></ul>
+      </section>
+    </div>
+  </div>
+</main>
+
+<footer class="status">
+  <span class="path">Documenti\Bottega Demo.gadb</span>
+  <span class="ok">PEC collegata, ultima ricezione oggi alle 09:14</span>
+  <span>Registratore telematico pronto</span>
+  <span class="r">openFatt 0.2</span>
+</footer>
+
+<script src="data.js"></script>
+<script src="charts.js"></script>
+<script>
+const G = window.GA, E = G.fmtE, D = G.fmtD;
+const $ = (s) => document.querySelector(s);
+const eur = (v) => `<span class="money">${E(v)}</span>`;
+
+/* ---------- scrivania ---------- */
+const ko = G.invoices.filter((f) => f.sdi === 'ko');
+const gen = G.invoices.filter((f) => f.sdi === 'gen');
+const todo = [
+  ...ko.map((f) => ({ ic: 'ph-warning-circle', bad: true, t: `Fattura ${f.n} scartata dallo SdI`, s: `${f.party} · ${f.sdiNote}`, v: f.total, a: 'Correggi e reinvia', ai: 'ph-arrow-clockwise' })),
+  ...G.overdue.map((d) => ({ ic: 'ph-clock-countdown', bad: true, t: `Fattura ${d.f.n} scaduta da ${G.daysBetween(d.date, G.TODAY)} giorni`, s: `${d.f.party} · scadenza ${D(d.date)}`, v: d.amount, a: 'Sollecita', ai: 'ph-envelope-simple' })),
+  ...gen.map((f) => ({ ic: 'ph-paper-plane-tilt', t: `Fattura ${f.n} da trasmettere allo SdI`, s: `${f.party} · emessa il ${D(f.date)}`, v: f.total, a: 'Genera e invia', ai: 'ph-paper-plane-tilt' })),
+  { ic: 'ph-tray-arrow-down', t: `${G.received.length} fatture ricevute da registrare`, s: G.received.map((r) => r.party).join(' · '), v: G.received.reduce((s, r) => s + r.total, 0), a: 'Registra', ai: 'ph-check' },
+  { ic: 'ph-note-pencil', t: 'Preventivo in bozza', s: `${G.others[0].party} · creato oggi`, v: G.others[0].total, a: 'Completa', ai: 'ph-pencil-simple' },
+  { ic: 'ph-package', t: `${G.lowStock[0].name} sotto scorta`, s: `${G.lowStock[0].qty} pz in giacenza, scorta minima ${G.lowStock[0].min}`, v: null, a: 'Ordina al fornitore', ai: 'ph-shopping-cart' },
+  { ic: 'ph-list-checks', t: `Inventario ${G.inventory.warehouse} aperto`, s: `contati ${G.inventory.counted} articoli su ${G.inventory.lines}`, v: null, a: 'Continua', ai: 'ph-arrow-right' },
+];
+$('#todo').innerHTML = todo.map((x, i) => `<li><span class="ic ${x.bad ? 'bad' : ''}"><i class="ph ${x.ic}" style="font-size:20px"></i></span>
+  <span><b>${x.t}</b><small>${x.s}</small></span>
+  <span class="money">${x.v == null ? '<span class="dash">—</span>' : E(x.v)}</span>
+  <button class="btn outline"><i class="ph ${x.ai}"></i>${x.a}</button></li>`).join('');
+$('#todo-count').textContent = `${todo.length} attività`;
+const weekday = new Date(G.TODAY).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+$('#home-sub').innerHTML = `${weekday[0].toUpperCase() + weekday.slice(1)} · <strong>una fattura scartata dallo SdI</strong> e € ${E(G.overdueSum)} di crediti scaduti`;
+$('#k-open').textContent = E(G.open);
+$('#k-overdue').textContent = E(G.overdueSum);
+const nextDues = [...G.overdue, ...G.in30].slice(0, 5);
+$('#dues').innerHTML = nextDues.map((d) => {
+  const late = d.date < G.TODAY;
+  const [y, m, dd] = d.date.split('-');
+  const mon = new Date(d.date).toLocaleDateString('it-IT', { month: 'short' });
+  return `<li><span class="d ${late ? 'late' : ''}"><b class="num">${dd}</b>${mon}</span><span class="who">${d.f.party}<small>Fattura ${d.f.n}${late ? ' · scaduta' : ''}</small></span>${eur(d.amount)}</li>`;
+}).join('');
+$('#k-30').innerHTML = `Entro 30 giorni: € <span class="money">${E(G.in30Sum)}</span>`;
+Charts.bars($('#chart'), { labels: G.months, values: G.byMonth, highlight: 5, colour: '#1d5fbf', mutedColour: '#c3c8cf', height: 170, format: (v) => '€ ' + E(v), tickFormat: (v) => E(v).replace(',00', '') });
+$('#k-year').innerHTML = `Totale 2026: € <span class="money">${E(G.turnover)}</span> · novembre in corso`;
+
+const recent = [...G.others.map((o) => ({ label: o.label, date: o.date, party: o.party, total: o.total, status: o.status })),
+  ...[...G.invoices].reverse().slice(0, 3).map((f) => ({ label: `Fattura ${f.n}`, date: f.date, party: f.party, total: f.total, status: f.paid ? 'Pagata' : 'Emessa' }))]
+  .sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+const pillOf = (st) => ({ Bozza: 'warn', 'Da evadere': 'neu', Pagata: 'pos', Emessa: 'neu' })[st] || 'neu';
+$('#recent').innerHTML = recent.map((r) => `<tr><td><span class="name">${r.label}</span></td><td class="num">${D(r.date)}</td><td>${r.party || '<span class="dash">—</span>'}</td><td class="r">${eur(r.total)}</td><td><span class="pill ${pillOf(r.status)}">${r.status}</span></td></tr>`).join('');
+
+/* ---------- elenco fatture ---------- */
+const sdiLabel = (f) => ({
+  ok: () => `<span class="sdi"><span class="steps"><i class="done"></i><i class="done"></i><i class="done"></i></span><span>Consegnata ${D(f.sdiDate)}</span></span>`,
+  wait: () => `<span class="sdi"><span class="steps"><i class="done"></i><i class="done"></i><i class="now"></i></span><span>Inviata, in attesa di esito</span></span>`,
+  ko: () => `<span class="sdi"><span class="steps"><i class="done"></i><i class="done"></i><i class="ko"></i></span><span class="ko">Scartata: ${f.sdiNote}</span></span>`,
+  gen: () => `<span class="sdi"><span class="steps"><i class="now"></i><i></i><i></i></span><span>Da generare e inviare</span></span>`,
+})[f.sdi]();
+const rows = [...G.invoices].reverse();
+$('#rows').innerHTML = rows.map((f) => {
+  const open = f.dues.filter((d) => !d.paid);
+  const residual = open.reduce((s, d) => s + d.amount, 0);
+  const next = open[0];
+  const late = next && next.date < G.TODAY;
+  const sel = f.n === 9;
+  return `<tr class="${sel ? 'sel' : ''}"><td><span class="cb ${sel ? 'on' : ''}">${sel ? '<i class="ph ph-check"></i>' : ''}</span></td>
+    <td class="num">${f.n}/2026</td><td class="num">${D(f.date)}</td><td><span class="name">${f.party}</span>${f.pa ? ' <span class="pill neu">PA</span>' : ''}</td>
+    <td class="r">${eur(f.total)}</td><td class="r">${residual ? eur(residual) : '<span class="pill pos">Pagata</span>'}</td>
+    <td>${next ? `<span class="num ${late ? '' : ''}" style="${late ? 'color:var(--negative);font-weight:500' : ''}">${D(next.date)}</span>${late ? ' <span class="pill neg">scaduta</span>' : ''}` : '<span class="dash">—</span>'}</td>
+    <td>${sdiLabel(f)}</td></tr>`;
+}).join('');
+const unpaid = G.invoices.filter((f) => !f.paid);
+const segs = [['Tutte', G.invoices.length, true], ['Da incassare', unpaid.length], ['Scadute', G.overdue.length], ['Da inviare allo SdI', gen.length + ko.length]];
+$('#seg').innerHTML = segs.map(([l, n, on]) => `<a href="#fatture" class="${on ? 'on' : ''}">${l} <span class="num">${n}</span></a>`).join('');
+$('#list-sub').innerHTML = `${G.invoices.length} fatture nel 2026 · € <span class="money">${E(G.turnover)}</span> di imponibile · <strong>€ <span class="money">${E(G.open)}</span> da incassare</strong>`;
+
+/* ---------- documento ---------- */
+const f6 = G.f6;
+$('#doc-sub').innerHTML = `Rossi Arredamenti S.p.A. · 20/10/2026 · da DDT 1 del 18/10/2026`;
+$('#lines').innerHTML = G.lines.map((l) => l.kind
+  ? `<tr class="text"><td></td><td class="desc" colspan="7">${l.description}</td></tr>`
+  : `<tr><td class="num">${l.code}</td><td class="desc">${l.description}</td><td class="r num">${l.qty}</td><td>${l.unit}</td><td class="r">${eur(l.price)}</td><td class="r num">${l.disc ? l.disc + '%' : '<span class="dash">—</span>'}</td><td class="r num">${l.vat}%</td><td class="r"><b class="money" style="font-weight:500">${E(l.amount)}</b></td></tr>`).join('');
+$('#lines-count').textContent = `${G.lines.filter((l) => !l.kind).length} articoli`;
+$('#totals').innerHTML = `<li><span class="muted">Imponibile</span>${eur(f6.imp)}</li><li><span class="muted">IVA 22%</span>${eur(f6.iva)}</li>
+  <li class="total"><span>Totale documento</span><span class="money">€ ${E(f6.total)}</span></li>`;
+$('#doc-dues').innerHTML = f6.dues.map((d) => {
+  const [y, m, dd] = d.date.split('-');
+  const mon = new Date(d.date).toLocaleDateString('it-IT', { month: 'short' });
+  return `<li><span class="d"><b class="num">${dd}</b>${mon} ${y}</span><span class="who">RiBa<small>da presentare in banca</small></span>${eur(d.amount)}</li>`;
+}).join('');
+const margin = f6.imp - G.cost6;
+$('#margin').innerHTML = `<li><span class="muted">Ricavo</span>${eur(f6.imp)}</li><li><span class="muted">Costo merce</span>${eur(G.cost6)}</li>
+  <li><span>Margine</span><span><b class="money" style="font-weight:500">${E(margin)}</b> <span class="muted">(${new Intl.NumberFormat('it-IT', { maximumFractionDigits: 1 }).format(margin / f6.imp * 100)}%)</span></span></li>`;
+
+/* ---------- navigazione dell'anteprima ---------- */
+function route() {
+  const q = new URLSearchParams(location.search);
+  const r = (location.hash.slice(1) || q.get('screen') || 'scrivania').split('?')[0];
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('on', v.id === 'v-' + r));
+  const cur = document.getElementById('v-' + r); if (cur) document.querySelector('header.topbar').after(cur);
+  document.querySelectorAll('.mi').forEach((m) => m.classList.toggle('current', (m.dataset.route || '').split(' ').includes(r)));
+  const open = q.get('menu');
+  document.querySelectorAll('.mi').forEach((m) => m.classList.toggle('open', m.dataset.menu === open));
+}
+addEventListener('hashchange', route); route();
+document.querySelectorAll('.mi > button').forEach((b) => b.addEventListener('click', (e) => {
+  const mi = b.parentElement, was = mi.classList.contains('open');
+  document.querySelectorAll('.mi').forEach((m) => m.classList.remove('open'));
+  if (!was) mi.classList.add('open');
+  e.stopPropagation();
+}));
+document.querySelectorAll('.mi').forEach((mi) => mi.addEventListener('mouseenter', () => {
+  if (document.querySelector('.mi.open') && mi.dataset.menu) { document.querySelectorAll('.mi').forEach((m) => m.classList.remove('open')); mi.classList.add('open'); }
+}));
+document.addEventListener('click', () => document.querySelectorAll('.mi').forEach((m) => m.classList.remove('open')));
+</script>
+</body>
+</html>

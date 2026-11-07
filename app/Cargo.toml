@@ -1,0 +1,37 @@
+[package]
+name = "openfatt"
+description = "openFatt - fatturazione, magazzino e fatture elettroniche"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openfatt"
+path = "src/main.rs"
+
+[dependencies]
+openfatt-core.workspace = true
+openfatt-fatturapa.workspace = true
+openfatt-pec.workspace = true
+openfatt-store.workspace = true
+openfatt-pdf.workspace = true
+openfatt-interop.workspace = true
+openfatt-sign.workspace = true
+openfatt-pos.workspace = true
+openfatt-bank.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui_extras = { version = "0.31", features = ["datepicker", "serde"] }
+rfd = "0.15"
+egui-phosphor = "0.9"
+keyring = { version = "3", features = ["windows-native"] }
+ureq = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+png = "0.17"

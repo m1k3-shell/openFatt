@@ -1,0 +1,17 @@
+[package]
+name = "openfatt-interop"
+description = "Importazione/esportazione Easyfatt-XML e CSV"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openfatt-core.workspace = true
+openfatt-fatturapa.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+roxmltree.workspace = true
+rust_xlsxwriter = "0.79"
+calamine = "0.38"
+serde.workspace = true
+serde_json.workspace = true

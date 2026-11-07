@@ -1,0 +1,18 @@
+[package]
+name = "openfatt-sign"
+description = "Firma digitale CAdES-BES (.p7m) delle fatture elettroniche"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+base64.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Time"] }
+
+[dev-dependencies]
+openfatt-fatturapa.workspace = true

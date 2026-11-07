@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["openFatt contributors"]
+
+[workspace.dependencies]
+rust_decimal = { version = "1.36", features = ["serde-with-str"] }
+rust_decimal_macros = "1.36"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+roxmltree = "0.20"
+base64 = "0.22"
+sha2 = "0.10"
+openfatt-core = { path = "crates/openfatt-core" }
+openfatt-fatturapa = { path = "crates/openfatt-fatturapa" }
+openfatt-pec = { path = "crates/openfatt-pec" }
+openfatt-store = { path = "crates/openfatt-store" }
+openfatt-pdf = { path = "crates/openfatt-pdf" }
+openfatt-interop = { path = "crates/openfatt-interop" }
+openfatt-sign = { path = "crates/openfatt-sign" }
+openfatt-pos = { path = "crates/openfatt-pos" }
+openfatt-bank = { path = "crates/openfatt-bank" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+
+[profile.dev.package."*"]
+opt-level = 2

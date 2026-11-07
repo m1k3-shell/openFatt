@@ -1,0 +1,10 @@
+/target
+*.gadb
+*.gadb-wal
+*.gadb-shm
+.taste-skill/
+# documenti ufficiali in PDF e loro estratti: si scaricano dalle fonti (vedi specs/README.md)
+specs/**/*.pdf
+specs/**/*.zip
+specs/doc/*.txt
+specs/lipe/*.txt
