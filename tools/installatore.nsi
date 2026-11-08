@@ -77,7 +77,7 @@ Section "openFatt"
     WriteRegStr HKCU "${CHIAVE}" "DisplayName" "openFatt"
     WriteRegStr HKCU "${CHIAVE}" "DisplayVersion" "${VERSION}"
     WriteRegStr HKCU "${CHIAVE}" "Publisher" "openFatt contributors"
-    WriteRegStr HKCU "${CHIAVE}" "URLInfoAbout" "https://github.com/danielevanzetta-beep/openFatt"
+    WriteRegStr HKCU "${CHIAVE}" "URLInfoAbout" "https://github.com/m1k3-shell/openFatt"
     WriteRegStr HKCU "${CHIAVE}" "DisplayIcon" "$INSTDIR\openfatt.ico"
     WriteRegStr HKCU "${CHIAVE}" "InstallLocation" "$INSTDIR"
     WriteRegStr HKCU "${CHIAVE}" "UninstallString" '"$INSTDIR\Disinstalla.exe"'

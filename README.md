@@ -121,7 +121,7 @@ Si mette l'archivio in una cartella condivisa (`\\server\dati` o un'unità di re
 
 ## Installazione e aggiornamento
 
-Il file `openFatt-Setup-<versione>.exe` si scarica dalle [Releases](https://github.com/danielevanzetta-beep/openFatt/releases). Non chiede diritti di amministratore. Il programma non è firmato digitalmente: al primo avvio Windows può mostrare "Windows ha protetto il PC", si prosegue con *Ulteriori informazioni* → *Esegui comunque*.
+Il file `openFatt-Setup-<versione>.exe` si scarica dalle [Releases](https://github.com/m1k3-shell/openFatt/releases). Non chiede diritti di amministratore. Il programma non è firmato digitalmente: al primo avvio Windows può mostrare "Windows ha protetto il PC", si prosegue con *Ulteriori informazioni* → *Esegui comunque*.
 
 All'avvio il programma chiede a GitHub qual è l'ultima versione e, se ce n'è una più recente, mostra un avviso con il collegamento per scaricarla: GitHub riceve l'indirizzo di rete del computer, nessun dato dell'archivio. Si disattiva in *Opzioni* → *Dati, utenti e postazioni*.
 
