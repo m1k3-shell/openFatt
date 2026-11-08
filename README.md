@@ -119,6 +119,14 @@ Gli elenchi a video si leggono una volta e restano in memoria finché l'archivio
 
 Si mette l'archivio in una cartella condivisa (`\\server\dati` o un'unità di rete) e lo si apre da ogni computer. In rete il programma usa il registro classico di SQLite, compatibile con la condivisione di file, e scritture sincronizzate. Ogni salvataggio controlla la versione del record: nessuna sovrascrittura silenziosa. Chi apre un documento già aperto da un'altra postazione lo vede in sola lettura. Con molte postazioni contemporanee (oltre 5-6) conviene un server con disco veloce e una rete cablata.
 
+## Installazione e aggiornamento
+
+Il file `openFatt-Setup-<versione>.exe` si scarica dalle [Releases](https://github.com/danielevanzetta-beep/openFatt/releases). Non chiede diritti di amministratore. Il programma non è firmato digitalmente: al primo avvio Windows può mostrare "Windows ha protetto il PC", si prosegue con *Ulteriori informazioni* → *Esegui comunque*.
+
+Per aggiornare basta eseguire il file di una versione più recente con openFatt chiuso. Archivi e impostazioni stanno in `Documenti\openFatt` e `%APPDATA%\openFatt`, fuori dalla cartella del programma: né l'aggiornamento né la disinstallazione li toccano.
+
+L'installatore si crea con `tools\crea-installatore.ps1` (serve anche NSIS 3); la versione è quella indicata in `Cargo.toml`.
+
 ## Compilazione e avvio
 
 Serve Rust (stabile) per Windows.

@@ -68,7 +68,8 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("openFatt")
             .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([1000.0, 640.0]),
+            .with_min_inner_size([1000.0, 640.0])
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/openfatt.png")).unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native("openFatt", options, Box::new(|cc| Ok(Box::new(app::OpenFattApp::new(cc)))))

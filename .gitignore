@@ -9,3 +9,4 @@ specs/**/*.zip
 specs/doc/*.txt
 specs/lipe/*.txt
 specs/iva-annuale/*.txt
+/dist
