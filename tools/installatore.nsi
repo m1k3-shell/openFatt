@@ -64,6 +64,7 @@ Section "openFatt"
     SetOutPath "$INSTDIR"
     !insertmacro ATTENDI_CHIUSURA
     File "/oname=openfatt.exe" "${EXE}"
+    File "/oname=openfatt-easyfatt.exe" "${HELPER}"
     File "/oname=openfatt.ico" "${ICON}"
     File "/oname=LICENSE.txt" "${LICENSE}"
     WriteUninstaller "$INSTDIR\Disinstalla.exe"
@@ -87,6 +88,7 @@ SectionEnd
 
 Section "Uninstall"
     !insertmacro ATTENDI_CHIUSURA
+    Delete "$INSTDIR\openfatt-easyfatt.exe"
     Delete "$INSTDIR\openfatt.ico"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\Disinstalla.exe"
