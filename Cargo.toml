@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "app"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 authors = ["openFatt contributors"]
@@ -29,6 +29,7 @@ openfatt-sign = { path = "crates/openfatt-sign" }
 openfatt-pos = { path = "crates/openfatt-pos" }
 openfatt-bank = { path = "crates/openfatt-bank" }
 openfatt-backup = { path = "crates/openfatt-backup" }
+openfatt-update = { path = "crates/openfatt-update" }
 
 [profile.release]
 opt-level = 3

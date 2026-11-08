@@ -53,7 +53,7 @@ pub fn settings_tab(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     if ui.checkbox(&mut check, "Avvisami quando esce una nuova versione").changed() {
         crate::updates::set_enabled(check);
     }
-    ui.label(RichText::new("All'avvio il programma chiede a GitHub qual è l'ultima versione: GitHub riceve l'indirizzo di rete del computer, nessun dato dell'archivio. Vale per questo computer. Non viene installato nulla senza il tuo intervento.").small().color(GRAY));
+    ui.label(RichText::new("All'avvio il programma chiede a GitHub qual è l'ultima versione: GitHub riceve l'indirizzo di rete del computer, nessun dato dell'archivio. Vale per questo computer. Non viene installato nulla senza il tuo consenso e ogni aggiornamento è controllato con una firma digitale.").small().color(GRAY));
     ui.add_space(10.0);
     theme::rule(ui);
     ui.add_space(6.0);

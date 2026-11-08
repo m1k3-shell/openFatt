@@ -9,6 +9,12 @@ SetCompressor /SOLID lzma
 RequestExecutionLevel user
 
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
+
+; /RIAVVIA: aggiornamento partito dal programma, che attende la sua chiusura e poi lo riapre.
+; ISOLATO: solo per le prove, non tocca registro di sistema e collegamenti.
+Var Riavvia
+Var Attese
 
 !define CHIAVE "Software\Microsoft\Windows\CurrentVersion\Uninstall\openFatt"
 
@@ -50,25 +56,58 @@ VIAddVersionKey /LANG=${LANG_ITALIAN} "LegalCopyright" "openFatt contributors - 
 
 ; Il programma aperto blocca il proprio file: finché non viene chiuso non si può sostituire.
 !macro ATTENDI_CHIUSURA
+    StrCpy $Attese 0
     riprova:
     IfFileExists "$INSTDIR\openfatt.exe" 0 libero
     ClearErrors
-    Delete "$INSTDIR\openfatt.exe"
-    IfErrors 0 libero
+    FileOpen $0 "$INSTDIR\openfatt.exe" a
+    IfErrors occupato
+    FileClose $0
+    Goto libero
+    occupato:
+    StrCmp $Riavvia "1" 0 chiedi
+    ; il programma si sta chiudendo: si attende fino a un minuto
+    IntOp $Attese $Attese + 1
+    IntCmp $Attese 120 fallito 0 fallito
+    Sleep 500
+    Goto riprova
+    chiedi:
     MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "openFatt è ancora aperto. Chiuderlo e premere Riprova." /SD IDCANCEL IDRETRY riprova
+    fallito:
     Abort
     libero:
 !macroend
 
+Function .onInit
+    ${GetParameters} $0
+    ClearErrors
+    ${GetOptions} $0 "/RIAVVIA" $1
+    IfErrors +2
+    StrCpy $Riavvia "1"
+FunctionEnd
+
 Section "openFatt"
     SetOutPath "$INSTDIR"
     !insertmacro ATTENDI_CHIUSURA
-    File "/oname=openfatt.exe" "${EXE}"
+    ; la versione precedente si tiene da parte finché la nuova non è al suo posto
+    Delete "$INSTDIR\openfatt.exe.old"
+    Rename "$INSTDIR\openfatt.exe" "$INSTDIR\openfatt.exe.old"
+    ClearErrors
+    File /nonfatal "/oname=openfatt.exe" "${EXE}"
+    IfErrors 0 copiato
+    Delete "$INSTDIR\openfatt.exe"
+    Rename "$INSTDIR\openfatt.exe.old" "$INSTDIR\openfatt.exe"
+    StrCmp $Riavvia "1" 0 +2
+    Exec '"$INSTDIR\openfatt.exe"'
+    Abort
+    copiato:
+    Delete "$INSTDIR\openfatt.exe.old"
     File "/oname=openfatt-easyfatt.exe" "${HELPER}"
     File "/oname=openfatt.ico" "${ICON}"
     File "/oname=LICENSE.txt" "${LICENSE}"
     WriteUninstaller "$INSTDIR\Disinstalla.exe"
 
+    !ifndef ISOLATO
     SetShellVarContext current
     CreateShortcut "$SMPROGRAMS\openFatt.lnk" "$INSTDIR\openfatt.exe" "" "$INSTDIR\openfatt.ico"
     CreateShortcut "$DESKTOP\openFatt.lnk" "$INSTDIR\openfatt.exe" "" "$INSTDIR\openfatt.ico"
@@ -84,6 +123,10 @@ Section "openFatt"
     WriteRegStr HKCU "${CHIAVE}" "QuietUninstallString" '"$INSTDIR\Disinstalla.exe" /S'
     WriteRegDWORD HKCU "${CHIAVE}" "NoModify" 1
     WriteRegDWORD HKCU "${CHIAVE}" "NoRepair" 1
+    !endif
+
+    StrCmp $Riavvia "1" 0 +2
+    Exec '"$INSTDIR\openfatt.exe"'
 SectionEnd
 
 Section "Uninstall"
@@ -92,12 +135,15 @@ Section "Uninstall"
     Delete "$INSTDIR\openfatt.ico"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\Disinstalla.exe"
+    Delete "$INSTDIR\openfatt.exe.old"
     RMDir "$INSTDIR"
 
+    !ifndef ISOLATO
     SetShellVarContext current
     Delete "$SMPROGRAMS\openFatt.lnk"
     Delete "$DESKTOP\openFatt.lnk"
 
     DeleteRegKey HKCU "${CHIAVE}"
     DeleteRegKey HKCU "Software\openFatt"
+    !endif
 SectionEnd

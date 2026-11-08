@@ -1,0 +1,16 @@
+[package]
+name = "openfatt-update"
+description = "Firma e verifica degli aggiornamenti di openFatt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ring = "0.17"
+
+[[bin]]
+name = "openfatt-firma-rilascio"
+path = "src/bin/openfatt-firma-rilascio.rs"

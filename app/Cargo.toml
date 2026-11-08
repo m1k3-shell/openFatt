@@ -20,6 +20,7 @@ openfatt-sign.workspace = true
 openfatt-pos.workspace = true
 openfatt-bank.workspace = true
 openfatt-backup.workspace = true
+openfatt-update.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 serde.workspace = true
@@ -33,6 +34,10 @@ ureq = "2"
 base64.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+
+[features]
+# Solo per le prove: chiave e indirizzi di prova al posto di quelli reali
+prova-aggiornamento = []
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

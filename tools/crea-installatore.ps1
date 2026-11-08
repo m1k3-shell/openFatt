@@ -39,6 +39,12 @@ $icon = Join-Path $root "app\assets\openfatt.ico"
 & $makensis /V2 /WX /INPUTCHARSET UTF8 "/DVERSION=$version" "/DEXE=$exe" "/DHELPER=$helper" "/DICON=$icon" "/DLICENSE=$license" "/DOUTFILE=$out" (Join-Path $root "tools\installatore.nsi")
 if ($LASTEXITCODE -ne 0) { throw "Creazione dell'installatore non riuscita" }
 
+# Firma: la chiave privata resta fuori dal progetto.
+$chiave = if ($env:OPENFATT_CHIAVE_FIRMA) { $env:OPENFATT_CHIAVE_FIRMA } else { Join-Path (Split-Path -Parent $root) "chiave-aggiornamenti\openfatt-firma.key" }
+if (-not (Test-Path $chiave)) { throw "Chiave di firma non trovata: $chiave" }
+cargo run --release -p openfatt-update --bin openfatt-firma-rilascio -- firma $chiave $out $version (Join-Path $dist "openFatt-Update-$version.json")
+if ($LASTEXITCODE -ne 0) { throw "Firma non riuscita" }
+
 $hash = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
 "$hash  openFatt-Setup-$version.exe" | Set-Content -Encoding ascii "$out.sha256"
 Write-Output "Creato $out"

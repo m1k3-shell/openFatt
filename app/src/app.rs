@@ -53,6 +53,8 @@ impl ScriptedClicks {
 }
 
 pub struct OpenFattApp {
+    /// Installatore da avviare alla chiusura del programma
+    update_after_exit: Option<PathBuf>,
     cards: ui::quick::Cards,
     updates: crate::updates::Checker,
     backups: crate::backups::Manager,
@@ -108,6 +110,7 @@ impl OpenFattApp {
         let (mail_tx, mail_rx) = channel();
         let cfg = AppConfig::load();
         let mut app = OpenFattApp {
+            update_after_exit: None,
             cards: Default::default(),
             updates: crate::updates::Checker::start(&cc.egui_ctx),
             cfg,
@@ -273,6 +276,31 @@ impl OpenFattApp {
         app
     }
 
+    /// Copia di sicurezza dell'archivio, poi chiusura e aggiornamento.
+    fn install_update(&mut self, ctx: &egui::Context) {
+        if self.screen == Screen::Editor && self.editor.as_ref().is_some_and(|e| e.dirty) {
+            self.msgs.warn("Il documento aperto ha modifiche non salvate: salvarlo prima di aggiornare");
+            return;
+        }
+        let (installer, version) = match self.updates.checked_installer() {
+            Ok(x) => x,
+            Err(e) => {
+                self.msgs.err(e);
+                return;
+            }
+        };
+        if let Some(store) = &self.store {
+            let stem = store.path().file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let dest = config::backup_dir().join(format!("{} prima di {}.gadb", stem, version));
+            if let Err(e) = openfatt_store::snapshot_archive(store.path(), &dest).and_then(|_| openfatt_store::check_archive(&dest)) {
+                self.msgs.err(format!("Copia di sicurezza non riuscita, aggiornamento annullato: {}", e));
+                return;
+            }
+        }
+        self.update_after_exit = Some(installer);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
     /// Alla chiusura della finestra: si fa la copia e, se qualcosa è fermo da troppo, si avvisa.
     fn closing_flow(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && !self.force_quit && self.store.is_some() && !self.needs_login && self.backups.cfg.enabled && !self.backups.active().is_empty() {
@@ -342,6 +370,7 @@ impl OpenFattApp {
         }
         if stay {
             self.closing = false;
+            self.update_after_exit = None;
         }
         if retry {
             self.backups.fatal = None;
@@ -748,6 +777,11 @@ impl eframe::App for OpenFattApp {
             let _ = store.release_lock("document", e.doc.id);
         }
         self.close_store();
+        if let Some(installer) = self.update_after_exit.take() {
+            if let Err(e) = crate::updates::launch_installer(&installer) {
+                eprintln!("{}", e);
+            }
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -810,24 +844,13 @@ impl eframe::App for OpenFattApp {
             egui::TopBottomPanel::top("toolbar").exact_height(62.0).frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(egui::Margin::symmetric(6, 0))).show(ctx, |ui| {
                 ui::shell::tool_bar(ui, store, &self.cfg.recent, &mut self.search, self.pec_busy.is_some(), self.screen, editor, &self.badges, &mut self.nav);
             });
-            if let Some(update) = self.updates.notice().cloned() {
-                let mut hide = false;
-                egui::TopBottomPanel::top("update_banner").frame(egui::Frame::new().fill(theme::CURRENT).inner_margin(egui::Margin::symmetric(12, 5))).show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("È disponibile openFatt {} (questo computer ha la {}).", update.version, crate::updates::current()));
-                        if theme::ghost(ui, true, theme::icon::ARROW_RIGHT, "Scarica").clicked() {
-                            crate::updates::open_page(&update);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Più tardi").clicked() {
-                                hide = true;
-                            }
-                        });
-                    });
-                });
-                if hide {
-                    self.updates.hide();
-                }
+            let can_update = self.user.as_ref().is_none_or(|u| u.can_write(openfatt_store::Area::Settings));
+            match self.updates.banner(ctx, can_update) {
+                Some(crate::updates::Action::Download) => self.updates.download(ctx),
+                Some(crate::updates::Action::Install) => self.install_update(ctx),
+                Some(crate::updates::Action::OpenPage) => self.updates.open_page(),
+                Some(crate::updates::Action::Hide) => self.updates.hide(),
+                None => {}
             }
             if let Some(msg) = self.backups.banner() {
                 let mut hide = false;
