@@ -5,8 +5,9 @@ use openfatt_core::money::fmt_it_trim;
 use openfatt_store::{Card, CardKind, LoyaltySettings};
 use rust_decimal::Decimal;
 
+use super::grid::{Col, Grid, Val};
 use super::theme::{self, icon, Tone};
-use super::widgets::{self, eur, GRAY, ORANGE};
+use super::widgets::{self, eur, GRAY};
 use super::Ctx;
 
 #[derive(Default)]
@@ -18,6 +19,7 @@ pub struct State {
     mv_amount: Decimal,
     mv_note: String,
     settings: Option<LoyaltySettings>,
+    grid: Grid,
 }
 
 pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
@@ -52,27 +54,29 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     });
     let list = cx.store.cards(None, &st.search).unwrap_or_default();
     ui.horizontal_top(|ui| {
-        egui::ScrollArea::vertical().id_salt("cards").max_width(560.0).show(ui, |ui| {
-            egui::Grid::new("cards_grid").striped(true).num_columns(5).spacing([14.0, 4.0]).show(ui, |ui| {
-                for h in ["Codice", "Tipo", "Intestatario", "Saldo", "Scadenza"] {
-                    ui.label(RichText::new(h).strong());
-                }
-                ui.end_row();
-                for c in &list {
-                    let (p, a) = cx.store.card_balance(c.id).unwrap_or_default();
-                    if ui.selectable_label(st.selected == Some(c.id), &c.code).clicked() {
-                        st.selected = Some(c.id);
-                    }
-                    ui.label(if c.kind == CardKind::Gift { "Buono" } else { "Fedeltà" });
-                    let holder = c.party_id.and_then(|id| cx.store.party(id).ok().flatten()).map(|p| p.display_name()).unwrap_or_else(|| c.holder.clone());
-                    ui.label(widgets::truncate(&holder, 26));
-                    ui.label(if c.kind == CardKind::Gift { format!("€ {}", eur(a)) } else { format!("{} punti", fmt_it_trim(p, 0, 0)) });
-                    let expired = c.expiry.map(|e| e < today).unwrap_or(false);
-                    ui.label(RichText::new(c.expiry.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_else(|| "-".into())).color(if expired { ORANGE } else { GRAY }));
-                    ui.end_row();
-                }
-            });
+        type CardRow = (Card, Decimal, Decimal, String);
+        let rows: Vec<CardRow> = list.iter().map(|c| {
+            let (p, a) = cx.store.card_balance(c.id).unwrap_or_default();
+            let holder = c.party_id.and_then(|id| cx.store.party(id).ok().flatten()).map(|p| p.display_name()).unwrap_or_else(|| c.holder.clone());
+            (c.clone(), p, a, holder)
+        }).collect();
+        let cols: Vec<Col<CardRow>> = vec![
+            Col::text("code", "Codice", 110.0, |r: &CardRow| r.0.code.clone()),
+            Col::text("kind", "Tipo", 70.0, |r: &CardRow| if r.0.kind == CardKind::Gift { "Buono".to_string() } else { "Fedeltà".to_string() }).group(),
+            Col::text("holder", "Intestatario", 170.0, |r: &CardRow| r.3.clone()).opens(|r: &CardRow| r.0.party_id.map(super::quick::Ref::Party)),
+            Col::new("balance", "Saldo", 90.0, |r: &CardRow| if r.0.kind == CardKind::Gift { Val::Money(r.2) } else { Val::Num(r.1, 0) }).right(),
+            Col::new("expiry", "Scadenza", 90.0, |r: &CardRow| Val::Date(r.0.expiry)),
+            Col::new("active", "Attiva", 60.0, |r: &CardRow| Val::Bool(r.0.active)).hidden().group(),
+        ];
+        st.grid.name = "carte";
+        let h = ui.available_height();
+        ui.allocate_ui_with_layout(egui::vec2(590.0, h), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.horizontal(|ui| st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &rows, "Carte e buoni"));
+            st.grid.version = 0;
+            let h = ui.available_height() - 4.0;
+            st.grid.show(ui, cx.store, &cols, &rows, |r| r.0.id, h, false, 22.0);
         });
+        st.selected = st.grid.single();
         ui.add_space(12.0);
         let Some(c) = st.selected.and_then(|id| list.iter().find(|c| c.id == id)).cloned() else { return };
         theme::card_frame().show(ui, |ui| ui.vertical(|ui| {

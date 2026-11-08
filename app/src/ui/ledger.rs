@@ -3,6 +3,9 @@
 use chrono::{Datelike, NaiveDate};
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
+use super::grid::{Col, Grid, Val};
+use super::quick::{self, Ref};
+use openfatt_store::DueRow;
 use openfatt_core::codes;
 use openfatt_core::model::CashEntry;
 use rust_decimal::Decimal;
@@ -55,6 +58,8 @@ pub struct State {
     cash_to: NaiveDate,
     cash_account: Option<String>,
     new_entry: Option<(CashEntry, bool)>,
+    due_grid: Grid,
+    cash_grid: Grid,
 }
 
 impl Default for State {
@@ -75,6 +80,8 @@ impl Default for State {
             cash_to: NaiveDate::from_ymd_opt(today.year(), 12, 31).unwrap(),
             cash_account: None,
             new_entry: None,
+            due_grid: Grid::new("scadenzario"),
+            cash_grid: Grid::new("prima-nota"),
         }
     }
 }
@@ -216,73 +223,82 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             q.is_empty() || d.party_name.to_lowercase().contains(&q) || d.doc_label.to_lowercase().contains(&q)
         })
         .collect();
-    let overdue: Decimal = list.iter().filter(|d| d.date < today).map(|d| d.residual()).sum();
-    let total: Decimal = list.iter().map(|d| d.residual()).sum();
-    ui.label(RichText::new(format!("Residuo totale € {}   ·   di cui scaduto € {}", eur(total), eur(overdue))).strong());
-
-    let avail = ui.available_height();
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .max_scroll_height(avail)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::initial(90.0))
-        .column(Column::initial(240.0))
-        .column(Column::initial(260.0).at_least(100.0))
-        .column(Column::initial(120.0))
-        .column(Column::initial(90.0))
-        .column(Column::initial(90.0))
-        .column(Column::remainder())
-        .header(22.0, |mut h| {
-            for t in ["Scadenza", "Documento", "Soggetto", "Modalità", "Importo", "Residuo", ""] {
-                h.col(|ui| {
-                    ui.strong(t);
-                });
+    #[derive(Clone, Copy)]
+    enum DueAction {
+        Open(i64),
+        Pay(i64),
+        Unpay(i64),
+    }
+    let action = std::cell::Cell::new(None);
+    let act = &action;
+    let color = move |d: &DueRow| if d.residual() <= Decimal::ZERO { GREEN } else if d.date < today { RED } else if d.date <= today + chrono::Duration::days(7) { ORANGE } else { ui_text() };
+    let cols: Vec<Col<DueRow>> = vec![
+        Col::new("date", "Scadenza", 90.0, |d: &DueRow| Val::Date(Some(d.date))).render(move |ui: &mut egui::Ui, d: &DueRow| {
+            ui.label(RichText::new(d.date.format("%d/%m/%Y").to_string()).color(color(d)));
+        }),
+        Col::text("doc", "Documento", 240.0, |d: &DueRow| d.doc_label.clone()).render(move |ui: &mut egui::Ui, d: &DueRow| {
+            if ui.link(&d.doc_label).clicked() {
+                act.set(Some(DueAction::Open(d.document_id)));
             }
-        })
-        .body(|body| {
-            body.rows(24.0, list.len(), |mut row| {
-                let d = &list[row.index()];
-                let color = if d.residual() <= Decimal::ZERO { GREEN } else if d.date < today { RED } else if d.date <= today + chrono::Duration::days(7) { ORANGE } else { ui_text() };
-                row.col(|ui| {
-                    ui.label(RichText::new(d.date.format("%d/%m/%Y").to_string()).color(color));
-                });
-                row.col(|ui| {
-                    if ui.link(&d.doc_label).clicked() {
-                        cx.nav.push(Nav::OpenDocument(d.document_id));
-                    }
-                    if d.draft {
-                        theme::pill(ui, "bozza", Tone::Warning);
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(&d.party_name);
-                });
-                row.col(|ui| {
-                    ui.label(codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code));
-                    if d.batch_id.is_some() {
-                        theme::pill(ui, "in distinta", Tone::Neutral).on_hover_text("Presentata in banca con una distinta (Pagamenti > Distinte emesse)");
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(eur(d.amount));
-                });
-                row.col(|ui| {
-                    ui.label(RichText::new(eur(d.residual())).color(color));
-                    if !d.writeoff.is_zero() {
-                        ui.label(RichText::new(format!("(abbuono {})", eur(d.writeoff))).small().color(GRAY));
-                    }
-                });
-                row.col(|ui| {
-                    if d.residual() > Decimal::ZERO && ui.small_button(if d.receivable { "Incassa" } else { "Paga" }).clicked() {
-                        st.paying = Some((d.id, today, d.residual(), "Banca".into(), false, format!("{} - {}", d.doc_label, d.party_name)));
-                    }
-                    if (!d.paid.is_zero() || !d.writeoff.is_zero()) && ui.small_button("Annulla pag.").clicked() {
-                        st.confirm_unpay = Some(d.id);
-                    }
-                });
+            if d.draft {
+                theme::pill(ui, "bozza", Tone::Warning);
+            }
+        }),
+        Col::text("party", "Soggetto", 260.0, |d: &DueRow| d.party_name.clone()).group().opens(|d: &DueRow| d.party_id.map(Ref::Party)),
+        Col::text("dir", "Tipo", 80.0, |d: &DueRow| if d.receivable { "Entrata".to_string() } else { "Uscita".to_string() }).hidden().group(),
+        Col::text("kind", "Documento di", 140.0, |d: &DueRow| d.kind.label().to_string()).hidden().group(),
+        Col::text("mp", "Modalità", 140.0, |d: &DueRow| codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code).to_string()).group().render(|ui: &mut egui::Ui, d: &DueRow| {
+            ui.label(codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code));
+            if d.batch_id.is_some() {
+                theme::pill(ui, "in distinta", Tone::Neutral).on_hover_text("Presentata in banca con una distinta (Pagamenti > Distinte emesse)");
+            }
+        }),
+        Col::money("amount", "Importo", 95.0, |d: &DueRow| d.amount).total(),
+        Col::money("paid", "Pagato", 95.0, |d: &DueRow| d.paid).hidden().total(),
+        Col::money("res", "Residuo", 95.0, |d: &DueRow| d.residual()).total().render(move |ui: &mut egui::Ui, d: &DueRow| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                ui.label(RichText::new(eur(d.residual())).color(color(d)));
+                if !d.writeoff.is_zero() {
+                    ui.label(RichText::new(format!("(abbuono {})", eur(d.writeoff))).small().color(GRAY));
+                }
             });
+        }),
+        Col::new("late", "Giorni di ritardo", 90.0, move |d: &DueRow| Val::Num(Decimal::from((today - d.date).num_days().max(0)), 0)).hidden().right(),
+        Col::text("act", "", 170.0, |_: &DueRow| String::new()).render(move |ui: &mut egui::Ui, d: &DueRow| {
+            if d.residual() > Decimal::ZERO && ui.small_button(if d.receivable { "Incassa" } else { "Paga" }).clicked() {
+                act.set(Some(DueAction::Pay(d.id)));
+            }
+            if (!d.paid.is_zero() || !d.writeoff.is_zero()) && ui.small_button("Annulla pag.").clicked() {
+                act.set(Some(DueAction::Unpay(d.id)));
+            }
+        }),
+    ];
+    ui.horizontal(|ui| {
+        let visible: Vec<&DueRow> = list.iter().filter(|d| st.due_grid.accepts(&cols, d)).collect();
+        let overdue: Decimal = visible.iter().filter(|d| d.date < today).map(|d| d.residual()).sum();
+        let total: Decimal = visible.iter().map(|d| d.residual()).sum();
+        ui.label(RichText::new(format!("Residuo totale € {}   ·   di cui scaduto € {}", eur(total), eur(overdue))).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.due_grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Scadenzario");
         });
+    });
+    let avail = ui.available_height() - 4.0;
+    st.due_grid.version = 0;
+    let ev = st.due_grid.show(ui, cx.store, &cols, &list, |d| d.id, avail, false, 24.0);
+    if let Some(d) = ev.opened.and_then(|id| list.iter().find(|d| d.id == id)) {
+        cx.nav.push(Nav::OpenDocument(d.document_id));
+    }
+    match action.get() {
+        Some(DueAction::Open(id)) => cx.nav.push(Nav::OpenDocument(id)),
+        Some(DueAction::Pay(id)) => {
+            if let Some(d) = list.iter().find(|d| d.id == id) {
+                st.paying = Some((d.id, today, d.residual(), "Banca".into(), false, format!("{} - {}", d.doc_label, d.party_name)));
+            }
+        }
+        Some(DueAction::Unpay(id)) => st.confirm_unpay = Some(id),
+        None => {}
+    }
 }
 
 /// Clienti con pagamenti scaduti: scelta e preparazione dei solleciti.
@@ -368,7 +384,14 @@ fn reminders(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, list: &[ReminderCa
                         }
                     });
                     row.col(|ui| {
-                        ui.label(theme::medium(&c.party_name));
+                        match c.party_id {
+                            Some(id) => {
+                                quick::link(ui, c.party_name.clone(), Ref::Party(id));
+                            }
+                            None => {
+                                ui.label(theme::medium(&c.party_name));
+                            }
+                        }
                     });
                     row.col(|ui| {
                         if !c.email.is_empty() {
@@ -512,68 +535,48 @@ pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         }
     });
     let list = cx.store.cash_entries(Some(st.cash_from), Some(st.cash_to), st.cash_account.as_deref()).unwrap_or_default();
-    let ins: Decimal = list.iter().filter(|e| e.amount > Decimal::ZERO).map(|e| e.amount).sum();
-    let outs: Decimal = list.iter().filter(|e| e.amount < Decimal::ZERO).map(|e| -e.amount).sum();
-    ui.label(format!("Nel periodo: entrate € {} · uscite € {} · saldo € {}", eur(ins), eur(outs), eur(ins - outs)));
-    let mut delete = None;
-    let avail = ui.available_height();
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .max_scroll_height(avail)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::initial(90.0))
-        .column(Column::initial(380.0).at_least(100.0))
-        .column(Column::initial(110.0))
-        .column(Column::initial(130.0))
-        .column(Column::initial(100.0))
-        .column(Column::initial(100.0))
-        .column(Column::remainder())
-        .header(22.0, |mut h| {
-            for t in ["Data", "Descrizione", "Conto", "Categoria", "Entrate", "Uscite", ""] {
-                h.col(|ui| {
-                    ui.strong(t);
-                });
+    let delete_req = std::cell::Cell::new(None);
+    let open_req = std::cell::Cell::new(None);
+    let (delete_ref, open_ref) = (&delete_req, &open_req);
+    let cols: Vec<Col<CashEntry>> = vec![
+        Col::new("date", "Data", 90.0, |e: &CashEntry| Val::Date(Some(e.date))),
+        Col::text("desc", "Descrizione", 380.0, |e: &CashEntry| e.description.clone()).render(move |ui: &mut egui::Ui, e: &CashEntry| match e.document_id {
+            Some(d) => {
+                if ui.link(&e.description).clicked() {
+                    open_ref.set(Some(d));
+                }
             }
-        })
-        .body(|body| {
-            body.rows(22.0, list.len(), |mut row| {
-                let e = &list[row.index()];
-                row.col(|ui| {
-                    ui.label(e.date.format("%d/%m/%Y").to_string());
-                });
-                row.col(|ui| {
-                    if let Some(d) = e.document_id {
-                        if ui.link(&e.description).clicked() {
-                            cx.nav.push(Nav::OpenDocument(d));
-                        }
-                    } else {
-                        ui.label(&e.description);
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(&e.account);
-                });
-                row.col(|ui| {
-                    ui.label(&e.category);
-                });
-                row.col(|ui| {
-                    if e.amount > Decimal::ZERO {
-                        ui.label(RichText::new(eur(e.amount)).color(GREEN));
-                    }
-                });
-                row.col(|ui| {
-                    if e.amount < Decimal::ZERO {
-                        ui.label(RichText::new(eur(-e.amount)).color(RED));
-                    }
-                });
-                row.col(|ui| {
-                    if e.due_date_id.is_none() && ui.small_button("\u{E4A6}").clicked() {
-                        delete = Some(e.id);
-                    }
-                });
-            });
+            None => {
+                ui.label(&e.description);
+            }
+        }),
+        Col::text("account", "Conto", 110.0, |e: &CashEntry| e.account.clone()).group(),
+        Col::text("cat", "Categoria", 130.0, |e: &CashEntry| e.category.clone()).group(),
+        Col::text("month", "Mese", 80.0, |e: &CashEntry| e.date.format("%Y-%m").to_string()).hidden().group(),
+        Col::money("in", "Entrate", 100.0, |e: &CashEntry| e.amount.max(Decimal::ZERO)).total(),
+        Col::money("out", "Uscite", 100.0, |e: &CashEntry| (-e.amount).max(Decimal::ZERO)).total(),
+        Col::text("act", "", 34.0, |_: &CashEntry| String::new()).render(move |ui: &mut egui::Ui, e: &CashEntry| {
+            if e.due_date_id.is_none() && ui.small_button("\u{E4A6}").clicked() {
+                delete_ref.set(Some(e.id));
+            }
+        }),
+    ];
+    ui.horizontal(|ui| {
+        let visible: Vec<&CashEntry> = list.iter().filter(|e| st.cash_grid.accepts(&cols, e)).collect();
+        let ins: Decimal = visible.iter().filter(|e| e.amount > Decimal::ZERO).map(|e| e.amount).sum();
+        let outs: Decimal = visible.iter().filter(|e| e.amount < Decimal::ZERO).map(|e| -e.amount).sum();
+        ui.label(format!("Nel periodo: entrate € {} · uscite € {} · saldo € {}", eur(ins), eur(outs), eur(ins - outs)));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.cash_grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Prima nota");
         });
+    });
+    let avail = ui.available_height() - 4.0;
+    st.cash_grid.version = 0;
+    st.cash_grid.show(ui, cx.store, &cols, &list, |e| e.id, avail, false, 22.0);
+    if let Some(d) = open_req.get() {
+        cx.nav.push(Nav::OpenDocument(d));
+    }
+    let delete = delete_req.get();
     if let Some(id) = delete {
         cx.msgs.check(cx.store.delete_cash_entry(id), "Movimento eliminato");
     }

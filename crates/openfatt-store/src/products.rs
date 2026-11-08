@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use rusqlite::{params, OptionalExtension};
 use rust_decimal::Decimal;
 
-use openfatt_core::model::{Product, StockMove, Tracking};
+use openfatt_core::calc;
+use openfatt_core::model::{DocKind, Product, StockMove, Tracking};
 
 use crate::{date_from_sql, date_to_sql, dec_from_sql, dec_to_sql, now_sql, Result, Store, StoreError};
 
@@ -17,6 +18,48 @@ pub struct StockRow {
     pub incoming: Decimal,
     pub value: Decimal,
     pub under_min: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StockState {
+    #[default]
+    Regular,
+    UnderMin,
+    OutOfStock,
+}
+
+impl StockState {
+    pub fn label(self) -> &'static str {
+        match self {
+            StockState::Regular => "Regolare",
+            StockState::UnderMin => "Sotto scorta",
+            StockState::OutOfStock => "Esaurito",
+        }
+    }
+}
+
+/// Situazione di magazzino di un articolo.
+#[derive(Debug, Clone, Default)]
+pub struct StockInfo {
+    pub state: StockState,
+    pub stock: Decimal,
+    pub loaded: Decimal,
+    pub unloaded: Decimal,
+    /// Impegnata da ordini clienti emessi e non evasi
+    pub committed: Decimal,
+    /// Disponibile: giacenza meno impegnata
+    pub available: Decimal,
+    /// In arrivo da ordini fornitori
+    pub incoming: Decimal,
+    pub monthly_sales: Decimal,
+    pub run_out: Option<chrono::NaiveDate>,
+    pub next_order: Option<chrono::NaiveDate>,
+    pub first_load: Option<chrono::NaiveDate>,
+    pub last_load: Option<chrono::NaiveDate>,
+    pub last_unload: Option<chrono::NaiveDate>,
+    pub avg_cost: Option<Decimal>,
+    pub last_cost: Option<Decimal>,
+    pub avg_sale: Option<Decimal>,
 }
 
 impl Store {
@@ -225,21 +268,117 @@ impl Store {
     }
 
     /// Quantità residue da evadere degli ordini emessi, per articolo.
-    fn open_orders(&self, kind: &str) -> Result<HashMap<i64, Decimal>> {
+    /// Le righe con la spunta "in arrivo" o "impegnata" tolta non contano.
+    fn open_orders(&self, kind: &str, product: Option<i64>) -> Result<HashMap<i64, Decimal>> {
         let mut st = self.conn().prepare(
-            "SELECT l.id, l.product_id, l.qty FROM doc_lines l JOIN documents d ON d.id = l.document_id
-             WHERE d.kind = ?1 AND d.status = 'EMESSO' AND l.product_id IS NOT NULL",
+            "SELECT json_extract(j.value, '$.id'), json_extract(j.value, '$.product_id'), json_extract(j.value, '$.qty'),
+                    json_extract(j.value, '$.arrived_qty'), COALESCE(json_extract(j.value, '$.not_incoming'), 0)
+             FROM documents d, json_each(d.data, '$.lines') j
+             WHERE d.kind = ?1 AND d.status = 'EMESSO' AND json_extract(j.value, '$.product_id') IS NOT NULL
+               AND (?2 IS NULL OR json_extract(j.value, '$.product_id') = ?2)",
         )?;
-        let rows = st.query_map([kind], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))?;
+        let rows = st.query_map(params![kind, product], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?)))?;
         let mut m: HashMap<i64, Decimal> = HashMap::new();
         for r in rows {
-            let (line_id, pid, q) = r?;
-            let residual = dec_from_sql(Some(q)) - self.fulfilled_qty(line_id)?;
+            let (line_id, pid, q, arrived, excluded) = r?;
+            if excluded != 0 {
+                continue;
+            }
+            let residual = dec_from_sql(Some(q)) - dec_from_sql(arrived) - self.fulfilled_qty(line_id)?;
             if residual > Decimal::ZERO {
                 *m.entry(pid).or_default() += residual;
             }
         }
         Ok(m)
+    }
+
+    /// Stato completo del magazzino di un articolo: quantità, andamento, date e valori.
+    pub fn stock_info(&self, product: &Product, today: chrono::NaiveDate) -> Result<StockInfo> {
+        let mut info = StockInfo::default();
+        let mut st = self.conn().prepare("SELECT date, qty, unit_value FROM stock_moves WHERE product_id = ?1 ORDER BY date, id")?;
+        let rows = st.query_map([product.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
+        let (mut value, mut valued) = (Decimal::ZERO, Decimal::ZERO);
+        for row in rows {
+            let (date, qty, unit) = row?;
+            let (date, qty, unit) = (date_from_sql(&date), dec_from_sql(Some(qty)), dec_from_sql(unit));
+            info.stock += qty;
+            if qty > Decimal::ZERO {
+                info.loaded += qty;
+                info.first_load = info.first_load.or(Some(date));
+                info.last_load = Some(date);
+                if unit > Decimal::ZERO {
+                    value += qty * unit;
+                    valued += qty;
+                    info.last_cost = Some(unit);
+                }
+            } else if qty < Decimal::ZERO {
+                info.unloaded -= qty;
+                info.last_unload = Some(date);
+            }
+        }
+        if !valued.is_zero() {
+            info.avg_cost = Some((value / valued).round_dp(4));
+        }
+        info.committed = self.open_orders("ORC", Some(product.id))?.get(&product.id).copied().unwrap_or_default();
+        info.incoming = self.open_orders("ORF", Some(product.id))?.get(&product.id).copied().unwrap_or_default();
+        info.available = info.stock - info.committed;
+        const DAYS_PER_MONTH: f64 = 30.4375;
+        let days_in_stock = info.first_load.map(|d| (today - d).num_days()).unwrap_or(0).max(31);
+        if info.first_load.is_some() {
+            let months = Decimal::from(days_in_stock) / Decimal::try_from(DAYS_PER_MONTH).unwrap_or(Decimal::from(30));
+            info.monthly_sales = (info.unloaded / months).round_dp(4);
+        }
+        if info.monthly_sales > Decimal::ZERO && info.available > Decimal::ZERO {
+            let per_day = info.monthly_sales / Decimal::try_from(DAYS_PER_MONTH).unwrap_or(Decimal::from(30));
+            let days = |q: Decimal| rust_decimal::prelude::ToPrimitive::to_i64(&(q / per_day)).unwrap_or(0);
+            info.run_out = Some(today + chrono::Duration::days(days(info.available)));
+            let above_min = (info.available - product.min_stock).max(Decimal::ZERO);
+            info.next_order = Some(today + chrono::Duration::days((days(above_min) - product.order_days as i64).max(0)));
+        }
+        info.avg_sale = self.average_sale_price(product.id)?;
+        info.state = if info.stock <= Decimal::ZERO {
+            StockState::OutOfStock
+        } else if !product.min_stock.is_zero() && info.available < product.min_stock {
+            StockState::UnderMin
+        } else {
+            StockState::Regular
+        };
+        Ok(info)
+    }
+
+    /// Prezzo medio netto di vendita, ponderato sulle quantità dei documenti emessi.
+    fn average_sale_price(&self, product_id: i64) -> Result<Option<Decimal>> {
+        let mut st = self.conn().prepare(
+            "SELECT json_extract(j.value, '$.qty'), json_extract(j.value, '$.unit_price'), COALESCE(json_extract(j.value, '$.discounts'), ''),
+                    COALESCE(json_extract(j.value, '$.vat.rate'), '0'), COALESCE(json_extract(d.data, '$.prices_include_vat'), 0), d.kind
+             FROM doc_lines l JOIN documents d ON d.id = l.document_id, json_each(d.data, '$.lines') j
+             WHERE l.product_id = ?1 AND d.status = 'EMESSO' AND json_extract(j.value, '$.id') = l.id
+               AND EXISTS (SELECT 1 FROM stock_moves m WHERE m.document_id = d.id AND m.product_id = l.product_id)",
+        )?;
+        let rows = st.query_map([product_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, String>(5)?)))?;
+        let (mut amount, mut qty) = (Decimal::ZERO, Decimal::ZERO);
+        for row in rows {
+            let (q, price, discounts, rate, gross, kind) = row?;
+            let kind = DocKind::from_code(&kind).unwrap_or_default();
+            if kind.stock_effect() >= 0 || !kind.is_sale() {
+                continue;
+            }
+            let q = dec_from_sql(Some(q));
+            let mut net = calc::apply_cascade(dec_from_sql(Some(price)), &calc::parse_discounts(&discounts).unwrap_or_default());
+            if gross != 0 {
+                net /= Decimal::ONE + dec_from_sql(Some(rate)) / Decimal::ONE_HUNDRED;
+            }
+            amount += q * net;
+            qty += q;
+        }
+        Ok((!qty.is_zero()).then(|| (amount / qty).round_dp(4)))
+    }
+
+    /// Causali già usate nei movimenti manuali.
+    pub fn manual_stock_reasons(&self) -> Result<Vec<String>> {
+        let mut st = self.conn().prepare("SELECT DISTINCT reason FROM stock_moves WHERE document_id IS NULL AND reason IS NOT NULL AND reason <> '' ORDER BY reason LIMIT 40")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn stock_report(&self, search: &str, warehouse: Option<&str>) -> Result<Vec<StockRow>> {
@@ -256,8 +395,8 @@ impl Store {
                 m
             }
         };
-        let ordered = self.open_orders("ORC")?;
-        let incoming = self.open_orders("ORF")?;
+        let ordered = self.open_orders("ORC", None)?;
+        let incoming = self.open_orders("ORF", None)?;
         let mut out = Vec::new();
         for p in self.products(search, false)? {
             if !p.manage_stock {
@@ -358,6 +497,11 @@ impl Store {
 
     /// Imposta la giacenza a un valore contato (inventario), generando la rettifica.
     pub fn set_inventory(&self, product_id: i64, counted: Decimal, date: chrono::NaiveDate, warehouse: &str) -> Result<Option<i64>> {
+        self.adjust_stock(product_id, counted, date, warehouse, "Rettifica inventario")
+    }
+
+    /// Porta la giacenza del magazzino al valore indicato, con la causale scelta.
+    pub fn adjust_stock(&self, product_id: i64, counted: Decimal, date: chrono::NaiveDate, warehouse: &str, reason: &str) -> Result<Option<i64>> {
         let warehouse = self.resolve_warehouse(warehouse)?;
         let current = self.stock_in(product_id, &warehouse)?;
         let diff = counted - current;
@@ -368,7 +512,7 @@ impl Store {
         if product.tracking != Tracking::None || !product.variants.is_empty() {
             return Err(StoreError::Invalid("Per articoli con varianti, lotti o seriali registrare carichi e scarichi indicando variante/lotto/seriale".into()));
         }
-        let m = StockMove { date, product_id, qty: diff, reason: "Rettifica inventario".into(), warehouse, ..Default::default() };
+        let m = StockMove { date, product_id, qty: diff, reason: reason.to_string(), warehouse, ..Default::default() };
         Ok(Some(self.add_manual_stock_move(&m)?))
     }
 

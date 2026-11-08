@@ -7,6 +7,8 @@ use openfatt_store::{FlowRow, StatBy, StatRow};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
+use super::grid::{Col, Grid, Val};
+use super::quick::Ref;
 use super::theme::{self, icon};
 use super::widgets::{self, eur, GRAY, RED};
 use super::Ctx;
@@ -20,12 +22,14 @@ pub struct State {
     months: Option<(u64, i32, Vec<(u32, Decimal, Decimal)>)>,
     flows: Option<(u64, Vec<FlowRow>)>,
     tab: u8,
+    grid: Grid,
+    codes: super::Cache<(), std::collections::HashMap<String, i64>>,
 }
 
 impl Default for State {
     fn default() -> Self {
         let today = chrono::Local::now().date_naive();
-        State { by: StatBy::Customer, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, year: today.year(), cache: None, months: None, flows: None, tab: 0 }
+        State { by: StatBy::Customer, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, year: today.year(), cache: None, months: None, flows: None, tab: 0, grid: Grid::new("statistiche"), codes: Default::default() }
     }
 }
 
@@ -138,24 +142,35 @@ fn breakdown(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, gen: u64) {
         let vals: Vec<f64> = top.iter().map(|r| r.revenue.to_f64().unwrap_or(0.0)).collect();
         theme::bar_chart(ui, &labels, &vals, 160.0, |v| format!("€ {}", openfatt_core::money::fmt_it(Decimal::from_f64_retain(v).unwrap_or_default(), 0)));
     }
-    egui::ScrollArea::vertical().id_salt("stat_rows").show(ui, |ui| {
-        egui::Grid::new("stat_grid").striped(true).num_columns(7).spacing([20.0, 4.0]).show(ui, |ui| {
-            for h in [by_label(st.by), "Quantità", if st.by == StatBy::Supplier { "Acquistato" } else { "Venduto" }, "Costo", "Margine", "Margine %", "Documenti"] {
-                ui.label(RichText::new(h).strong());
-            }
-            ui.end_row();
-            for r in &rows {
-                ui.label(widgets::truncate(&r.label, 50));
-                ui.label(fmt_it_trim(r.qty, 0, 2));
-                ui.label(eur(r.revenue));
-                ui.label(RichText::new(eur(r.cost)).color(GRAY));
-                ui.label(eur(r.margin()));
-                ui.label(r.margin_pct().map(|m| format!("{}%", fmt_it_trim(m, 0, 1))).unwrap_or_else(|| "-".into()));
-                ui.label(r.documents.to_string());
-                ui.end_row();
-            }
+    let by = st.by;
+    let codes_rc = st.codes.get(cx.store.generation(), &(), || cx.store.products("", true).unwrap_or_default().into_iter().map(|p| (p.code, p.id)).collect());
+    let codes: &std::collections::HashMap<String, i64> = &codes_rc;
+    let cols: Vec<Col<StatRow>> = vec![
+        Col::text("label", by_label(by), 320.0, |r: &StatRow| r.label.clone()).opens(move |r: &StatRow| match by {
+            StatBy::Customer | StatBy::Supplier => r.key.parse().ok().map(Ref::Party),
+            StatBy::Product => codes.get(&r.key).copied().map(Ref::Product),
+            _ => None,
+        }),
+        Col::new("qty", "Quantità", 90.0, |r: &StatRow| Val::Num(r.qty, 2)).right().total(),
+        Col::money("revenue", if by == StatBy::Supplier { "Acquistato" } else { "Venduto" }, 110.0, |r: &StatRow| r.revenue).total(),
+        Col::money("cost", "Costo", 100.0, |r: &StatRow| r.cost).total(),
+        Col::money("margin", "Margine", 100.0, |r: &StatRow| r.margin()).total(),
+        Col::new("margin_pct", "Margine %", 80.0, |r: &StatRow| r.margin_pct().map(|m| Val::Num(m, 1)).unwrap_or(Val::Text(String::new()))).right(),
+        Col::new("docs", "Documenti", 80.0, |r: &StatRow| Val::Num(Decimal::from(r.documents as i64), 0)).right(),
+    ];
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &rows, "Statistiche");
         });
     });
+    let h = ui.available_height() - 4.0;
+    st.grid.version = 0;
+    st.grid.show(ui, cx.store, &cols, &rows, |r| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        r.key.hash(&mut h);
+        (h.finish() >> 1) as i64
+    }, h, false, 22.0);
 }
 
 fn flows(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, gen: u64) {

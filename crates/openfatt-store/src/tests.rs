@@ -622,3 +622,74 @@ fn prezzi_di_un_listino_per_molti_articoli() {
     assert!(s.product_list_overrides(a.id).unwrap().is_empty());
     assert_eq!(s.base_list_name(), "Prezzo base");
 }
+
+#[test]
+fn ordine_fornitore_pezzi_arrivati_a_mano_e_collegati() {
+    let (s, _, p, v) = setup();
+    let f = s.save_party(&Party { role: PartyRole::Supplier, name: "Fornitore".into(), vat_number: "12345678903".into(), ..Default::default() }).unwrap();
+    let mut o = Document::new(DocKind::SupplierOrder);
+    o.party_id = Some(f.id);
+    o.lines.push(DocLine { arrived_qty: dec!(4), ..line(&p, dec!(10), &v) });
+    let o = s.save_document(&o).unwrap();
+    let o = s.issue_document(o.id).unwrap();
+    let in_arrivo = |s: &Store| s.stock_report("", None).unwrap().into_iter().find(|r| r.product.id == p.id).unwrap().incoming;
+    // articolo a magazzino: conta il residuo, non l'ordinato
+    assert_eq!(in_arrivo(&s), dec!(6));
+    let pr = s.order_progress(&[DocKind::SupplierOrder]).unwrap();
+    assert!(pr[&o.id].any && !pr[&o.id].all);
+    assert_eq!((pr[&o.id].ordered, pr[&o.id].arrived), (dec!(10), dec!(4)));
+    // l'arrivo merce propone solo quanto manca e non eredita i pezzi segnati
+    let mut a = s.transform(&[o.id], DocKind::GoodsReceipt).unwrap();
+    let item = a.lines.iter_mut().find(|l| l.kind == LineKind::Item).unwrap();
+    assert_eq!((item.qty, item.arrived_qty), (dec!(6), dec!(0)));
+    item.qty = dec!(2);
+    s.save_document(&a).unwrap();
+    assert_eq!(in_arrivo(&s), dec!(4));
+    let linked = s.linked_arrivals(o.id).unwrap();
+    assert_eq!(linked[&o.lines[0].id], dec!(2));
+    let pr = s.order_progress(&[DocKind::SupplierOrder]).unwrap();
+    assert_eq!(pr[&o.id].arrived, dec!(6));
+    // riga esclusa da "in arrivo"
+    let mut o2 = s.document(o.id).unwrap();
+    o2.lines[0].not_incoming = true;
+    s.save_document(&o2).unwrap();
+    assert_eq!(in_arrivo(&s), dec!(0));
+    // il duplicato riparte da zero
+    let c = s.duplicate_document(o.id, None).unwrap();
+    assert_eq!(c.lines[0].arrived_qty, dec!(0));
+}
+
+#[test]
+fn situazione_di_magazzino_dell_articolo() {
+    let (s, c, p, v) = setup();
+    let today = d(2026, 11, 8);
+    let carico = |q, val, g: NaiveDate| s.add_manual_stock_move(&StockMove { product_id: p.id, qty: q, unit_value: val, date: g, reason: "Carico".into(), ..Default::default() }).unwrap();
+    carico(dec!(60), dec!(1), d(2022, 4, 7));
+    carico(dec!(40), dec!(2), d(2023, 4, 7));
+    // vendita con sconto: netto 8 x 25 pezzi
+    let f = new_doc(&s, DocKind::Invoice, &c, d(2026, 3, 1), vec![DocLine { discounts: "20".into(), ..line(&p, dec!(25), &v) }]);
+    s.issue_document(f.id).unwrap();
+    let mut o = Document::new(DocKind::CustomerOrder);
+    o.party_id = Some(c.id);
+    o.lines.push(line(&p, dec!(5), &v));
+    let o = s.save_document(&o).unwrap();
+    s.issue_document(o.id).unwrap();
+    let pr = s.product(p.id).unwrap().unwrap();
+    let i = s.stock_info(&pr, today).unwrap();
+    assert_eq!((i.loaded, i.unloaded, i.stock), (dec!(100), dec!(25), dec!(75)));
+    assert_eq!((i.committed, i.available), (dec!(5), dec!(70)));
+    assert_eq!((i.first_load, i.last_load, i.last_unload), (Some(d(2022, 4, 7)), Some(d(2023, 4, 7)), Some(d(2026, 3, 1))));
+    assert_eq!(i.avg_cost, Some(dec!(1.4)));
+    assert_eq!(i.last_cost, Some(dec!(2)));
+    assert_eq!(i.avg_sale, Some(dec!(8)));
+    assert!(i.monthly_sales > dec!(0.45) && i.monthly_sales < dec!(0.46));
+    assert!(i.run_out.unwrap() > today);
+    assert_eq!(i.state, StockState::Regular);
+    let sotto = Product { min_stock: dec!(80), ..pr.clone() };
+    assert_eq!(s.stock_info(&sotto, today).unwrap().state, StockState::UnderMin);
+    // rettifica con causale
+    s.adjust_stock(p.id, dec!(70), today, "", "Conteggio").unwrap();
+    assert_eq!(s.stock_of(p.id).unwrap(), dec!(70));
+    assert!(s.manual_stock_reasons().unwrap().contains(&"Conteggio".to_string()));
+    assert!(s.adjust_stock(p.id, dec!(70), today, "", "Conteggio").unwrap().is_none());
+}

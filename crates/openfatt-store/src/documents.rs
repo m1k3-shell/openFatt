@@ -35,6 +35,12 @@ pub struct DocSummary {
     pub order_status: OrderStatus,
     pub expected_date: Option<NaiveDate>,
     pub comment: String,
+    /// Dati del soggetto e del documento, per filtrare gli elenchi.
+    pub party_city: String,
+    pub party_province: String,
+    pub party_vat: String,
+    pub payment_name: String,
+    pub agent_id: Option<i64>,
 }
 
 /// Evasione di un ordine: righe evase e documenti che le hanno evase.
@@ -42,6 +48,9 @@ pub struct DocSummary {
 pub struct OrderProgress {
     pub any: bool,
     pub all: bool,
+    /// Pezzi ordinati e pezzi arrivati (o evasi), somma delle righe.
+    pub ordered: Decimal,
+    pub arrived: Decimal,
     /// (id del documento, etichetta "Arrivo 5 del 24/2/22")
     pub targets: Vec<(i64, String)>,
 }
@@ -75,7 +84,12 @@ impl Store {
                     COALESCE(json_extract(d.data, '$.legacy_fe'), 0),
                     COALESCE(json_extract(d.data, '$.order_status'), ''),
                     json_extract(d.data, '$.expected_date'),
-                    COALESCE(json_extract(d.data, '$.internal_notes'), '')
+                    COALESCE(json_extract(d.data, '$.internal_notes'), ''),
+                    COALESCE(json_extract(d.data, '$.party.city'), ''),
+                    COALESCE(json_extract(d.data, '$.party.province'), ''),
+                    COALESCE(json_extract(d.data, '$.party.vat_number'), ''),
+                    COALESCE(json_extract(d.data, '$.payment.name'), ''),
+                    json_extract(d.data, '$.agent_id')
              FROM documents d WHERE 1=1",
         );
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
@@ -138,12 +152,17 @@ impl Store {
                 r.get::<_, String>(14)?,
                 r.get::<_, Option<String>>(15)?,
                 r.get::<_, String>(16)?,
+                r.get::<_, String>(17)?,
+                r.get::<_, String>(18)?,
+                r.get::<_, String>(19)?,
+                r.get::<_, String>(20)?,
+                r.get::<_, Option<i64>>(21)?,
             ))
         })?;
         let open = self.open_amounts_by_doc()?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, kind, status, number, series, year, date, party_id, party_name, ext, total, net, fe, legacy, order_status, expected, comment) = row?;
+            let (id, kind, status, number, series, year, date, party_id, party_name, ext, total, net, fe, legacy, order_status, expected, comment, party_city, party_province, party_vat, payment_name, agent_id) = row?;
             let kind = DocKind::from_code(&kind).unwrap_or_default();
             let number_label = match number {
                 Some(n) if series.is_empty() => n.to_string(),
@@ -169,6 +188,11 @@ impl Store {
                 order_status: OrderStatus::from_name(&order_status),
                 expected_date: expected.filter(|e| !e.is_empty()).map(|e| date_from_sql(&e)),
                 comment,
+                party_city,
+                party_province,
+                party_vat,
+                payment_name,
+                agent_id,
             });
         }
         Ok(out)
@@ -211,27 +235,29 @@ impl Store {
             }
         }
         let sql = format!(
-            "SELECT d.id, json_extract(j.value, '$.id'), json_extract(j.value, '$.kind'), json_extract(j.value, '$.qty')
+            "SELECT d.id, json_extract(j.value, '$.id'), json_extract(j.value, '$.kind'), json_extract(j.value, '$.qty'), json_extract(j.value, '$.arrived_qty')
              FROM documents d, json_each(d.data, '$.lines') j WHERE d.kind IN ({})",
             marks
         );
         let mut st = self.conn().prepare(&sql)?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
-        let mut seen: HashMap<i64, (bool, bool)> = HashMap::new();
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?)))?;
+        let mut seen: HashMap<i64, (bool, bool, Decimal, Decimal)> = HashMap::new();
         for row in rows {
-            let (doc, line, kind, qty) = row?;
+            let (doc, line, kind, qty, arrived) = row?;
             let qty = dec_from_sql(Some(qty));
             if kind != "Item" || qty.is_zero() {
                 continue;
             }
-            let f = done.get(&line).copied().unwrap_or_default();
-            let e = seen.entry(doc).or_insert((false, true));
+            let f = done.get(&line).copied().unwrap_or_default() + dec_from_sql(arrived);
+            let e = seen.entry(doc).or_insert((false, true, Decimal::ZERO, Decimal::ZERO));
             e.0 |= f > Decimal::ZERO;
             e.1 &= f >= qty;
+            e.2 += qty;
+            e.3 += f;
         }
-        for (doc, (any, all)) in seen {
+        for (doc, (any, all, ordered, arrived)) in seen {
             let list = targets.remove(&doc).unwrap_or_default();
-            out.insert(doc, OrderProgress { any, all: any && all, targets: list.into_iter().collect() });
+            out.insert(doc, OrderProgress { any, all: any && all, ordered, arrived, targets: list.into_iter().collect() });
         }
         Ok(out)
     }
@@ -819,6 +845,7 @@ impl Store {
             l.id = 0;
             l.source_line_id = None;
             l.source_doc_id = None;
+            l.arrived_qty = Decimal::ZERO;
         }
         if d.kind.has_transport() && d.transport.is_none() {
             d.transport = Some(Transport::default());
@@ -839,12 +866,27 @@ impl Store {
         Ok(t)
     }
 
+    /// Quantità arrivata tramite documenti collegati, riga per riga, per le righe di un ordine.
+    pub fn linked_arrivals(&self, document_id: i64) -> Result<HashMap<i64, Decimal>> {
+        let mut st = self.conn().prepare(
+            "SELECT l.source_line_id, l.qty FROM doc_lines l JOIN documents d ON d.id = l.document_id
+             WHERE l.source_doc_id = ?1 AND l.source_line_id IS NOT NULL AND d.status <> 'ANNULLATO'",
+        )?;
+        let rows = st.query_map([document_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut m: HashMap<i64, Decimal> = HashMap::new();
+        for row in rows {
+            let (line, qty) = row?;
+            *m.entry(line).or_default() += dec_from_sql(Some(qty));
+        }
+        Ok(m)
+    }
+
     /// Stato di evasione: (evaso completamente, evaso parzialmente).
     pub fn fulfillment_state(&self, doc: &Document) -> Result<(bool, bool)> {
         let mut any = false;
         let mut all = true;
         for l in doc.lines.iter().filter(|l| l.kind == LineKind::Item && !l.qty.is_zero()) {
-            let f = self.fulfilled_qty(l.id)?;
+            let f = self.fulfilled_qty(l.id)? + l.arrived_qty;
             if f > Decimal::ZERO {
                 any = true;
             }
@@ -914,12 +956,14 @@ impl Store {
                 nl.source_doc_id = Some(s.id);
                 nl.source_line_id = if l.kind == LineKind::Item { Some(l.id) } else { None };
                 if l.kind == LineKind::Item && !credit {
-                    let residual = l.qty - self.fulfilled_qty(l.id)?;
+                    let residual = l.qty - self.fulfilled_qty(l.id)? - l.arrived_qty;
                     if residual <= Decimal::ZERO {
                         continue;
                     }
                     nl.qty = residual;
                 }
+                nl.arrived_qty = Decimal::ZERO;
+                nl.not_incoming = false;
                 d.lines.push(nl);
             }
         }

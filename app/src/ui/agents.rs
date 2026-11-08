@@ -6,11 +6,13 @@ use openfatt_core::money::fmt_it_trim;
 use openfatt_store::{Agent, CommissionRow};
 use rust_decimal::Decimal;
 
+use super::grid::{Col, Grid, Val};
 use super::theme::{self, icon, Tone};
 use super::widgets::{self, eur, GRAY, RED};
 use super::{Ctx, Nav};
 
 pub struct State {
+    grid: Grid,
     selected: Option<i64>,
     editing: Option<Agent>,
     from: NaiveDate,
@@ -23,7 +25,8 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         let today = chrono::Local::now().date_naive();
-        State { selected: None, editing: None, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, rows: None, confirm_settle: false, cat: (String::new(), Decimal::ZERO) }
+        State {
+            grid: Grid::new("agente-provvigioni"), selected: None, editing: None, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, rows: None, confirm_settle: false, cat: (String::new(), Decimal::ZERO) }
     }
 }
 
@@ -116,27 +119,35 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     }
                 }
             });
-            egui::ScrollArea::vertical().id_salt("comm").max_height(ui.available_height() - 140.0).show(ui, |ui| {
-                egui::Grid::new("comm_rows").striped(true).num_columns(9).spacing([12.0, 4.0]).show(ui, |ui| {
-                    for h in ["Documento", "Cliente", "Imponibile", "Provvigione", "Incassato", "Maturata", "Liquidata", "Insoluti", ""] {
-                        ui.label(RichText::new(h).strong());
+            let open_req = std::cell::Cell::new(None);
+            let open_ref = &open_req;
+            let cols: Vec<Col<CommissionRow>> = vec![
+                Col::new("date", "Data", 90.0, |r: &CommissionRow| Val::Date(Some(r.date))),
+                Col::text("doc", "Documento", 210.0, |r: &CommissionRow| r.title.clone()).render(move |ui: &mut egui::Ui, r: &CommissionRow| {
+                    if ui.link(&r.title).clicked() {
+                        open_ref.set(Some(r.document_id));
                     }
-                    ui.end_row();
-                    for r in &rows {
-                        ui.label(&r.title);
-                        ui.label(widgets::truncate(&r.party, 28));
-                        ui.label(eur(r.base));
-                        ui.label(eur(r.commission));
-                        ui.label(format!("{}%", fmt_it_trim(r.collected * Decimal::ONE_HUNDRED, 0, 0)));
-                        ui.label(eur(r.matured));
-                        ui.label(eur(r.settled));
-                        ui.label(RichText::new(if r.overdue.is_zero() { "-".to_string() } else { eur(r.overdue) }).color(if r.overdue.is_zero() { GRAY } else { RED }));
-                        if ui.small_button("Apri").clicked() {
-                            cx.nav.push(Nav::OpenDocument(r.document_id));
-                        }
-                        ui.end_row();
-                    }
+                }),
+                Col::text("party", "Cliente", 210.0, |r: &CommissionRow| r.party.clone()).group(),
+                Col::money("base", "Imponibile", 90.0, |r: &CommissionRow| r.base).total(),
+                Col::money("comm", "Provvigione", 90.0, |r: &CommissionRow| r.commission).total(),
+                Col::new("collected", "Incassato %", 80.0, |r: &CommissionRow| Val::Num(r.collected * Decimal::ONE_HUNDRED, 0)).right(),
+                Col::money("matured", "Maturata", 90.0, |r: &CommissionRow| r.matured).total(),
+                Col::money("settled", "Liquidata", 90.0, |r: &CommissionRow| r.settled).total(),
+                Col::money("overdue", "Insoluti", 90.0, |r: &CommissionRow| r.overdue).total(),
+            ];
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &rows, "Provvigioni");
                 });
+            });
+            let h = (ui.available_height() - 110.0).max(140.0);
+            st.grid.version = 0;
+            st.grid.show(ui, cx.store, &cols, &rows, |r| r.document_id, h, false, 22.0);
+            if let Some(d) = open_req.get() {
+                cx.nav.push(Nav::OpenDocument(d));
+            }
+            egui::ScrollArea::vertical().id_salt("comm").show(ui, |ui| {
                 let settl = cx.store.settlements(agent.id).unwrap_or_default();
                 if !settl.is_empty() {
                     ui.add_space(10.0);

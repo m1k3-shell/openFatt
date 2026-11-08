@@ -467,9 +467,14 @@ impl Store {
         let (pn_rows, pn) = rows(dump, "TPrimaNota");
         let (mm_rows, mm) = rows(dump, "TMovMagazz");
         let mut lines_by_doc: HashMap<i64, Vec<&Row>> = HashMap::new();
+        // quantità già arrivata tramite righe collegate: non va contata due volte
+        let mut linked_qty: HashMap<i64, Decimal> = HashMap::new();
         for r in dr_rows {
             if let Some(d) = int(dr, r, "IDDoc") {
                 lines_by_doc.entry(d).or_default().push(r);
+            }
+            if let Some(src) = int(dr, r, "IDDocRigaIncluso") {
+                *linked_qty.entry(src).or_default() += dec(dr, r, "Qta");
             }
         }
         for v in lines_by_doc.values_mut() {
@@ -653,6 +658,10 @@ impl Store {
                     lot_expiry: date(dr, l, "DataScadenza"),
                     eco_fee: dec(dr, l, "EcoContribNetto"),
                     commission: Some(dec(dr, l, "PercProvv")).filter(|x| !x.is_zero()),
+                    supplier_code: s(dr, l, "CodArticoloForn").into(),
+                    arrived_qty: (dec(dr, l, "QtaArrivata") - int(dr, l, "IDDocRiga").and_then(|id| linked_qty.get(&id)).copied().unwrap_or_default()).max(Decimal::ZERO),
+                    // negli ordini la stessa spunta indica "in arrivo" (fornitori) o "impegnata" (clienti)
+                    not_incoming: d.kind.has_order_state() && !flag(dr, l, "MovMagazz"),
                     // il contributo cassa non si calcola sulle spese escluse art. 15
                     pension_fund: cassa && vat_map.get(code_iva).map(|v| v.0.natura.as_deref() != Some("N1")).unwrap_or(true),
                     ..Default::default()
@@ -739,9 +748,10 @@ impl Store {
                 })?;
                 rep.cash_entries += 1;
             }
-            // movimenti di magazzino come registrati da Easyfatt
+            // movimenti di magazzino come registrati da Easyfatt: se per un documento non ne ha
+            // registrati (fattura nata da un DDT), quel documento non deve muovere nulla
+            self.conn().execute("DELETE FROM stock_moves WHERE document_id = ?1", [saved.id])?;
             if let Some(ms) = moves_by_doc.get(&old) {
-                self.conn().execute("DELETE FROM stock_moves WHERE document_id = ?1", [saved.id])?;
                 for m in ms {
                     if let Some(p) = int(mm, m, "IDArticolo").and_then(|a| prod_map.get(&a)) {
                         let qty = dec(mm, m, "QtaCaricata") - dec(mm, m, "QtaScaricata");
@@ -818,6 +828,17 @@ mod tests {
         println!("{:#?}", r);
         assert!(r.parties > 10 && r.products > 10 && r.documents > 100);
         assert!(s.integrity_check().unwrap() == "ok");
+        // la giacenza deve coincidere con i movimenti registrati da Easyfatt
+        let (rows_m, m) = rows(&dump, "TMovMagazz");
+        let (rows_a, a) = rows(&dump, "TArticoli");
+        let levels = s.stock_levels().unwrap();
+        for art in rows_a.iter().filter(|x| flag(a, x, "GestMagazzino")) {
+            let id = int(a, art, "IDArticolo");
+            let expected: Decimal = rows_m.iter().filter(|x| int(m, x, "IDArticolo") == id).map(|x| dec(m, x, "QtaCaricata") - dec(m, x, "QtaScaricata")).sum();
+            if let Some(p) = s.product_by_code(super::s(a, art, "CodArticolo")).unwrap() {
+                assert_eq!(levels.get(&p.id).copied().unwrap_or_default(), expected, "giacenza dell'articolo {}", p.code);
+            }
+        }
         // seconda importazione: soggetti e articoli già presenti
         let r2 = s.import_easyfatt(&dump).unwrap();
         assert_eq!(r2.parties, 0);

@@ -447,6 +447,8 @@ pub struct Product {
     /// Giorni per l'ordine al fornitore e multipli d'ordine
     pub order_days: u32,
     pub order_multiple: Decimal,
+    /// Dove si trova in magazzino (scaffale, blocco...)
+    pub location: String,
     pub notes: String,
     pub active: bool,
     /// Varianti (es. taglia e colore); vuoto = articolo senza varianti.
@@ -607,6 +609,7 @@ impl Default for Product {
             weight_gross: Decimal::ZERO,
             order_days: 0,
             order_multiple: Decimal::ZERO,
+            location: String::new(),
             notes: String::new(),
             active: true,
             variants: VariantSpec::default(),
@@ -1010,6 +1013,12 @@ pub struct DocLine {
     pub eco_label: String,
     /// Provvigione dell'agente su questa riga (sostituisce quella del documento)
     pub commission: Option<Decimal>,
+    /// Codice dell'articolo presso il fornitore
+    pub supplier_code: String,
+    /// Ordini fornitore: quantità segnata come arrivata a mano (oltre a quella dei documenti collegati)
+    pub arrived_qty: Decimal,
+    /// Ordini: la riga non conta nella merce in arrivo (fornitori) o impegnata (clienti)
+    pub not_incoming: bool,
 }
 
 impl DocLine {
@@ -1073,6 +1082,9 @@ impl Default for DocLine {
             eco_fee: Decimal::ZERO,
             eco_label: String::new(),
             commission: None,
+            supplier_code: String::new(),
+            arrived_qty: Decimal::ZERO,
+            not_incoming: false,
         }
     }
 }

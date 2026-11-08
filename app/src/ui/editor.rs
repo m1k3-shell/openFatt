@@ -29,6 +29,8 @@ pub struct Editor {
     in_batch: bool,
     tab: DocTab,
     cols: LineCols,
+    /// Ordini fornitore: generazione dell'archivio, pezzi arrivati da documenti collegati, avanzamento
+    arrivals: (u64, std::collections::HashMap<i64, Decimal>, Option<openfatt_store::OrderProgress>),
 }
 
 /// Colonne facoltative delle righe, ricordate nell'archivio.
@@ -90,6 +92,7 @@ impl Editor {
             in_batch,
             tab: DocTab::Lines,
             cols: store.get_setting("doc_line_columns").unwrap_or_default(),
+            arrivals: Default::default(),
         }
     }
 
@@ -170,7 +173,9 @@ impl Editor {
             l.unit_price = price;
             l.discounts = disc;
             l.price_note = note;
-            l.code = code;
+            if !code.is_empty() {
+                l.supplier_code = code;
+            }
             n += 1;
         }
         n
@@ -206,14 +211,12 @@ impl Editor {
         (rev, cost, missing)
     }
 
-    /// Codice da mostrare in riga: negli acquisti quello del fornitore del documento.
+    /// Codice dell'articolo presso il fornitore del documento, se è un acquisto.
     fn supplier_code_of(&self, p: &Product) -> String {
         if self.doc.kind.is_purchase() {
-            if let Some((c, _)) = self.doc.party_id.and_then(|id| p.supplier_terms(id)).filter(|(c, _)| !c.trim().is_empty()) {
-                return c;
-            }
+            return self.doc.party_id.and_then(|id| p.supplier_terms(id)).map(|(c, _)| c).unwrap_or_default();
         }
-        p.code.clone()
+        String::new()
     }
 
     fn line_from_product(&self, store: &openfatt_store::Store, p: &Product) -> DocLine {
@@ -225,7 +228,8 @@ impl Editor {
         let (price, discounts, price_note) = self.priced(store, p, Decimal::ONE, vat.rate);
         DocLine {
             product_id: Some(p.id),
-            code: self.supplier_code_of(p),
+            code: p.code.clone(),
+            supplier_code: self.supplier_code_of(p),
             description: p.description.clone(),
             qty: Decimal::ONE,
             unit: p.unit.clone(),
@@ -647,7 +651,15 @@ impl Editor {
                 } else {
                     cap(ui, if role == Some(PartyRole::Supplier) { "Fornitore" } else { "Cliente" });
                     let current = self.doc.party.display_name();
-                    if let Some(p) = widgets::party_picker(ui, cx.store, "doc_party", &current, role, (total - right_w - 20.0).clamp(260.0, 640.0)) {
+                    let party_id = self.doc.party_id;
+                    let picked = ui.horizontal(|ui| {
+                        let picked = widgets::party_picker(ui, cx.store, "doc_party", &current, role, (total - right_w - 44.0).clamp(240.0, 620.0));
+                        if let Some(id) = party_id {
+                            super::quick::info_button(ui, super::quick::Ref::Party(id));
+                        }
+                        picked
+                    }).inner;
+                    if let Some(p) = picked {
                         self.set_party(cx.store, cx.msgs, p);
                     }
                     let p = &self.doc.party;
@@ -969,6 +981,20 @@ impl Editor {
     }
 
     fn lines(&mut self, ui: &mut egui::Ui, cx: &mut Ctx, totals: &Option<calc::Totals>, height: f32) {
+        let is_order = self.doc.kind == DocKind::SupplierOrder;
+        let purchase = self.doc.kind.is_purchase();
+        // spunta "in arrivo" negli ordini fornitore, "impegnata" negli ordini clienti
+        let show_flag = self.doc.kind.has_order_state();
+        let mut height = height;
+        if is_order {
+            let stamp = cx.store.generation().wrapping_add(1);
+            if self.doc.id != 0 && self.arrivals.0 != stamp {
+                self.arrivals = (stamp, cx.store.linked_arrivals(self.doc.id).unwrap_or_default(), cx.store.order_progress(&[DocKind::SupplierOrder]).ok().and_then(|mut m| m.remove(&self.doc.id)));
+            }
+            self.order_summary(ui, cx);
+            height -= 30.0;
+        }
+        let arrivals = self.arrivals.1.clone();
         let mut remove: Option<usize> = None;
         let mut swap: Option<(usize, usize)> = None;
         let mut changed = false;
@@ -987,17 +1013,25 @@ impl Editor {
         let show_cost = sale && !self.cols.hide_cost;
         let show_net = !self.doc.kind.is_internal() && !self.cols.hide_net;
         let show_margin = sale && !self.cols.hide_margin;
-        let blanks = 5 + show_track as usize + show_wh as usize + show_pf as usize + show_cost as usize + show_net as usize;
-        let desc_w = (ui.available_width() - 700.0 - if show_track { 170.0 } else { 0.0 } - if show_wh { 36.0 } else { 0.0 } - if show_pf { 36.0 } else { 0.0 } - if show_cost { 92.0 } else { 0.0 } - if show_net { 82.0 } else { 0.0 } - if show_margin { 116.0 } else { 0.0 }).max(180.0);
+        let blanks = 5 + show_track as usize + show_wh as usize + show_pf as usize + show_cost as usize + show_net as usize + if is_order { 2 } else { 0 } + show_flag as usize;
+        let desc_w = (ui.available_width() - 720.0 - if purchase { 116.0 } else { 0.0 } - if is_order { 238.0 } else if show_flag { 66.0 } else { 0.0 } - if show_track { 170.0 } else { 0.0 } - if show_wh { 36.0 } else { 0.0 } - if show_pf { 36.0 } else { 0.0 } - if show_cost { 92.0 } else { 0.0 } - if show_net { 82.0 } else { 0.0 } - if show_margin { 116.0 } else { 0.0 }).max(180.0);
         let mut price_mode: Option<bool> = None;
         let include_vat = self.doc.prices_include_vat;
         egui::ScrollArea::both().id_salt("lines_scroll").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("lines").striped(true).num_columns(13).spacing([6.0, 3.0]).show(ui, |ui| {
-                let mut heads = vec!["Cod.", "Descrizione"];
+                let mut heads = vec!["Cod."];
+                if purchase {
+                    heads.push("Cod. prod. forn.");
+                }
+                heads.push("Descrizione");
                 if show_track {
                     heads.push("Variante / lotto / serie");
                 }
-                heads.extend(["Q.tà", "U.M."]);
+                heads.push(if is_order { "Q.tà ordinata" } else { "Q.tà" });
+                if is_order {
+                    heads.extend(["Q.tà arrivata", "Da arrivare"]);
+                }
+                heads.push("U.M.");
                 if show_cost {
                     heads.push("Prezzo acq.");
                 }
@@ -1006,6 +1040,9 @@ impl Editor {
                     heads.push("Netto sc.");
                 }
                 heads.push("IVA");
+                if show_flag {
+                    heads.push(if is_order { "In arrivo" } else { "Impegna" });
+                }
                 if show_wh {
                     heads.push("Rit.");
                 }
@@ -1044,6 +1081,9 @@ impl Editor {
                     if l.kind == LineKind::Text || l.kind == LineKind::Subtotal {
                         let sub = l.kind == LineKind::Subtotal;
                         ui.label(RichText::new(if sub { "subtotale" } else { "testo" }).small().color(GRAY));
+                        if purchase {
+                            ui.label("");
+                        }
                         if ui.add_sized([desc_w, 20.0], egui::TextEdit::singleline(&mut l.description).hint_text(if sub { "Subtotale" } else { "" })).changed() {
                             changed = true;
                         }
@@ -1057,6 +1097,9 @@ impl Editor {
                         }
                     } else if let Some(pct) = l.calc_percent {
                         ui.label(RichText::new("calcolata").small().color(GRAY));
+                        if purchase {
+                            ui.label("");
+                        }
                         if ui.add_sized([desc_w, 20.0], egui::TextEdit::singleline(&mut l.description)).changed() {
                             changed = true;
                         }
@@ -1067,6 +1110,10 @@ impl Editor {
                         if widgets::dec_field(ui, ("pc", i), &mut p, 70.0, 4) {
                             l.calc_percent = Some(p);
                             changed = true;
+                        }
+                        if is_order {
+                            ui.label("");
+                            ui.label("");
                         }
                         ui.label("%");
                         if show_cost {
@@ -1080,6 +1127,9 @@ impl Editor {
                         if widgets::vat_combo(ui, ("v", i), &mut l.vat, &vats, 70.0) {
                             changed = true;
                         }
+                        if show_flag {
+                            ui.label("");
+                        }
                         if show_wh && ui.checkbox(&mut l.withholding, "").changed() {
                             changed = true;
                         }
@@ -1091,11 +1141,32 @@ impl Editor {
                             ui.label("");
                         }
                     } else {
-                        if ui.add_sized([90.0, 20.0], egui::TextEdit::singleline(&mut l.code)).changed() {
+                        let pid = l.product_id;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let r = ui.add_sized([90.0, 20.0], egui::TextEdit::singleline(&mut l.code));
+                            if r.changed() {
+                                changed = true;
+                            }
+                            match pid {
+                                Some(id) => {
+                                    if r.double_clicked() {
+                                        super::quick::open(ui.ctx(), super::quick::Ref::Product(id));
+                                    }
+                                    super::quick::info_button(ui, super::quick::Ref::Product(id));
+                                }
+                                None => ui.add_space(18.0),
+                            }
+                        });
+                        if purchase && ui.add_sized([110.0, 20.0], egui::TextEdit::singleline(&mut l.supplier_code)).changed() {
                             changed = true;
                         }
-                        if ui.add_sized([desc_w, 20.0], egui::TextEdit::singleline(&mut l.description)).changed() {
+                        let r = ui.add_sized([desc_w, 20.0], egui::TextEdit::singleline(&mut l.description));
+                        if r.changed() {
                             changed = true;
+                        }
+                        if let (Some(id), true) = (pid, r.double_clicked()) {
+                            super::quick::open(ui.ctx(), super::quick::Ref::Product(id));
                         }
                         let incoming = effect * if l.qty.is_sign_negative() { -1 } else { 1 } > 0;
                         if show_track && super::tracking::cell(ui, cx.store, products[i].as_ref(), l, i, incoming, out_wh.as_deref()) {
@@ -1106,6 +1177,23 @@ impl Editor {
                             // scaglioni di quantità: si ricalcola se il prezzo viene da listino o condizioni
                             if !l.price_note.is_empty() && l.price_note != "Prezzo inserito a mano" {
                                 requote.push(i);
+                            }
+                        }
+                        if is_order {
+                            let linked = arrivals.get(&l.id).copied().unwrap_or_default();
+                            let mut shown = linked + l.arrived_qty;
+                            let edit = ui.scope(|ui| widgets::dec_field(ui, ("arr", i), &mut shown, 70.0, 4));
+                            if edit.inner {
+                                l.arrived_qty = (shown - linked).max(Decimal::ZERO);
+                                changed = true;
+                            }
+                            edit.response.on_hover_text(if linked.is_zero() { "Pezzi arrivati. Il numero scritto qui non carica il magazzino: per caricarlo si crea l'Arrivo merce dall'ordine." } else { "Comprende i pezzi degli arrivi merce collegati all'ordine." });
+                            let rest = l.qty - shown;
+                            if rest <= Decimal::ZERO && !l.qty.is_zero() {
+                                let extra = if rest < Decimal::ZERO { format!(" +{}", fmt_it_trim(-rest, 0, 3)) } else { String::new() };
+                                ui.label(RichText::new(format!("{}{}", icon::CHECK, extra)).color(theme::POSITIVE)).on_hover_text("Riga arrivata");
+                            } else {
+                                ui.label(if shown.is_zero() { RichText::new(fmt_it_trim(rest, 0, 3)) } else { theme::bold(fmt_it_trim(rest, 0, 3)).color(ORANGE) });
                             }
                         }
                         if ui.add(egui::TextEdit::singleline(&mut l.unit).desired_width(36.0)).changed() {
@@ -1130,6 +1218,13 @@ impl Editor {
                         }
                         if widgets::vat_combo(ui, ("v", i), &mut l.vat, &vats, 70.0) {
                             changed = true;
+                        }
+                        if show_flag {
+                            let mut on = !l.not_incoming;
+                            if ui.checkbox(&mut on, "").on_hover_text(if is_order { "La riga conta nella quantità in arrivo del magazzino" } else { "La riga conta nella quantità impegnata del magazzino" }).changed() {
+                                l.not_incoming = !on;
+                                changed = true;
+                            }
                         }
                         if show_wh && ui.checkbox(&mut l.withholding, "").changed() {
                             changed = true;
@@ -1343,6 +1438,44 @@ impl Editor {
                 self.doc.vat_liability = "S".into();
             }
         }
+    }
+
+    /// Riepilogo dell'ordine fornitore sopra le righe: pezzi e arrivi collegati.
+    fn order_summary(&self, ui: &mut egui::Ui, cx: &mut Ctx) {
+        let items = self.doc.lines.iter().filter(|l| l.kind == LineKind::Item && l.calc_percent.is_none());
+        let (mut ordered, mut arrived, mut missing, mut amount) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+        for l in items {
+            let a = self.arrivals.1.get(&l.id).copied().unwrap_or_default() + l.arrived_qty;
+            ordered += l.qty;
+            arrived += a;
+            missing += (l.qty - a).max(Decimal::ZERO);
+            amount += a.min(l.qty) * calc::apply_cascade(l.unit_price, &calc::parse_discounts(&l.discounts).unwrap_or_default());
+        }
+        egui::Frame::new().fill(theme::BAR).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let stat = |ui: &mut egui::Ui, t: &str, v: String, c: egui::Color32| {
+                    ui.label(theme::muted(t));
+                    ui.label(theme::bold(v).color(c));
+                    ui.add_space(12.0);
+                };
+                stat(ui, "Pezzi ordinati", fmt_it_trim(ordered, 0, 3), theme::INK);
+                stat(ui, "Arrivati", fmt_it_trim(arrived, 0, 3), theme::POSITIVE);
+                stat(ui, "Da arrivare", fmt_it_trim(missing, 0, 3), if missing.is_zero() { theme::INK } else { ORANGE });
+                stat(ui, "Valore arrivato", format!("€ {}", eur(amount.round_dp(2))), theme::INK);
+                if let Some(d) = self.doc.expected_date {
+                    let late = d < chrono::Local::now().date_naive() && !missing.is_zero();
+                    stat(ui, "Consegna prevista", d.format("%d/%m/%Y").to_string(), if late { RED } else { theme::INK });
+                }
+                if let Some(p) = &self.arrivals.2 {
+                    for (id, t) in &p.targets {
+                        if ui.link(t).clicked() {
+                            cx.nav.push(Nav::OpenDocument(*id));
+                        }
+                    }
+                }
+            });
+        });
     }
 
     fn fiscal_section(&mut self, ui: &mut egui::Ui) {

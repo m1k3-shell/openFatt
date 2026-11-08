@@ -518,7 +518,8 @@ pub fn from_document(company: &Company, doc: &Document, totals: &Totals) -> Prin
             d
         });
         lines.push(PrintLine {
-            code: src.map(|l| l.code.clone()).unwrap_or_default(),
+            // agli ordini verso il fornitore si stampa il suo codice
+            code: src.map(|l| if l.supplier_code.trim().is_empty() { l.code.clone() } else { l.supplier_code.clone() }).unwrap_or_default(),
             description: src.map(|l| l.description_with_tracking()).unwrap_or_else(|| lc.description.clone()),
             qty: fmt_it_trim(lc.qty, 0, 4),
             unit: src.map(|l| l.unit.clone()).unwrap_or_default(),

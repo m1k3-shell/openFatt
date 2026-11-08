@@ -5,12 +5,13 @@ use std::collections::BTreeSet;
 
 use chrono::NaiveDate;
 use eframe::egui::{self, RichText};
-use egui_extras::{Column, TableBuilder};
 use openfatt_core::fiscal;
 use openfatt_core::model::{Party, PartyRole};
 use openfatt_store::{BankBatch, BankKind, BankSettings, BatchStatus, DueRow};
 use rust_decimal::Decimal;
 
+use super::grid::{Col, Grid, Val};
+use super::quick::Ref;
 use super::theme::{self, icon, Tone};
 use super::widgets::{self, eur};
 use super::{Ctx, Nav};
@@ -60,6 +61,8 @@ pub struct State {
     current: Option<i64>,
     /// Operazione in attesa della scelta delle voci.
     ask: Option<BankOp>,
+    grid: Grid,
+    batch_grid: Grid,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,6 +87,12 @@ impl Default for State {
             confirm_unpaid: None,
             current: None,
             ask: None,
+            grid: {
+                let mut g = Grid::new("banca-voci");
+                g.keep_selection = true;
+                g
+            },
+            batch_grid: Grid::new("banca-distinte"),
         }
     }
 }
@@ -319,6 +328,48 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
         });
         return;
     }
+    let index: std::collections::HashMap<i64, usize> = list.iter().enumerate().map(|(i, d)| (d.id, i)).collect();
+    let (index_ref, problems_ref, parties_ref) = (&index, &problems, &parties);
+    let fix_req: std::cell::Cell<Option<(PartyRole, i64, String)>> = std::cell::Cell::new(None);
+    let open_req = std::cell::Cell::new(None);
+    let (fix_ref, open_ref) = (&fix_req, &open_req);
+    let cols: Vec<Col<DueRow>> = vec![
+        Col::new("date", "Scadenza", 100.0, |d: &DueRow| Val::Date(Some(d.date))).render(move |ui: &mut egui::Ui, d: &DueRow| {
+            ui.label(RichText::new(d.date.format("%d/%m/%Y").to_string()).color(if d.date < today { theme::NEGATIVE } else { theme::INK }));
+        }),
+        Col::text("party", if kind == BankKind::Sct { "Fornitore" } else { "Cliente" }, 280.0, |d: &DueRow| d.party_name.clone()).group().opens(|d: &DueRow| d.party_id.map(Ref::Party)),
+        Col::text("doc", "Documento", 250.0, |d: &DueRow| d.doc_label.clone()).render(move |ui: &mut egui::Ui, d: &DueRow| {
+            if ui.link(&d.doc_label).clicked() {
+                open_ref.set(Some(d.document_id));
+            }
+            if d.draft {
+                theme::pill(ui, "bozza", Tone::Warning);
+            }
+        }),
+        Col::money("amount", "Importo", 120.0, |d: &DueRow| d.residual()).total(),
+        Col::text("bank", if kind == BankKind::Sdd { "Conto e mandato" } else { "Banca" }, 330.0, move |d: &DueRow| index_ref.get(&d.id).and_then(|i| parties_ref[*i].as_ref()).map(|p| bank_text(kind, p)).unwrap_or_default()).render(move |ui: &mut egui::Ui, d: &DueRow| {
+            let Some(i) = index_ref.get(&d.id).copied() else { return };
+            match (&problems_ref[i], &parties_ref[i]) {
+                (Some(pr), p) => {
+                    ui.label(RichText::new(format!("{}  {}", icon::WARNING_CIRCLE, pr)).color(theme::NEGATIVE));
+                    if let Some(p) = p {
+                        if ui.small_button("Completa").clicked() {
+                            fix_ref.set(Some((p.role, p.id, p.display_name())));
+                        }
+                    }
+                }
+                (None, _) if past(d) => {
+                    ui.label(RichText::new(format!("{}  scadenza passata, non presentabile", icon::WARNING)).color(theme::WARNING))
+                        .on_hover_text("Incassare in altro modo (bonifico, contanti) o inviare un sollecito dallo scadenzario");
+                }
+                (None, Some(p)) => {
+                    ui.label(theme::muted(bank_text(kind, p)));
+                }
+                _ => {}
+            }
+        }),
+    ];
+    let visible: Vec<DueRow> = visible.into_iter().filter(|d| st.grid.accepts(&cols, d)).collect();
     // scelta delle voci su cui eseguire l'operazione
     if let Some(op) = st.ask {
         let mut chosen: Option<Vec<DueRow>> = None;
@@ -358,92 +409,24 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
             st.ask = None;
         }
     }
-    let mut toggle = None;
-    let mut current = None;
-    let mut fix = None;
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Voci della distinta");
+        });
+    });
     let avail = ui.available_height();
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        TableBuilder::new(ui)
-            .striped(false)
-            .resizable(false)
-            .sense(egui::Sense::click())
-            .max_scroll_height((avail - 40.0).max(120.0))
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(34.0))
-            .column(Column::initial(100.0))
-            .column(Column::remainder().at_least(180.0))
-            .column(Column::initial(250.0))
-            .column(Column::initial(120.0))
-            .column(Column::initial(330.0))
-            .header(30.0, |mut h| {
-                for t in ["", "Scadenza", if kind == BankKind::Sct { "Fornitore" } else { "Cliente" }, "Documento", "Importo", if kind == BankKind::Sdd { "Conto e mandato" } else { "Banca" }] {
-                    h.col(|ui| {
-                        ui.label(theme::medium(t).size(13.0).color(theme::MUTED));
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(26.0, list.len(), |mut row| {
-                    let i = row.index();
-                    let d = &list[i];
-                    let mut on = st.sel.contains(&d.id);
-                    row.set_selected(st.current == Some(d.id));
-                    row.col(|ui| {
-                        if ui.checkbox(&mut on, "").changed() {
-                            toggle = Some(d.id);
-                        }
-                    });
-                    row.col(|ui| {
-                        ui.label(RichText::new(d.date.format("%d/%m/%Y").to_string()).color(if d.date < today { theme::NEGATIVE } else { theme::INK }));
-                    });
-                    row.col(|ui| {
-                        ui.label(&d.party_name);
-                    });
-                    row.col(|ui| {
-                        if ui.link(&d.doc_label).clicked() {
-                            cx.nav.push(Nav::OpenDocument(d.document_id));
-                        }
-                        if d.draft {
-                            theme::pill(ui, "bozza", Tone::Warning);
-                        }
-                    });
-                    row.col(|ui| {
-                        ui.label(theme::medium(format!("€ {}", eur(d.residual()))));
-                    });
-                    row.col(|ui| match (&problems[i], &parties[i]) {
-                        (Some(pr), p) => {
-                            ui.label(RichText::new(format!("{}  {}", icon::WARNING_CIRCLE, pr)).color(theme::NEGATIVE));
-                            if let Some(p) = p {
-                                if ui.small_button("Completa").clicked() {
-                                    fix = Some((p.role, p.id, p.display_name()));
-                                }
-                            }
-                        }
-                        (None, _) if past(d) => {
-                            ui.label(RichText::new(format!("{}  scadenza passata, non presentabile", icon::WARNING)).color(theme::WARNING))
-                                .on_hover_text("Incassare in altro modo (bonifico, contanti) o inviare un sollecito dallo scadenzario");
-                        }
-                        (None, Some(p)) => {
-                            ui.label(theme::muted(bank_text(kind, p)));
-                        }
-                        _ => {}
-                    });
-                    if row.response().clicked() {
-                        current = Some(d.id);
-                    }
-                });
-            });
+        st.grid.selected = st.sel.clone();
+        st.grid.version = 0;
+        st.grid.show(ui, cx.store, &cols, &list, |d| d.id, (avail - 40.0).max(120.0), true, 26.0);
+        st.sel = st.grid.selected.clone();
+        st.current = st.grid.anchor();
     });
-    if let Some(id) = toggle {
-        if !st.sel.remove(&id) {
-            st.sel.insert(id);
-        }
+    if let Some(d) = open_req.get() {
+        cx.nav.push(Nav::OpenDocument(d));
     }
-    if current.is_some() {
-        st.current = current;
-    }
-    if let Some((role, id, name)) = fix {
+    if let Some((role, id, name)) = fix_req.take() {
         cx.nav.push(Nav::FindParty(if role == PartyRole::Supplier { PartyRole::Supplier } else { PartyRole::Customer }, id, name));
     }
 }
@@ -495,90 +478,88 @@ fn batches_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, list: &[BankBat
         });
         return;
     }
-    let mut toggle = None;
     let settings = cx.store.bank_settings().unwrap_or_default();
+    #[derive(Clone, Copy)]
+    enum Act {
+        File(i64),
+        Print(i64),
+        Settle(i64),
+        Cancel(i64),
+    }
+    let action = std::cell::Cell::new(None);
+    let act = &action;
+    let cols: Vec<Col<BankBatch>> = vec![
+        Col::text("label", "Distinta", 170.0, |b: &BankBatch| b.label()),
+        Col::text("kind", "Tipo", 80.0, |b: &BankBatch| b.kind.code().to_string()).hidden().group(),
+        Col::new("created", "Creata il", 100.0, |b: &BankBatch| Val::Date(Some(b.created_at.date()))),
+        Col::new("date", "Data", 100.0, |b: &BankBatch| Val::Date(Some(b.date))),
+        Col::new("count", "Voci", 60.0, |b: &BankBatch| Val::Num(Decimal::from(b.count as i64), 0)).right(),
+        Col::money("total", "Totale", 120.0, |b: &BankBatch| b.total).total(),
+        Col::text("status", "Stato", 130.0, |b: &BankBatch| match b.status {
+            BatchStatus::Cancelled => "Annullata".to_string(),
+            BatchStatus::Issued if b.unpaid_items > 0 => "Con insoluti".to_string(),
+            BatchStatus::Issued if b.open_items == 0 => "Chiusa".to_string(),
+            BatchStatus::Issued => "Aperta".to_string(),
+        }).group().render(|ui: &mut egui::Ui, b: &BankBatch| status_pill(ui, b)),
+        Col::text("act", "", 420.0, |_: &BankBatch| String::new()).render(move |ui: &mut egui::Ui, b: &BankBatch| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if theme::ghost(ui, true, icon::FILE_ARROW_DOWN, "File").on_hover_text("Salva di nuovo il file per l'home banking").clicked() {
+                act.set(Some(Act::File(b.id)));
+            }
+            if theme::ghost(ui, true, icon::FILE_PDF, "Stampa").clicked() {
+                act.set(Some(Act::Print(b.id)));
+            }
+            if b.status == BatchStatus::Issued && b.open_items > 0 {
+                let label = if b.kind == BankKind::Sct { "Registra pagamenti" } else { "Registra incassi" };
+                if theme::ghost(ui, true, icon::HAND_COINS, label).clicked() {
+                    act.set(Some(Act::Settle(b.id)));
+                }
+            }
+            if b.status == BatchStatus::Issued && theme::ghost_colored(ui, true, icon::PROHIBIT, "Annulla", theme::NEGATIVE).clicked() {
+                act.set(Some(Act::Cancel(b.id)));
+            }
+        }),
+    ];
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.batch_grid.toolbar(ui, cx.store, cx.msgs, &cols, list, "Distinte emesse");
+        });
+    });
     let h = (ui.available_height() * if st.open_batch.is_some() { 0.45 } else { 1.0 } - 40.0).max(140.0);
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        TableBuilder::new(ui)
-            .id_salt("batches")
-            .striped(false)
-            .resizable(false)
-            .sense(egui::Sense::click())
-            .max_scroll_height(h)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::initial(170.0))
-            .column(Column::initial(100.0))
-            .column(Column::initial(100.0))
-            .column(Column::initial(60.0))
-            .column(Column::initial(120.0))
-            .column(Column::initial(130.0))
-            .column(Column::remainder().at_least(300.0))
-            .header(30.0, |mut hd| {
-                for t in ["Distinta", "Creata il", "Data", "Voci", "Totale", "Stato", ""] {
-                    hd.col(|ui| {
-                        ui.label(theme::medium(t).size(13.0).color(theme::MUTED));
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(44.0, list.len(), |mut row| {
-                    let b = &list[row.index()];
-                    row.set_selected(st.open_batch == Some(b.id));
-                    row.col(|ui| {
-                        ui.label(theme::medium(b.label()));
-                    });
-                    row.col(|ui| {
-                        ui.label(b.created_at.format("%d/%m/%Y").to_string());
-                    });
-                    row.col(|ui| {
-                        ui.label(b.date.format("%d/%m/%Y").to_string()).on_hover_text(if b.kind == BankKind::Sct { "data di esecuzione" } else { "prima scadenza" });
-                    });
-                    row.col(|ui| {
-                        ui.label(b.count.to_string());
-                    });
-                    row.col(|ui| {
-                        ui.label(theme::medium(format!("€ {}", eur(b.total))));
-                    });
-                    row.col(|ui| status_pill(ui, b));
-                    row.col(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        if theme::ghost(ui, true, icon::FILE_ARROW_DOWN, "File").on_hover_text("Salva di nuovo il file per l'home banking").clicked() {
-                            let ext = if b.kind == BankKind::Riba { "txt" } else { "xml" };
-                            if let Some(p) = rfd::FileDialog::new().set_file_name(&b.file_name).add_filter("File", &[ext]).save_file() {
-                                match std::fs::write(&p, b.content.as_bytes()) {
-                                    Ok(_) => cx.msgs.ok(format!("File salvato in {}", p.display())),
-                                    Err(e) => cx.msgs.err(e.to_string()),
-                                }
-                            }
-                        }
-                        if theme::ghost(ui, true, icon::FILE_PDF, "Stampa").clicked() {
-                            if let Ok((bb, items)) = cx.store.batch(b.id) {
-                                if let Err(e) = services::open_bytes(&format!("Distinta {} {}-{}.pdf", b.kind.code(), b.year, b.number), &bankfiles::batch_pdf(cx.store, &bb, &items)) {
-                                    cx.msgs.err(e);
-                                }
-                            }
-                        }
-                        if b.status == BatchStatus::Issued && b.open_items > 0 {
-                            let label = if b.kind == BankKind::Sct { "Registra pagamenti" } else { "Registra incassi" };
-                            if theme::ghost(ui, true, icon::HAND_COINS, label).clicked() {
-                                let account = if settings.account.trim().is_empty() { "Banca".to_string() } else { settings.account.clone() };
-                                let today = chrono::Local::now().date_naive();
-                                st.settle = Some((b.id, if b.kind == BankKind::Sct { b.date.min(today) } else { today }, account));
-                            }
-                        }
-                        if b.status == BatchStatus::Issued && theme::ghost_colored(ui, true, icon::PROHIBIT, "Annulla", theme::NEGATIVE).clicked() {
-                            st.confirm_cancel = Some(b.id);
-                        }
-                    });
-                    if row.response().clicked() {
-                        toggle = Some(b.id);
-                    }
-                });
-            });
+        st.batch_grid.version = 0;
+        st.batch_grid.show(ui, cx.store, &cols, list, |b| b.id, h, false, 30.0);
     });
-    if let Some(id) = toggle {
-        st.open_batch = if st.open_batch == Some(id) { None } else { Some(id) };
+    st.open_batch = st.batch_grid.single();
+    match action.get() {
+        Some(Act::File(id)) => {
+            if let Some(b) = list.iter().find(|b| b.id == id) {
+                let ext = if b.kind == BankKind::Riba { "txt" } else { "xml" };
+                if let Some(p) = rfd::FileDialog::new().set_file_name(&b.file_name).add_filter("File", &[ext]).save_file() {
+                    match std::fs::write(&p, b.content.as_bytes()) {
+                        Ok(_) => cx.msgs.ok(format!("File salvato in {}", p.display())),
+                        Err(e) => cx.msgs.err(e.to_string()),
+                    }
+                }
+            }
+        }
+        Some(Act::Print(id)) => {
+            if let Ok((bb, items)) = cx.store.batch(id) {
+                if let Err(e) = services::open_bytes(&format!("Distinta {} {}-{}.pdf", bb.kind.code(), bb.year, bb.number), &bankfiles::batch_pdf(cx.store, &bb, &items)) {
+                    cx.msgs.err(e);
+                }
+            }
+        }
+        Some(Act::Settle(id)) => {
+            if let Some(b) = list.iter().find(|b| b.id == id) {
+                let account = if settings.account.trim().is_empty() { "Banca".to_string() } else { settings.account.clone() };
+                let today = chrono::Local::now().date_naive();
+                st.settle = Some((b.id, if b.kind == BankKind::Sct { b.date.min(today) } else { today }, account));
+            }
+        }
+        Some(Act::Cancel(id)) => st.confirm_cancel = Some(id),
+        None => {}
     }
     let Some(id) = st.open_batch else { return };
     let Ok((b, items)) = cx.store.batch(id) else { return };

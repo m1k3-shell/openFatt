@@ -2,12 +2,12 @@
 
 use chrono::Datelike;
 use eframe::egui::{self, RichText};
-use egui_extras::{Column, TableBuilder};
 use openfatt_core::model::CashEntry;
-use openfatt_core::vat::{self, Liquidation, Period, PeriodInputs, Periodicity, Register, RegisterRow};
+use openfatt_core::vat::{self, Liquidation, Period, PeriodInputs, Periodicity, RateAmount, Register, RegisterRow};
 use openfatt_store::VatSettings;
 use rust_decimal::Decimal;
 
+use super::grid::{Col, Grid, Val};
 use super::theme::{self, icon, Tone};
 use super::widgets::{self, eur};
 use super::{Ctx, Nav};
@@ -37,6 +37,7 @@ impl Tab {
 }
 
 pub struct State {
+    register_grid: Grid,
     tab: Tab,
     year: i32,
     index: u32,
@@ -49,7 +50,8 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        State { tab: Tab::Liquidation, year: 0, index: 0, periodicity: None, inputs: None, settings: None, show_settings: false, problems: None }
+        State {
+            register_grid: Grid::new("registro-iva"), tab: Tab::Liquidation, year: 0, index: 0, periodicity: None, inputs: None, settings: None, show_settings: false, problems: None }
     }
 }
 
@@ -133,8 +135,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Tab::Liquidation => {
             egui::ScrollArea::vertical().id_salt("vat_liq").auto_shrink([false, false]).show(ui, |ui| liquidation(ui, cx, st, period));
         }
-        Tab::Sales => register_view(ui, cx, Register::Sales, period),
-        Tab::Purchases => register_view(ui, cx, Register::Purchases, period),
+        Tab::Sales => register_view(ui, cx, st, Register::Sales, period),
+        Tab::Purchases => register_view(ui, cx, st, Register::Purchases, period),
         Tab::Retail => retail_view(ui, cx, period),
         Tab::Annual => {
             egui::ScrollArea::vertical().id_salt("vat_annual").auto_shrink([false, false]).show(ui, |ui| annual_view(ui, cx, st.year));
@@ -453,7 +455,7 @@ fn liquidation(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, period: Period) 
     }
 }
 
-fn register_view(ui: &mut egui::Ui, cx: &mut Ctx, register: Register, period: Period) {
+fn register_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, register: Register, period: Period) {
     let (from, to) = (period.first(), period.last());
     let rows = cx.store.vat_register(register, from, to).unwrap_or_default();
     let counted: Vec<RegisterRow> = rows.iter().filter(|r| register == Register::Sales || !r.reverse_charge).cloned().collect();
@@ -486,91 +488,51 @@ fn register_view(ui: &mut egui::Ui, cx: &mut Ctx, register: Register, period: Pe
                 ui.label(theme::muted("Nessun documento nel periodo."));
                 return;
             }
-            TableBuilder::new(ui)
-                .id_salt(("reg", register == Register::Sales))
-                .striped(false)
-                .resizable(false)
-                .max_scroll_height((avail - 230.0).max(160.0))
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::initial(95.0))
-                .column(Column::initial(70.0))
-                .column(Column::initial(if register == Register::Sales { 160.0 } else { 170.0 }))
-                .column(Column::remainder().at_least(180.0))
-                .column(Column::initial(140.0))
-                .column(Column::initial(110.0))
-                .column(Column::initial(110.0))
-                .column(Column::initial(100.0))
-                .header(28.0, |mut h| {
-                    let heads = if register == Register::Sales { ["Data", "Numero", "Tipo", "Cliente", "P.IVA / C.F.", "Aliquota", "Imponibile", "Imposta"] } else { ["Registr.", "Prot.", "Doc. fornitore", "Fornitore", "P.IVA / C.F.", "Aliquota", "Imponibile", "Imposta"] };
-                    for t in heads {
-                        h.col(|ui| {
-                            ui.label(theme::medium(t).size(13.0).color(theme::MUTED));
-                        });
+            type Row<'r> = (&'r RegisterRow, &'r RateAmount);
+            let flat: Vec<Row> = rows.iter().flat_map(|r| r.rates.iter().map(move |a| (r, a))).collect();
+            let sales = register == Register::Sales;
+            let open_req = std::cell::Cell::new(None);
+            let open_ref = &open_req;
+            let cols: Vec<Col<Row>> = vec![
+                Col::new("date", if sales { "Data" } else { "Registr." }, 95.0, |x: &Row| Val::Date(Some(x.0.date))),
+                Col::text("num", if sales { "Numero" } else { "Prot." }, 70.0, |x: &Row| x.0.number.clone()).render(move |ui: &mut egui::Ui, x: &Row| {
+                    if ui.link(&x.0.number).clicked() {
+                        open_ref.set(Some(x.0.document_id));
                     }
-                })
-                .body(|mut body| {
-                    for r in &rows {
-                        for (i, a) in r.rates.iter().enumerate() {
-                            body.row(30.0, |mut row| {
-                                let first = i == 0;
-                                row.col(|ui| {
-                                    if first {
-                                        ui.label(r.date.format("%d/%m/%Y").to_string());
-                                    }
-                                });
-                                row.col(|ui| {
-                                    if first && ui.link(&r.number).clicked() {
-                                        cx.nav.push(Nav::OpenDocument(r.document_id));
-                                    }
-                                });
-                                row.col(|ui| {
-                                    if first {
-                                        if register == Register::Sales {
-                                            ui.label(format!("{} {}", r.kind_label, r.fe_type));
-                                        } else {
-                                            ui.label(format!("{} del {}", if r.external_number.is_empty() { "-" } else { &r.external_number }, r.doc_date.format("%d/%m/%Y")));
-                                        }
-                                    }
-                                });
-                                row.col(|ui| {
-                                    if first {
-                                        ui.add(egui::Label::new(&r.party).truncate());
-                                        if r.reverse_charge {
-                                            theme::pill(ui, if register == Register::Sales { "reverse charge" } else { "integrazione" }, Tone::Neutral);
-                                        }
-                                    }
-                                });
-                                row.col(|ui| {
-                                    if first {
-                                        ui.label(theme::muted(&r.party_vat));
-                                    }
-                                });
-                                row.col(|ui| {
-                                    ui.label(a.label());
-                                    match a.liability.as_str() {
-                                        "S" => {
-                                            theme::pill(ui, "scissione", Tone::Neutral);
-                                        }
-                                        "D" => {
-                                            theme::pill(ui, "differita", Tone::Neutral);
-                                        }
-                                        _ => {}
-                                    }
-                                });
-                                row.col(|ui| {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(eur(a.taxable));
-                                    });
-                                });
-                                row.col(|ui| {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(eur(a.tax));
-                                    });
-                                });
-                            });
+                }),
+                Col::text("doc", if sales { "Tipo" } else { "Doc. fornitore" }, 170.0, move |x: &Row| if sales { format!("{} {}", x.0.kind_label, x.0.fe_type) } else { format!("{} del {}", if x.0.external_number.is_empty() { "-" } else { &x.0.external_number }, x.0.doc_date.format("%d/%m/%Y")) }).group(),
+                Col::text("party", if sales { "Cliente" } else { "Fornitore" }, 260.0, |x: &Row| x.0.party.clone()).group().render(move |ui: &mut egui::Ui, x: &Row| {
+                    ui.add(egui::Label::new(&x.0.party).truncate());
+                    if x.0.reverse_charge {
+                        theme::pill(ui, if sales { "reverse charge" } else { "integrazione" }, Tone::Neutral);
+                    }
+                }),
+                Col::text("vat", "P.IVA / C.F.", 140.0, |x: &Row| x.0.party_vat.clone()),
+                Col::text("rate", "Aliquota", 110.0, |x: &Row| x.1.label()).group().render(|ui: &mut egui::Ui, x: &Row| {
+                    ui.label(x.1.label());
+                    match x.1.liability.as_str() {
+                        "S" => {
+                            theme::pill(ui, "scissione", Tone::Neutral);
                         }
+                        "D" => {
+                            theme::pill(ui, "differita", Tone::Neutral);
+                        }
+                        _ => {}
                     }
+                }),
+                Col::money("taxable", "Imponibile", 110.0, |x: &Row| x.1.taxable).total(),
+                Col::money("tax", "Imposta", 100.0, |x: &Row| x.1.tax).total(),
+            ];
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    st.register_grid.toolbar(ui, cx.store, cx.msgs, &cols, &flat, "Registro IVA");
                 });
+            });
+            st.register_grid.version = 0;
+            st.register_grid.show(ui, cx.store, &cols, &flat, |x| x.0.document_id.wrapping_mul(100).wrapping_add(x.0.rates.iter().position(|a| std::ptr::eq(a, x.1)).unwrap_or(0) as i64), (avail - 270.0).max(160.0), false, 26.0);
+            if let Some(d) = open_req.get() {
+                cx.nav.push(Nav::OpenDocument(d));
+            }
         });
         ui.add_space(10.0);
         theme::card(ui, "Riepilogo per aliquota", |_| {}, |ui| {

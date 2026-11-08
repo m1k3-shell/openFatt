@@ -53,6 +53,7 @@ impl ScriptedClicks {
 }
 
 pub struct OpenFattApp {
+    cards: ui::quick::Cards,
     updates: crate::updates::Checker,
     backups: crate::backups::Manager,
     backup_ui: ui::backup::State,
@@ -107,6 +108,7 @@ impl OpenFattApp {
         let (mail_tx, mail_rx) = channel();
         let cfg = AppConfig::load();
         let mut app = OpenFattApp {
+            cards: Default::default(),
             updates: crate::updates::Checker::start(&cc.egui_ctx),
             cfg,
             store: None,
@@ -875,6 +877,9 @@ impl eframe::App for OpenFattApp {
                     Screen::Backup => ui::backup::show(ui, &mut cx, &mut self.backup_ui, &mut self.backups),
                     Screen::Extra(x) => ui::business::show(ui, &mut cx, &mut self.biz, x),
                 }
+                let can_view = self.user.as_ref().is_none_or(|u| u.can_read(openfatt_store::Area::Registry));
+                let can_edit_stock = self.user.as_ref().is_none_or(|u| u.can_write(openfatt_store::Area::Stock));
+                self.cards.show(ui.ctx(), &mut cx, can_view, can_edit_stock);
             });
         }
 

@@ -1,20 +1,25 @@
 //! Magazzino: giacenze, impegni, movimenti e rettifiche.
 
 use eframe::egui::{self, RichText};
-use egui_extras::{Column, TableBuilder};
 use openfatt_core::model::{DocKind, StockMove, Warehouse};
 use openfatt_core::money::fmt_it_trim;
 use rust_decimal::Decimal;
 
-use super::widgets::{self, eur, GRAY, ORANGE, RED};
-use super::{Ctx, Nav};
+use super::grid::{Col, Grid, Val};
+use super::quick::{self, MoveKind, Ref};
+use super::widgets::{eur, GRAY, ORANGE, RED};
+use super::{Cache, Ctx, Nav};
+use openfatt_store::StockRow;
 
 #[derive(Default)]
 pub struct State {
     search: String,
     selected: Option<i64>,
     only_under_min: bool,
-    adjusting: Option<(StockMove, bool)>,
+    grid: Grid,
+    moves_grid: Grid,
+    data: Cache<(String, Option<String>), Vec<StockRow>>,
+    moves: Cache<Option<i64>, Vec<(StockMove, String, String)>>,
     trace_code: String,
     trace: Option<Vec<openfatt_store::TraceRow>>,
     expiring_days: u32,
@@ -114,74 +119,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     let warehouses = cx.store.warehouses().unwrap_or_default();
     manage_window(ui, cx, st, &warehouses);
 
-    let mut close = false;
-    if let Some((m, inventory)) = &mut st.adjusting {
-        let prod = cx.store.product(m.product_id).ok().flatten();
-        let pname = prod.as_ref().map(|p| format!("{} {}", p.code, p.description)).unwrap_or_default();
-        egui::Window::new("Movimento di magazzino").collapsible(false).show(ui.ctx(), |ui| {
-            ui.label(RichText::new(&pname).strong());
-            ui.horizontal(|ui| {
-                ui.radio_value(inventory, false, "Carico/scarico");
-                ui.radio_value(inventory, true, "Inventario (quantità contata)");
-            });
-            egui::Grid::new("adj").num_columns(2).show(ui, |ui| {
-                ui.label("Data");
-                widgets::date_field(ui, "adj_date", &mut m.date);
-                ui.end_row();
-                ui.label("Magazzino");
-                widgets::warehouse_combo(ui, "adj_wh", &mut m.warehouse, &warehouses, true, 200.0);
-                ui.end_row();
-                ui.label(if *inventory { "Quantità contata" } else { "Quantità (+ carico, - scarico)" });
-                widgets::dec_field(ui, "adj_qty", &mut m.qty, 100.0, 4);
-                ui.end_row();
-                if !*inventory {
-                    ui.label("Causale");
-                    ui.add(egui::TextEdit::singleline(&mut m.reason).desired_width(220.0).hint_text("es. Carico iniziale"));
-                    ui.end_row();
-                    ui.label("Valore unitario");
-                    widgets::dec_field(ui, "adj_val", &mut m.unit_value, 100.0, 4);
-                    ui.end_row();
-                }
-                if let Some(p) = &prod {
-                    if !p.variants.is_empty() {
-                        ui.label("Variante");
-                        egui::ComboBox::from_id_salt("adj_var").selected_text(if m.variant.is_empty() { "scegli..." } else { m.variant.as_str() }).show_ui(ui, |ui| {
-                            for c in p.variants.combinations() {
-                                ui.selectable_value(&mut m.variant, c.clone(), c);
-                            }
-                        });
-                        ui.end_row();
-                    }
-                    if p.tracking == openfatt_core::model::Tracking::Serial {
-                        ui.label("Numeri di serie");
-                        ui.add(egui::TextEdit::singleline(&mut m.serial).desired_width(220.0).hint_text("separati da virgola"));
-                        ui.end_row();
-                    }
-                }
-                ui.label("Lotto");
-                ui.add(egui::TextEdit::singleline(&mut m.lot).desired_width(140.0).hint_text("in uscita vuoto = automatico"));
-                ui.end_row();
-                ui.label("Scadenza lotto");
-                widgets::opt_date_field(ui, "adj_exp", &mut m.expiry);
-                ui.end_row();
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Registra").clicked() {
-                    let r = if *inventory { cx.store.set_inventory(m.product_id, m.qty, m.date, &m.warehouse).map(|_| ()) } else { cx.store.add_manual_stock_move(m).map(|_| ()) };
-                    if cx.msgs.check(r, "Movimento registrato").is_some() {
-                        close = true;
-                    }
-                }
-                if ui.button("Annulla").clicked() {
-                    close = true;
-                }
-            });
-        });
-    }
-    if close {
-        st.adjusting = None;
-    }
-
+    st.grid.name = "magazzino";
+    st.moves_grid.name = "magazzino-movimenti";
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut st.search).hint_text("\u{E30C} articolo").desired_width(260.0));
         ui.checkbox(&mut st.only_under_min, "solo sotto scorta");
@@ -193,8 +132,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             }
         });
         if let Some(id) = st.selected {
-            if ui.button("± Movimento / inventario").clicked() {
-                st.adjusting = Some((StockMove { product_id: id, qty: Decimal::ZERO, reason: "Rettifica".into(), warehouse: st.warehouse_filter.clone().unwrap_or_default(), ..Default::default() }, false));
+            for (kind, t) in [(MoveKind::Load, "Carica"), (MoveKind::Unload, "Scarica"), (MoveKind::Adjust, "Rettifica")] {
+                if ui.button(t).clicked() {
+                    quick::open_move(ui.ctx(), kind, id);
+                }
             }
         }
         if warehouses.len() > 1 && ui.button("\u{E0A0} Trasferimento").on_hover_text("Sposta merce tra due magazzini").clicked() {
@@ -204,67 +145,38 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             st.managing = true;
         }
     });
-    let rows: Vec<_> = cx.store.stock_report(&st.search, st.warehouse_filter.as_deref()).unwrap_or_default().into_iter().filter(|r| !st.only_under_min || r.under_min).collect();
-    let value: Decimal = rows.iter().map(|r| r.value).sum();
-    ui.label(RichText::new(format!("{} articoli gestiti · valore al costo € {}", rows.len(), eur(value))).color(GRAY));
-
-    let h = ui.available_height() * 0.6;
-    TableBuilder::new(ui)
-        .id_salt("stock_table")
-        .striped(true)
-        .resizable(false)
-        .max_scroll_height(h)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::initial(110.0))
-        .column(Column::initial(300.0).at_least(100.0))
-        .column(Column::initial(90.0))
-        .column(Column::initial(90.0))
-        .column(Column::initial(90.0))
-        .column(Column::initial(90.0))
-        .column(Column::initial(90.0))
-        .column(Column::remainder())
-        .header(22.0, |mut hd| {
-            for t in ["Codice", "Descrizione", "Giacenza", "Impegnato", "In arrivo", "Disponibile", "Scorta min.", "Valore"] {
-                hd.col(|ui| {
-                    ui.strong(t);
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(22.0, rows.len(), |mut row| {
-                let r = &rows[row.index()];
-                let sel = st.selected == Some(r.product.id);
-                row.col(|ui| {
-                    if ui.selectable_label(sel, &r.product.code).clicked() {
-                        st.selected = Some(r.product.id);
-                    }
-                });
-                row.col(|ui| {
-                    if ui.selectable_label(sel, &r.product.description).clicked() {
-                        st.selected = Some(r.product.id);
-                    }
-                });
-                row.col(|ui| {
-                    let t = fmt_it_trim(r.stock, 0, 3);
-                    ui.label(if r.stock.is_sign_negative() { RichText::new(t).color(RED) } else if r.under_min { RichText::new(t).color(ORANGE) } else { RichText::new(t) });
-                });
-                row.col(|ui| {
-                    ui.label(fmt_it_trim(r.ordered_by_customers, 0, 3));
-                });
-                row.col(|ui| {
-                    ui.label(fmt_it_trim(r.incoming, 0, 3));
-                });
-                row.col(|ui| {
-                    ui.label(fmt_it_trim(r.stock - r.ordered_by_customers + r.incoming, 0, 3));
-                });
-                row.col(|ui| {
-                    ui.label(fmt_it_trim(r.product.min_stock, 0, 3));
-                });
-                row.col(|ui| {
-                    ui.label(eur(r.value));
-                });
-            });
+    let key = (st.search.clone(), st.warehouse_filter.clone());
+    let rows_rc = st.data.get(cx.store.generation(), &key, || cx.store.stock_report(&key.0, key.1.as_deref()).unwrap_or_default());
+    let rows: Vec<&StockRow> = rows_rc.iter().filter(|r| !st.only_under_min || r.under_min).collect();
+    let cols: Vec<Col<&StockRow>> = vec![
+        Col::text("code", "Codice", 110.0, |r: &&StockRow| r.product.code.clone()).opens(|r: &&StockRow| Some(Ref::Product(r.product.id))),
+        Col::text("desc", "Descrizione", 300.0, |r: &&StockRow| r.product.description.clone()).opens(|r: &&StockRow| Some(Ref::Product(r.product.id))),
+        Col::text("cat", "Categoria", 180.0, |r: &&StockRow| r.product.category.clone()).hidden().group(),
+        Col::text("producer", "Produttore", 130.0, |r: &&StockRow| r.product.producer.clone()).hidden().group(),
+        Col::text("location", "Ubicazione", 100.0, |r: &&StockRow| r.product.location.clone()).hidden().group(),
+        Col::new("stock", "Giacenza", 85.0, |r: &&StockRow| Val::Num(r.stock, 3)).right(),
+        Col::new("committed", "Impegnato", 85.0, |r: &&StockRow| Val::Num(r.ordered_by_customers, 3)).right(),
+        Col::new("incoming", "In arrivo", 85.0, |r: &&StockRow| Val::Num(r.incoming, 3)).right(),
+        Col::new("available", "Disponibile", 90.0, |r: &&StockRow| Val::Num(r.stock - r.ordered_by_customers, 3)).right(),
+        Col::new("min", "Scorta min.", 85.0, |r: &&StockRow| Val::Num(r.product.min_stock, 3)).right(),
+        Col::new("under", "Sotto scorta", 80.0, |r: &&StockRow| Val::Bool(r.under_min)).hidden().group(),
+        Col::money("cost", "Costo", 85.0, |r: &&StockRow| r.product.cost).hidden(),
+        Col::money("value", "Valore", 100.0, |r: &&StockRow| r.value).total(),
+    ];
+    ui.horizontal(|ui| {
+        let value: Decimal = rows.iter().filter(|r| st.grid.accepts(&cols, r)).map(|r| r.value).sum();
+        ui.label(RichText::new(format!("{} articoli gestiti · valore al costo € {}", rows.len(), eur(value))).color(GRAY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &rows, "Magazzino");
         });
+    });
+    if let (Some(id), true) = (st.selected, st.grid.selected.is_empty()) {
+        st.grid.select_only(id);
+    }
+    let h = ui.available_height() * 0.52;
+    st.grid.version = st.data.version.wrapping_mul(2).wrapping_add(st.only_under_min as u64);
+    st.grid.show(ui, cx.store, &cols, &rows, |r| r.product.id, h, false, 22.0);
+    st.selected = st.grid.single();
 
     ui.separator();
     if let Some(id) = st.selected {
@@ -324,36 +236,60 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     if close_trace {
         st.trace = None;
     }
-    ui.label(RichText::new(if st.selected.is_some() { "Movimenti dell'articolo selezionato" } else { "Ultimi movimenti" }).strong());
-    let moves = cx.store.stock_moves(st.selected, 300).unwrap_or_default();
-    let mut delete = None;
-    egui::ScrollArea::vertical().id_salt("moves").show(ui, |ui| {
-        egui::Grid::new("moves_grid").striped(true).num_columns(6).show(ui, |ui| {
-            for t in ["Data", "Articolo", "Quantità", "Causale", "Variante / lotto / serie", ""] {
-                ui.strong(t);
-            }
-            ui.end_row();
-            for m in &moves {
-                ui.label(m.date.format("%d/%m/%Y").to_string());
-                ui.label(cx.store.product(m.product_id).ok().flatten().map(|p| p.code).unwrap_or_default());
-                ui.label(RichText::new(fmt_it_trim(m.qty, 0, 3)).color(if m.qty.is_sign_negative() { RED } else { egui::Color32::from_rgb(20, 120, 50) }));
-                if let Some(d) = m.document_id {
-                    if ui.link(&m.reason).clicked() {
-                        cx.nav.push(Nav::OpenDocument(d));
-                    }
-                } else {
-                    ui.label(&m.reason);
+    let selected = st.selected;
+    let moves_rc = st.moves.get(cx.store.generation(), &selected, || {
+        let names: std::collections::HashMap<i64, (String, String)> = cx.store.products("", true).unwrap_or_default().into_iter().map(|p| (p.id, (p.code, p.description))).collect();
+        cx.store.stock_moves(selected, 2000).unwrap_or_default().into_iter().map(|m| {
+            let (code, desc) = names.get(&m.product_id).cloned().unwrap_or_default();
+            (m, code, desc)
+        }).collect()
+    });
+    type MoveRow = (StockMove, String, String);
+    let delete_req = std::cell::Cell::new(None);
+    let open_req = std::cell::Cell::new(None);
+    let (delete_ref, open_ref) = (&delete_req, &open_req);
+    let cols: Vec<Col<MoveRow>> = vec![
+        Col::new("date", "Data", 90.0, |r: &MoveRow| Val::Date(Some(r.0.date))),
+        Col::text("code", "Articolo", 110.0, |r: &MoveRow| r.1.clone()).opens(|r: &MoveRow| Some(Ref::Product(r.0.product_id))),
+        Col::text("desc", "Descrizione", 240.0, |r: &MoveRow| r.2.clone()).opens(|r: &MoveRow| Some(Ref::Product(r.0.product_id))),
+        Col::new("qty", "Quantità", 80.0, |r: &MoveRow| Val::Num(r.0.qty, 3)).right().render(|ui: &mut egui::Ui, r: &MoveRow| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                ui.label(RichText::new(fmt_it_trim(r.0.qty, 0, 3)).color(if r.0.qty.is_sign_negative() { RED } else { egui::Color32::from_rgb(20, 120, 50) }));
+            });
+        }),
+        Col::text("reason", "Causale", 260.0, |r: &MoveRow| r.0.reason.clone()).render(move |ui: &mut egui::Ui, r: &MoveRow| match r.0.document_id {
+            Some(d) => {
+                if ui.link(&r.0.reason).clicked() {
+                    open_ref.set(Some(d));
                 }
-                ui.label([m.variant.as_str(), m.lot.as_str(), m.serial.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · "));
-                if m.document_id.is_none() && ui.small_button("\u{E4A6}").clicked() {
-                    delete = Some(m.id);
-                } else {
-                    ui.label("");
-                }
-                ui.end_row();
             }
+            None => {
+                ui.label(&r.0.reason);
+            }
+        }),
+        Col::text("wh", "Magazzino", 110.0, |r: &MoveRow| r.0.warehouse.clone()).group(),
+        Col::text("track", "Variante / lotto / serie", 160.0, |r: &MoveRow| [r.0.variant.as_str(), r.0.lot.as_str(), r.0.serial.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" · ")),
+        Col::money("value", "Valore unit.", 90.0, |r: &MoveRow| r.0.unit_value).hidden(),
+        Col::text("act", "", 34.0, |_: &MoveRow| String::new()).render(move |ui: &mut egui::Ui, r: &MoveRow| {
+            if r.0.document_id.is_none() && ui.small_button("\u{E4A6}").on_hover_text("Elimina il movimento").clicked() {
+                delete_ref.set(Some(r.0.id));
+            }
+        }),
+    ];
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(if selected.is_some() { "Movimenti dell'articolo selezionato" } else { "Ultimi movimenti" }).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.moves_grid.toolbar(ui, cx.store, cx.msgs, &cols, &moves_rc, "Movimenti di magazzino");
         });
     });
+    let h = ui.available_height() - 4.0;
+    st.moves_grid.version = st.moves.version;
+    st.moves_grid.show(ui, cx.store, &cols, &moves_rc, |r| r.0.id, h, false, 22.0);
+    if let Some(d) = open_req.get() {
+        cx.nav.push(Nav::OpenDocument(d));
+    }
+    let delete = delete_req.get();
     if let Some(id) = delete {
         cx.msgs.check(cx.store.delete_manual_stock_move(id), "Movimento eliminato");
     }

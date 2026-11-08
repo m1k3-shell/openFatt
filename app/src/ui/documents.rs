@@ -28,6 +28,7 @@ pub struct State {
     grids: Vec<(DocGroup, Grid)>,
     data: super::Cache<(String, Option<i32>, String, Option<&'static str>), Vec<DocSummary>>,
     progress: super::Cache<String, std::collections::HashMap<i64, openfatt_store::OrderProgress>>,
+    agents: super::Cache<(), Vec<openfatt_store::Agent>>,
 }
 
 fn grid_name(g: DocGroup) -> &'static str {
@@ -70,6 +71,7 @@ impl Default for State {
             grids: Vec::new(),
             data: Default::default(),
             progress: Default::default(),
+            agents: Default::default(),
         }
     }
 }
@@ -161,7 +163,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
             }
         }
     }
-    let filter = DocFilter { kinds: kinds.clone(), year: st.year, search: st.search.clone(), status: st.status, ..Default::default() };
+    // un filtro sulla data deve poter uscire dall'anno scelto
+    let date_filtered = st.grids.iter().any(|(g, grid)| *g == group && grid.has_filter("date"));
+    let year = if date_filtered { None } else { st.year };
+    let filter = DocFilter { kinds: kinds.clone(), year, search: st.search.clone(), status: st.status, ..Default::default() };
     let fkey = (format!("{:?}", filter.kinds), filter.year, filter.search.clone(), filter.status.map(|s| s.code()));
     let all_rc = st.data.get(cx.store.generation(), &fkey, || cx.store.documents(&filter).unwrap_or_default());
     let all: &Vec<DocSummary> = &all_rc;
@@ -234,6 +239,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
         let open_req: std::cell::Cell<Option<i64>> = std::cell::Cell::new(None);
         let open_ref = &open_req;
         let today = chrono::Local::now().date_naive();
+        let agents_rc = st.agents.get(cx.store.generation(), &(), || cx.store.agents(true).unwrap_or_default());
+        let agents: &Vec<openfatt_store::Agent> = &agents_rc;
         let effective = move |d: &DocSummary| {
             let p = prog.get(&d.id);
             d.order_status.effective(p.map(|x| x.any).unwrap_or(false), p.map(|x| x.all).unwrap_or(false))
@@ -250,8 +257,28 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
                 }),
                 kind_col,
                 Col::text("month", "Mese", 90.0, |d: &&DocSummary| d.date.format("%Y-%m").to_string()).hidden().group(),
-                Col::text("party", party_title, 300.0, |d: &&DocSummary| d.party_name.clone()).group(),
+                Col::text("party", party_title, 300.0, |d: &&DocSummary| d.party_name.clone()).group().opens(|d: &&DocSummary| d.party_id.map(super::quick::Ref::Party)),
+                Col::text("city", "Comune", 130.0, |d: &&DocSummary| d.party_city.clone()).hidden().group(),
+                Col::text("province", "Prov.", 55.0, |d: &&DocSummary| d.party_province.clone()).hidden().group(),
+                Col::text("vat", "P.IVA", 120.0, |d: &&DocSummary| d.party_vat.clone()).hidden(),
+                Col::text("payment", "Pagamento", 170.0, |d: &&DocSummary| d.payment_name.clone()).hidden().group(),
+                Col::text("year", "Anno", 60.0, |d: &&DocSummary| d.year.to_string()).hidden().group(),
+                Col::text("agent", "Agente", 140.0, move |d: &&DocSummary| d.agent_id.and_then(|id| agents.iter().find(|a| a.id == id)).map(|a| a.name.clone()).unwrap_or_default()).hidden().group(),
+                Col::money("net", "Netto a pagare", 110.0, |d: &&DocSummary| d.net_to_pay).hidden(),
             ];
+            if group == DocGroup::SupplierOrders || group == DocGroup::Orders {
+                let (o_t, a_t, r_t): (&'static str, &'static str, &'static str) = if purchase { ("Ordinati", "Arrivati", "Da arrivare") } else { ("Ordinati", "Evasi", "Da evadere") };
+                let pcs = |x: Decimal| Val::Num(x, 3);
+                let mut a = Col::new("pcs", o_t, 75.0, move |d: &&DocSummary| pcs(prog.get(&d.id).map(|p| p.ordered).unwrap_or_default())).right();
+                let mut b = Col::new("arrived", a_t, 75.0, move |d: &&DocSummary| pcs(prog.get(&d.id).map(|p| p.arrived).unwrap_or_default())).right();
+                let mut c = Col::new("missing", r_t, 85.0, move |d: &&DocSummary| pcs(prog.get(&d.id).map(|p| (p.ordered - p.arrived).max(Decimal::ZERO)).unwrap_or_default())).right();
+                if !purchase {
+                    a = a.hidden();
+                    b = b.hidden();
+                    c = c.hidden();
+                }
+                v.extend([a, b, c]);
+            }
             if orders {
                 v.push(Col::text("order", "Stato", 320.0, move |d: &&DocSummary| effective(d).label().to_string()).group().render(move |ui: &mut egui::Ui, d: &&DocSummary| {
                     let label = effective(d).label();

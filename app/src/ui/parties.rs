@@ -302,6 +302,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
         Col::text("iban", "IBAN", 230.0, |p: &Party| p.iban.clone()).hidden(),
         Col::new("pa", "PA", 45.0, |p: &Party| Val::Bool(p.is_pa)).hidden().group(),
         Col::new("active", "Attivo", 60.0, |p: &Party| Val::Bool(p.active)).hidden().group(),
+        Col::text("bank", "Banca", 160.0, |p: &Party| p.bank_name.clone()).hidden().group(),
+        Col::text("notes", "Note", 200.0, |p: &Party| p.notes.clone()).hidden(),
     ];
     theme::title_row(ui, &[], title, Some(theme::subline(&[(&format!("{} voci", list.len()), false)])), |ui| {
         st.grid.toolbar(ui, cx.store, cx.msgs, &cols, list, title);

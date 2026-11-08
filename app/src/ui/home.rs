@@ -431,7 +431,14 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
                                 cx.nav.push(Nav::OpenDocument(d.id));
                             }
                             ui.label(d.date.format("%d/%m/%Y").to_string());
-                            ui.label(if d.party_name.is_empty() { "-".to_string() } else { truncate(&d.party_name, 34) });
+                            match d.party_id {
+                                Some(id) if !d.party_name.is_empty() => {
+                                    super::quick::link(ui, truncate(&d.party_name, 34), super::quick::Ref::Party(id));
+                                }
+                                _ => {
+                                    ui.label(if d.party_name.is_empty() { "-".to_string() } else { truncate(&d.party_name, 34) });
+                                }
+                            }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(eur(d.total));
                             });
@@ -482,7 +489,14 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 0.0;
                                 ui.set_width((ui.available_width() - 90.0).max(60.0));
-                                ui.label(truncate(&d.party_name, 28));
+                                match d.party_id {
+                                    Some(id) => {
+                                        super::quick::link(ui, truncate(&d.party_name, 28), super::quick::Ref::Party(id));
+                                    }
+                                    None => {
+                                        ui.label(truncate(&d.party_name, 28));
+                                    }
+                                }
                                 ui.label(RichText::new(format!("{}{}", d.doc_label, if late { " · scaduta" } else { "" })).size(12.0).color(MUTED));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

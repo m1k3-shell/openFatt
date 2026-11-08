@@ -39,6 +39,7 @@ pub struct State {
     panel_gen: u64,
     panel_tab: u8,
     panel_rows: Vec<ListRow>,
+    stock_info: super::quick::StockInfoCache,
 }
 
 /// Prezzo di un listino nella scheda dell'articolo.
@@ -51,7 +52,7 @@ struct ListRow {
 
 impl Default for State {
     fn default() -> Self {
-        State { search: String::new(), selected: None, editing: None, confirm_delete: None, show_inactive: false, bulk_pct: Decimal::ZERO, bulk_open: false, grid: Grid::new("articoli"), multi: None, comp_search: String::new(), data: Default::default(), stock_cache: Default::default(), suppliers: Default::default(), attachments: None, photo: None, list_sel: None, ivati: false, list_prices: Default::default(), price_title: (String::new(), ""), panel: None, panel_dirty: false, panel_gen: 0, panel_tab: 0, panel_rows: Vec::new() }
+        State { search: String::new(), selected: None, editing: None, confirm_delete: None, show_inactive: false, bulk_pct: Decimal::ZERO, bulk_open: false, grid: Grid::new("articoli"), multi: None, comp_search: String::new(), data: Default::default(), stock_cache: Default::default(), suppliers: Default::default(), attachments: None, photo: None, list_sel: None, ivati: false, list_prices: Default::default(), price_title: (String::new(), ""), panel: None, panel_dirty: false, panel_gen: 0, panel_tab: 0, panel_rows: Vec::new(), stock_info: Default::default() }
     }
 }
 
@@ -441,26 +442,33 @@ fn side_panel(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, vats: &[openfatt_
                 });
             }
             3 => {
-                let qty = stock.get(&p.id).copied().unwrap_or_default();
+                if p.id != 0 && p.manage_stock {
+                    let info = st.stock_info.get(cx, &p);
+                    super::quick::stock_status(ui, &p, &info);
+                    ui.add_space(4.0);
+                    theme::rule(ui);
+                    ui.add_space(4.0);
+                }
                 egui::Grid::new("pr_stock").num_columns(2).spacing([6.0, 4.0]).min_col_width(120.0).show(ui, |ui| {
-                    lab(ui, "Giacenza");
-                    ui.label(theme::bold(fmt_it_trim(qty, 0, 3)));
+                    lab(ui, "Ordina multipli di");
+                    changed |= widgets::dec_field(ui, "pr_mult", &mut p.order_multiple, 90.0, 3);
                     ui.end_row();
-                    lab(ui, "Valore al costo");
-                    ui.label(format!("€ {}", widgets::eur((qty * p.cost).round_dp(2))));
-                    ui.end_row();
-                    lab(ui, "Scorta minima");
-                    changed |= widgets::dec_field(ui, "pr_min", &mut p.min_stock, 90.0, 3);
-                    ui.end_row();
-                    lab(ui, "Giorni per l'ordine");
+                    lab(ui, "Riordino (gg.)");
                     let mut d = Decimal::from(p.order_days);
                     if widgets::dec_field(ui, "pr_days", &mut d, 90.0, 0) {
                         p.order_days = rust_decimal::prelude::ToPrimitive::to_u32(&d).unwrap_or(0);
                         changed = true;
                     }
                     ui.end_row();
-                    lab(ui, "Ordina a multipli di");
-                    changed |= widgets::dec_field(ui, "pr_mult", &mut p.order_multiple, 90.0, 3);
+                    lab(ui, "Scorta minima");
+                    changed |= widgets::dec_field(ui, "pr_min", &mut p.min_stock, 90.0, 3);
+                    ui.end_row();
+                    lab(ui, "Ubicazione");
+                    changed |= ui.add(egui::TextEdit::singleline(&mut p.location).desired_width(150.0)).changed();
+                    ui.end_row();
+                    let qty = stock.get(&p.id).copied().unwrap_or_default();
+                    lab(ui, "Valore al costo");
+                    ui.label(format!("€ {}", widgets::eur((qty * p.cost).round_dp(2))));
                     ui.end_row();
                 });
             }
@@ -953,10 +961,13 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Col::money("value", "Valore magazzino", 120.0, move |p: &Product| if p.manage_stock { (stock_value.get(&p.id).copied().unwrap_or_default() * p.cost).round_dp(2) } else { Decimal::ZERO }).total().hidden(),
         Col::new("min", "Scorta min.", 80.0, |p: &Product| Val::Num(p.min_stock, 3)).right().hidden(),
         Col::text("barcode", "Codice a barre", 130.0, |p: &Product| p.barcode.clone()).hidden(),
-        Col::text("supplier", "Fornitore", 180.0, move |p: &Product| p.supplier_id.and_then(|id| sup_c.iter().find(|s| s.id == id)).map(|s| s.display_name()).unwrap_or_default()).hidden().group(),
+        Col::text("supplier", "Fornitore", 180.0, move |p: &Product| p.supplier_id.and_then(|id| sup_c.iter().find(|s| s.id == id)).map(|s| s.display_name()).unwrap_or_default()).hidden().group().opens(|p: &Product| p.supplier_id.map(super::quick::Ref::Party)),
         Col::text("sup_code", "Cod. fornitore", 110.0, |p: &Product| p.supplier_code.clone()).hidden(),
         Col::text("kind", "Tipo", 80.0, |p: &Product| if p.is_service { "servizio".into() } else { "articolo".into() }).hidden().group(),
         Col::new("active", "Attivo", 60.0, |p: &Product| Val::Bool(p.active)).hidden().group(),
+        Col::text("location", "Ubicazione", 100.0, |p: &Product| p.location.clone()).hidden().group(),
+        Col::text("notes", "Note", 200.0, |p: &Product| p.notes.clone()).hidden(),
+        Col::text("tracking", "Tracciabilità", 110.0, |p: &Product| p.tracking.label().to_string()).hidden().group(),
     ];
     let n_voci = format!("{} voci", list.len());
     theme::title_row(ui, &[], "Prodotti", Some(theme::subline(&[(&n_voci, false)])), |ui| {

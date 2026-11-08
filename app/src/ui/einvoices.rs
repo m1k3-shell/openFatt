@@ -2,10 +2,11 @@
 
 use chrono::Datelike;
 use eframe::egui::{self, RichText};
-use egui_extras::{Column, TableBuilder};
-use openfatt_store::{Direction, EInvoiceStatus};
+use super::grid::{Col, Grid, Val};
+use super::quick::Ref;
+use openfatt_store::{Direction, EInvoice, EInvoiceStatus};
 
-use super::widgets::{self, eur, status_color, GRAY, ORANGE};
+use super::widgets::{self, status_color, GRAY, ORANGE};
 use super::{Ctx, Nav};
 use crate::services;
 
@@ -16,11 +17,13 @@ pub struct State {
     viewing: Option<i64>,
     confirm_delete: Option<i64>,
     pfx_prompt: Option<(i64, String)>,
+    grid: Grid,
+    by_vat: super::Cache<(), std::collections::HashMap<String, i64>>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { search: String::new(), year: Some(chrono::Local::now().year()), selected: None, viewing: None, confirm_delete: None, pfx_prompt: None }
+        State { search: String::new(), year: Some(chrono::Local::now().year()), selected: None, viewing: None, confirm_delete: None, pfx_prompt: None, grid: Grid::new("fatture-elettroniche"), by_vat: Default::default() }
     }
 }
 
@@ -297,77 +300,41 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, dir: Direction) {
         }
     }
 
-    let avail = ui.available_height();
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .max_scroll_height(avail)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::initial(84.0))
-        .column(Column::initial(70.0))
-        .column(Column::initial(90.0))
-        .column(Column::initial(260.0).at_least(100.0))
-        .column(Column::initial(100.0))
-        .column(Column::initial(200.0))
-        .column(Column::remainder())
-        .header(22.0, |mut h| {
-            for t in ["Data", "Tipo", "Numero", if dir == Direction::Out { "Cliente" } else { "Fornitore" }, "Totale", "Stato", "File"] {
-                h.col(|ui| {
-                    ui.strong(t);
-                });
+    let by_vat_rc = st.by_vat.get(cx.store.generation(), &(), || cx.store.parties(&openfatt_store::PartyFilter { include_inactive: true, ..Default::default() }).unwrap_or_default().into_iter().filter(|p| !p.vat_number.is_empty()).map(|p| (p.vat_number, p.id)).collect());
+    let by_vat: &std::collections::HashMap<String, i64> = &by_vat_rc;
+    let doc_date = |e: &EInvoice| chrono::NaiveDate::parse_from_str(&e.doc_date, "%Y-%m-%d").ok();
+    let cols: Vec<Col<EInvoice>> = vec![
+        Col::new("date", "Data", 90.0, move |e: &EInvoice| Val::Date(doc_date(e))),
+        Col::text("type", "Tipo", 70.0, |e: &EInvoice| e.doc_type.clone()).group(),
+        Col::text("num", "Numero", 90.0, |e: &EInvoice| e.doc_number.clone()),
+        Col::text("party", if dir == Direction::Out { "Cliente" } else { "Fornitore" }, 260.0, |e: &EInvoice| e.party_name.clone()).group().opens(move |e: &EInvoice| by_vat.get(e.party_vat.trim_start_matches("IT")).or_else(|| by_vat.get(&e.party_vat)).copied().map(Ref::Party)),
+        Col::text("vat", "P.IVA", 120.0, |e: &EInvoice| e.party_vat.clone()).hidden(),
+        Col::money("total", "Totale", 100.0, |e: &EInvoice| e.total).total(),
+        Col::text("status", "Stato", 200.0, |e: &EInvoice| e.status.label().to_string()).group().render(|ui: &mut egui::Ui, e: &EInvoice| {
+            ui.label(RichText::new(e.status.label()).color(status_color(e.status.code())));
+            if e.direction == Direction::Out && e.status == EInvoiceStatus::ToSend {
+                if e.is_signed() {
+                    ui.label(RichText::new("\u{EBAC} firmata").small().color(widgets::GREEN));
+                } else if e.is_pa() {
+                    ui.label(RichText::new("da firmare").small().color(widgets::RED));
+                }
             }
-        })
-        .body(|body| {
-            body.rows(22.0, list.len(), |mut row| {
-                let e = &list[row.index()];
-                let is_sel = st.selected == Some(e.id);
-                let date = chrono::NaiveDate::parse_from_str(&e.doc_date, "%Y-%m-%d").map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or(e.doc_date.clone());
-                row.col(|ui| {
-                    let r = ui.selectable_label(is_sel, date);
-                    if r.clicked() {
-                        st.selected = Some(e.id);
-                    }
-                    if r.double_clicked() {
-                        st.viewing = Some(e.id);
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(&e.doc_type);
-                });
-                row.col(|ui| {
-                    let r = ui.selectable_label(is_sel, &e.doc_number);
-                    if r.clicked() {
-                        st.selected = Some(e.id);
-                    }
-                    if r.double_clicked() {
-                        st.viewing = Some(e.id);
-                    }
-                });
-                row.col(|ui| {
-                    let r = ui.selectable_label(is_sel, &e.party_name);
-                    if r.clicked() {
-                        st.selected = Some(e.id);
-                    }
-                    if r.double_clicked() {
-                        st.viewing = Some(e.id);
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(eur(e.total));
-                });
-                row.col(|ui| {
-                    ui.label(RichText::new(e.status.label()).color(status_color(e.status.code())));
-                    if e.direction == Direction::Out && e.status == EInvoiceStatus::ToSend {
-                        if e.is_signed() {
-                            ui.label(RichText::new("\u{EBAC} firmata").small().color(widgets::GREEN));
-                        } else if e.is_pa() {
-                            ui.label(RichText::new("da firmare").small().color(widgets::RED));
-                        }
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(RichText::new(&e.file_name).small().color(GRAY));
-                });
-            });
+        }),
+        Col::text("file", "File", 260.0, |e: &EInvoice| e.file_name.clone()),
+    ];
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Fatture elettroniche");
         });
+    });
+    if let (Some(id), true) = (st.selected, st.grid.selected.is_empty()) {
+        st.grid.select_only(id);
+    }
+    let avail = ui.available_height() - 4.0;
+    st.grid.version = 0;
+    let ev = st.grid.show(ui, cx.store, &cols, &list, |e| e.id, avail, false, 22.0);
+    st.selected = st.grid.single();
+    if ev.opened.is_some() {
+        st.viewing = ev.opened;
+    }
 }

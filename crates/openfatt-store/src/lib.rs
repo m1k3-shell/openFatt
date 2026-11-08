@@ -58,7 +58,7 @@ pub use ledger::{DueRow, AccountBalance};
 pub use mail::{MailKind, MailLogEntry, MailStatus, ReminderCandidate};
 pub use inventory::{ga_core_count::CountRow, CountImport, InventoryApplied, InventoryLine, InventorySession, InventoryStatus, InventoryTotals};
 pub use parties::PartyFilter;
-pub use products::StockRow;
+pub use products::{StockInfo, StockRow, StockState};
 pub use retail::RetailDay;
 pub use tracking::{LotRow, TraceRow, LOT_UNKNOWN};
 pub use warehouses::DEFAULT_WAREHOUSE;

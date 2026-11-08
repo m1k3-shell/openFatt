@@ -22,6 +22,7 @@ pub mod parties;
 pub mod pricelists;
 pub mod print;
 pub mod products;
+pub mod quick;
 pub mod settings;
 pub mod shop;
 pub mod stats;

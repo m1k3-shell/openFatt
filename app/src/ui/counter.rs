@@ -10,6 +10,7 @@ use openfatt_core::money::{fmt_it_trim, round2};
 use openfatt_pos::{Driver, PayKind, Receipt, ReceiptLine, ReceiptPayment, RtConfig, RtOutcome};
 use rust_decimal::Decimal;
 
+use super::grid::{Col, Grid, Val};
 use super::widgets::{self, eur, GRAY, GREEN, ORANGE, RED};
 use super::{Ctx, Nav};
 
@@ -22,6 +23,7 @@ enum Tab {
 }
 
 pub struct State {
+    sales_grid: Grid,
     tab: Tab,
     cart: Vec<DocLine>,
     code: String,
@@ -49,6 +51,7 @@ impl Default for State {
     fn default() -> Self {
         let today = chrono::Local::now().date_naive();
         State {
+            sales_grid: Grid::new("banco-vendite"),
             tab: Tab::Till,
             cart: Vec::new(),
             code: String::new(),
@@ -620,63 +623,98 @@ fn sales(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     });
     let list = cx.store.retail_sales(st.from, st.to).unwrap_or_default();
     let busy = st.pending.is_some();
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("pos_sales").striped(true).num_columns(7).spacing([10.0, 6.0]).show(ui, |ui| {
-            for h in ["N.", "Data e ora", "Totale", "Pagamento", "Registratore", "Estremi", ""] {
-                ui.strong(h);
-            }
-            ui.end_row();
-            for d in &list {
-                let total = calc::compute(d).map(|t| t.total).unwrap_or_default();
-                let r = d.retail.clone().unwrap_or_default();
-                ui.label(d.number_label());
-                ui.label(d.created_at.map(|t| t.format("%d/%m %H:%M").to_string()).unwrap_or_else(|| d.date.format("%d/%m/%Y").to_string()));
-                ui.label(RichText::new(eur(total)).strong());
-                ui.label(r.payments.iter().map(|p| format!("{} {}", p.method.label(), eur(p.amount))).collect::<Vec<_>>().join(" + "));
-                let (txt, col) = if d.status == DocStatus::Cancelled {
-                    ("Annullata".to_string(), GRAY)
-                } else {
-                    let c = match r.rt_status {
-                        RtStatus::Printed | RtStatus::Manual => GREEN,
-                        RtStatus::Simulated => ORANGE,
-                        _ => RED,
-                    };
-                    (r.rt_status.label().to_string(), c)
+    #[derive(Clone, Copy)]
+    enum Act {
+        Emit(i64),
+        Manual(i64),
+        Cancel(i64),
+        Refund(i64),
+        Open(i64),
+    }
+    let action = std::cell::Cell::new(None);
+    let act = &action;
+    let total_of = |d: &Document| calc::compute(d).map(|t| t.total).unwrap_or_default();
+    let cols: Vec<Col<Document>> = vec![
+        Col::text("num", "N.", 70.0, |d: &Document| d.number_label()),
+        Col::new("date", "Data", 90.0, |d: &Document| Val::Date(Some(d.date))),
+        Col::text("time", "Ora", 60.0, |d: &Document| d.created_at.map(|t| t.format("%H:%M").to_string()).unwrap_or_default()),
+        Col::money("total", "Totale", 90.0, move |d: &Document| total_of(d)).total(),
+        Col::text("pay", "Pagamento", 200.0, |d: &Document| d.retail.clone().unwrap_or_default().payments.iter().map(|p| format!("{} {}", p.method.label(), eur(p.amount))).collect::<Vec<_>>().join(" + ")).group(),
+        Col::text("rt", "Registratore", 120.0, |d: &Document| if d.status == DocStatus::Cancelled { "Annullata".to_string() } else { d.retail.clone().unwrap_or_default().rt_status.label().to_string() }).group().render(|ui: &mut egui::Ui, d: &Document| {
+            let r = d.retail.clone().unwrap_or_default();
+            let (txt, col) = if d.status == DocStatus::Cancelled {
+                ("Annullata".to_string(), GRAY)
+            } else {
+                let c = match r.rt_status {
+                    RtStatus::Printed | RtStatus::Manual => GREEN,
+                    RtStatus::Simulated => ORANGE,
+                    _ => RED,
                 };
-                ui.label(RichText::new(txt).color(col)).on_hover_text(&r.rt_message);
-                ui.label(format!("{} {}", r.rt_serial, r.reference()));
-                ui.horizontal(|ui| {
-                    if d.status != DocStatus::Cancelled && matches!(r.rt_status, RtStatus::Pending | RtStatus::Failed) {
-                        if ui.add_enabled(!busy, egui::Button::new("Emetti")).clicked() {
-                            start_emission(cx, st, d);
-                        }
-                        if ui.small_button("Estremi a mano").clicked() {
-                            st.manual = Some((d.id, String::new(), String::new(), String::new()));
-                        }
-                        if ui.small_button("Annulla").clicked() {
-                            st.confirm_cancel = Some(d.id);
-                        }
-                    }
-                    if d.status != DocStatus::Cancelled && matches!(r.rt_status, RtStatus::Printed | RtStatus::Manual) && total > Decimal::ZERO && ui.small_button("Reso").clicked() {
-                        st.cart = d.lines.iter().filter(|l| l.kind == LineKind::Item).cloned().map(|mut l| {
-                            l.id = 0;
-                            l
-                        }).collect();
-                        st.refund = true;
-                        st.refund_ref = RetailRef { rt_serial: r.rt_serial.clone(), z_number: r.z_number.clone(), receipt_number: r.receipt_number.clone(), date: Some(d.date) };
-                        st.tab = Tab::Till;
-                    }
-                    if ui.small_button("Apri").clicked() {
-                        cx.nav.push(Nav::OpenDocument(d.id));
-                    }
-                });
-                ui.end_row();
+                (r.rt_status.label().to_string(), c)
+            };
+            ui.label(RichText::new(txt).color(col)).on_hover_text(&r.rt_message);
+        }),
+        Col::text("ref", "Estremi", 180.0, |d: &Document| {
+            let r = d.retail.clone().unwrap_or_default();
+            format!("{} {}", r.rt_serial, r.reference())
+        }),
+        Col::text("act", "", 300.0, |_: &Document| String::new()).render(move |ui: &mut egui::Ui, d: &Document| {
+            let r = d.retail.clone().unwrap_or_default();
+            if d.status != DocStatus::Cancelled && matches!(r.rt_status, RtStatus::Pending | RtStatus::Failed) {
+                if ui.add_enabled(!busy, egui::Button::new("Emetti")).clicked() {
+                    act.set(Some(Act::Emit(d.id)));
+                }
+                if ui.small_button("Estremi a mano").clicked() {
+                    act.set(Some(Act::Manual(d.id)));
+                }
+                if ui.small_button("Annulla").clicked() {
+                    act.set(Some(Act::Cancel(d.id)));
+                }
             }
+            if d.status != DocStatus::Cancelled && matches!(r.rt_status, RtStatus::Printed | RtStatus::Manual) && total_of(d) > Decimal::ZERO && ui.small_button("Reso").clicked() {
+                act.set(Some(Act::Refund(d.id)));
+            }
+            if ui.small_button("Apri").clicked() {
+                act.set(Some(Act::Open(d.id)));
+            }
+        }),
+    ];
+    st.sales_grid.name = "banco-vendite";
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.sales_grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Vendite al banco");
         });
-        if list.is_empty() {
-            ui.label(RichText::new("Nessuna vendita nel periodo").color(GRAY));
-        }
     });
+    if list.is_empty() {
+        ui.label(RichText::new("Nessuna vendita nel periodo").color(GRAY));
+    }
+    let avail = ui.available_height() - 4.0;
+    st.sales_grid.version = 0;
+    st.sales_grid.show(ui, cx.store, &cols, &list, |d| d.id, avail, false, 26.0);
+    drop(cols);
+    match action.get() {
+        Some(Act::Emit(id)) => {
+            if let Some(d) = list.iter().find(|d| d.id == id) {
+                start_emission(cx, st, d);
+            }
+        }
+        Some(Act::Manual(id)) => st.manual = Some((id, String::new(), String::new(), String::new())),
+        Some(Act::Cancel(id)) => st.confirm_cancel = Some(id),
+        Some(Act::Refund(id)) => {
+            if let Some(d) = list.iter().find(|d| d.id == id) {
+                let r = d.retail.clone().unwrap_or_default();
+                st.cart = d.lines.iter().filter(|l| l.kind == LineKind::Item).cloned().map(|mut l| {
+                    l.id = 0;
+                    l
+                }).collect();
+                st.refund = true;
+                st.refund_ref = RetailRef { rt_serial: r.rt_serial.clone(), z_number: r.z_number.clone(), receipt_number: r.receipt_number.clone(), date: Some(d.date) };
+                st.tab = Tab::Till;
+            }
+        }
+        Some(Act::Open(id)) => cx.nav.push(Nav::OpenDocument(id)),
+        None => {}
+    }
 }
 
 fn summary(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {

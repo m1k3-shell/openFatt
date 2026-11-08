@@ -69,6 +69,7 @@ impl Val {
 
 type ValueFn<'a, T> = Box<dyn Fn(&T) -> Val + 'a>;
 type RenderFn<'a, T> = Box<dyn Fn(&mut Ui, &T) + 'a>;
+type OpensFn<'a, T> = Box<dyn Fn(&T) -> Option<super::quick::Ref> + 'a>;
 
 pub struct Col<'a, T> {
     pub id: &'static str,
@@ -80,11 +81,13 @@ pub struct Col<'a, T> {
     pub group: bool,
     pub value: ValueFn<'a, T>,
     pub render: Option<RenderFn<'a, T>>,
+    /// Cliccando il testo si apre la scheda di questo elemento.
+    pub opens: Option<OpensFn<'a, T>>,
 }
 
 impl<'a, T> Col<'a, T> {
     pub fn new(id: &'static str, title: &'static str, width: f32, value: impl Fn(&T) -> Val + 'a) -> Self {
-        Col { id, title, width, right: false, shown: true, total: false, group: false, value: Box::new(value), render: None }
+        Col { id, title, width, right: false, shown: true, total: false, group: false, value: Box::new(value), render: None, opens: None }
     }
     /// Testo semplice.
     pub fn text(id: &'static str, title: &'static str, width: f32, f: impl Fn(&T) -> String + 'a) -> Self {
@@ -118,6 +121,11 @@ impl<'a, T> Col<'a, T> {
         self.render = Some(Box::new(f));
         self
     }
+    /// Il testo della cella apre la scheda del cliente, fornitore o articolo.
+    pub fn opens(mut self, f: impl Fn(&T) -> Option<super::quick::Ref> + 'a) -> Self {
+        self.opens = Some(Box::new(f));
+        self
+    }
 }
 
 /// Scelte dell'utente per un elenco (salvate nell'archivio).
@@ -129,6 +137,133 @@ pub struct Prefs {
     pub shown: Vec<String>,
     pub sort: Option<(String, bool)>,
     pub group: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TextOp {
+    #[default]
+    Contains,
+    NotContains,
+    Equals,
+    StartsWith,
+    IsEmpty,
+    NotEmpty,
+}
+
+impl TextOp {
+    const ALL: [TextOp; 6] = [TextOp::Contains, TextOp::NotContains, TextOp::Equals, TextOp::StartsWith, TextOp::IsEmpty, TextOp::NotEmpty];
+    fn label(self) -> &'static str {
+        match self {
+            TextOp::Contains => "contiene",
+            TextOp::NotContains => "non contiene",
+            TextOp::Equals => "è uguale a",
+            TextOp::StartsWith => "inizia con",
+            TextOp::IsEmpty => "è vuoto",
+            TextOp::NotEmpty => "non è vuoto",
+        }
+    }
+    fn needs_text(self) -> bool {
+        !matches!(self, TextOp::IsEmpty | TextOp::NotEmpty)
+    }
+}
+
+/// Condizione su una colonna: si usano i campi adatti al tipo di dato della colonna.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Filter {
+    col: String,
+    op: TextOp,
+    text: String,
+    min: Option<Decimal>,
+    max: Option<Decimal>,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    flag: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Text,
+    Number,
+    Date,
+    Bool,
+}
+
+impl Filter {
+    fn is_set(&self) -> bool {
+        (self.op != TextOp::Contains && !self.op.needs_text()) || !self.text.trim().is_empty() || self.min.is_some() || self.max.is_some() || self.from.is_some() || self.to.is_some() || self.flag.is_some()
+    }
+
+    fn matches(&self, v: &Val) -> bool {
+        if !self.is_set() {
+            return true;
+        }
+        match v {
+            Val::Date(d) => match d {
+                Some(d) => self.from.is_none_or(|f| *d >= f) && self.to.is_none_or(|t| *d <= t),
+                None => self.from.is_none() && self.to.is_none(),
+            },
+            Val::Num(d, _) | Val::Money(d) => self.min.is_none_or(|m| *d >= m) && self.max.is_none_or(|m| *d <= m) && self.text_matches(&v.text()),
+            Val::Bool(b) => self.flag.is_none_or(|f| f == *b),
+            Val::Text(_) if self.min.is_some() || self.max.is_some() || self.from.is_some() || self.to.is_some() => false,
+            Val::Text(_) => self.text_matches(&v.text()),
+        }
+    }
+
+    fn text_matches(&self, value: &str) -> bool {
+        let v = value.trim().to_lowercase();
+        let q = self.text.trim().to_lowercase();
+        match self.op {
+            TextOp::IsEmpty => v.is_empty(),
+            TextOp::NotEmpty => !v.is_empty(),
+            _ if q.is_empty() => true,
+            TextOp::Contains => v.contains(&q),
+            TextOp::NotContains => !v.contains(&q),
+            TextOp::Equals => v == q,
+            TextOp::StartsWith => v.starts_with(&q),
+        }
+    }
+
+    fn summary(&self) -> String {
+        let d = |x: Option<NaiveDate>| x.map(|v| v.format("%d/%m/%Y").to_string()).unwrap_or_else(|| "...".into());
+        if self.from.is_some() || self.to.is_some() {
+            format!("{} - {}", d(self.from), d(self.to))
+        } else if self.min.is_some() || self.max.is_some() {
+            let n = |x: Option<Decimal>| x.map(|v| openfatt_core::money::fmt_it_trim(v, 0, 4)).unwrap_or_else(|| "...".into());
+            format!("da {} a {}", n(self.min), n(self.max))
+        } else if let Some(f) = self.flag {
+            if f { "sì".into() } else { "no".into() }
+        } else if self.op.needs_text() {
+            format!("{} \"{}\"", self.op.label(), self.text.trim())
+        } else {
+            self.op.label().to_string()
+        }
+    }
+}
+
+/// Periodi pronti per i filtri sulle date.
+fn periods(today: NaiveDate) -> Vec<(&'static str, NaiveDate, NaiveDate)> {
+    use chrono::{Datelike, Duration};
+    let ymd = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap_or(today);
+    let month_end = |y: i32, m: u32| if m == 12 { ymd(y, 12, 31) } else { ymd(y, m + 1, 1) - Duration::days(1) };
+    let (y, m) = (today.year(), today.month());
+    let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+    let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    let q = (m - 1) / 3;
+    vec![
+        ("Oggi", today, today),
+        ("Ieri", today - Duration::days(1), today - Duration::days(1)),
+        ("Questa settimana", monday, monday + Duration::days(6)),
+        ("Settimana scorsa", monday - Duration::days(7), monday - Duration::days(1)),
+        ("Questo mese", ymd(y, m, 1), month_end(y, m)),
+        ("Mese scorso", ymd(py, pm, 1), month_end(py, pm)),
+        ("Questo trimestre", ymd(y, q * 3 + 1, 1), month_end(y, q * 3 + 3)),
+        ("Quest'anno", ymd(y, 1, 1), ymd(y, 12, 31)),
+        ("Anno scorso", ymd(y - 1, 1, 1), ymd(y - 1, 12, 31)),
+        ("Ultimi 7 giorni", today - Duration::days(6), today),
+        ("Ultimi 30 giorni", today - Duration::days(29), today),
+        ("Ultimi 90 giorni", today - Duration::days(89), today),
+        ("Ultimi 12 mesi", today - Duration::days(364), today),
+    ]
 }
 
 #[derive(Clone)]
@@ -149,6 +284,13 @@ pub struct Grid {
     /// ordinamento e gruppi) ordine, gruppi e totali non si ricalcolano. 0 = sempre.
     pub version: u64,
     cache: Option<Cached>,
+    filters: Vec<Filter>,
+    /// Testo cercato in tutte le colonne, anche in quelle nascoste.
+    search_all: String,
+    filters_open: bool,
+    shown: usize,
+    /// Il clic su una riga la rende corrente senza toccare le righe spuntate.
+    pub keep_selection: bool,
 }
 
 struct Cached {
@@ -218,9 +360,221 @@ impl Grid {
         }
     }
 
-    /// Indici delle righe in ordine (gruppo, poi ordinamento scelto).
+    fn filtering(&self) -> bool {
+        !self.search_all.trim().is_empty() || self.filters.iter().any(|f| f.is_set())
+    }
+
+    /// La riga rispetta i filtri in vigore.
+    pub fn accepts<T>(&self, cols: &[Col<T>], row: &T) -> bool {
+        !self.filtering() || self.passes(cols, row)
+    }
+
+    /// Ultima riga cliccata.
+    pub fn anchor(&self) -> Option<i64> {
+        self.anchor
+    }
+
+    /// C'è una condizione attiva su questa colonna.
+    pub fn has_filter(&self, col: &str) -> bool {
+        self.filters.iter().any(|f| f.col == col && f.is_set())
+    }
+
+    fn passes<T>(&self, cols: &[Col<T>], row: &T) -> bool {
+        let all_ok = self.filters.iter().all(|f| cols.iter().find(|c| c.id == f.col).is_none_or(|c| f.matches(&(c.value)(row))));
+        if !all_ok {
+            return false;
+        }
+        let q = self.search_all.trim().to_lowercase();
+        q.is_empty() || q.split_whitespace().all(|w| cols.iter().any(|c| (c.value)(row).text().to_lowercase().contains(w)))
+    }
+
+    /// Tipo di dato di una colonna, ricavato dai valori.
+    fn kind_of<T>(col: &Col<T>, rows: &[T]) -> Kind {
+        let mut kind = None;
+        for r in rows.iter().take(300) {
+            match (col.value)(r) {
+                Val::Date(_) => return Kind::Date,
+                Val::Num(..) | Val::Money(_) => return Kind::Number,
+                Val::Bool(_) => return Kind::Bool,
+                Val::Text(s) if !s.is_empty() => kind = Some(Kind::Text),
+                _ => {}
+            }
+        }
+        kind.unwrap_or(Kind::Text)
+    }
+
+    /// Finestra dei filtri: una condizione per riga, su qualunque colonna, anche nascosta.
+    fn filter_window<T>(&mut self, ctx: &egui::Context, cols: &[Col<T>], rows: &[T], title: &str) {
+        let mut open = self.filters_open;
+        let today = chrono::Local::now().date_naive();
+        let mut remove = None;
+        let mut close = false;
+        egui::Window::new(format!("Filtri: {}", title)).id(egui::Id::new(("grid_filters", self.name))).open(&mut open).default_width(660.0).collapsible(false).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Cerca in tutte le colonne");
+                ui.add(egui::TextEdit::singleline(&mut self.search_all).desired_width(320.0).hint_text("una o più parole"));
+            });
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (n, f) in self.filters.iter_mut().enumerate() {
+                    ui.push_id(n, |ui| {
+                        ui.horizontal(|ui| {
+                            let shown = cols.iter().find(|c| c.id == f.col).map(|c| c.title).unwrap_or("colonna...");
+                            let before = f.col.clone();
+                            egui::ComboBox::from_id_salt("col").width(150.0).height(340.0).selected_text(shown).show_ui(ui, |ui| {
+                                let mut sorted: Vec<&Col<T>> = cols.iter().filter(|c| !c.title.is_empty()).collect();
+                                sorted.sort_by_key(|c| c.title.to_lowercase());
+                                for c in sorted {
+                                    ui.selectable_value(&mut f.col, c.id.to_string(), c.title);
+                                }
+                            });
+                            if before != f.col {
+                                *f = Filter { col: f.col.clone(), ..Default::default() };
+                            }
+                            let Some(c) = cols.iter().find(|c| c.id == f.col) else { return };
+                            match Self::kind_of(c, rows) {
+                                Kind::Date => {
+                                    egui::ComboBox::from_id_salt("period").width(130.0).height(340.0).selected_text("Periodo...").show_ui(ui, |ui| {
+                                        for (name, a, b) in periods(today) {
+                                            if ui.selectable_label(false, name).clicked() {
+                                                f.from = Some(a);
+                                                f.to = Some(b);
+                                            }
+                                        }
+                                    });
+                                    ui.label("dal");
+                                    super::widgets::opt_date_field(ui, "from", &mut f.from);
+                                    ui.label("al");
+                                    super::widgets::opt_date_field(ui, "to", &mut f.to);
+                                }
+                                Kind::Number => {
+                                    let field = |ui: &mut Ui, label: &str, salt: &str, v: &mut Option<Decimal>| {
+                                        ui.label(label);
+                                        let id = ui.make_persistent_id(salt);
+                                        let mut s: String = ui.data_mut(|d| d.get_temp(id)).unwrap_or_else(|| v.map(|x| openfatt_core::money::fmt_it_trim(x, 0, 4)).unwrap_or_default());
+                                        if ui.add(egui::TextEdit::singleline(&mut s).desired_width(90.0).horizontal_align(egui::Align::RIGHT)).changed() {
+                                            *v = openfatt_core::money::parse_dec(&s);
+                                        }
+                                        ui.data_mut(|d| d.insert_temp(id, s));
+                                    };
+                                    field(ui, "da", "min", &mut f.min);
+                                    field(ui, "a", "max", &mut f.max);
+                                }
+                                Kind::Bool => {
+                                    ui.radio_value(&mut f.flag, Some(true), "Sì");
+                                    ui.radio_value(&mut f.flag, Some(false), "No");
+                                }
+                                Kind::Text => {
+                                    egui::ComboBox::from_id_salt("op").width(100.0).selected_text(f.op.label()).show_ui(ui, |ui| {
+                                        for o in TextOp::ALL {
+                                            ui.selectable_value(&mut f.op, o, o.label());
+                                        }
+                                    });
+                                    if f.op.needs_text() {
+                                        ui.add(egui::TextEdit::singleline(&mut f.text).desired_width(190.0));
+                                        // valori presenti, se sono pochi: si sceglie invece di scrivere
+                                        if rows.len() <= 50_000 {
+                                            let mut values: BTreeSet<String> = BTreeSet::new();
+                                            for r in rows {
+                                                let t = (c.value)(r).text();
+                                                if !t.trim().is_empty() {
+                                                    values.insert(t);
+                                                }
+                                                if values.len() > 60 {
+                                                    break;
+                                                }
+                                            }
+                                            if values.len() <= 60 {
+                                                ui.menu_button(icon::CARET_DOWN, |ui| {
+                                                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                                                        for v in values {
+                                                            if ui.button(&v).clicked() {
+                                                                f.text = v.clone();
+                                                                f.op = TextOp::Equals;
+                                                                ui.close_menu();
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button(icon::X).on_hover_text("Togli questa condizione").clicked() {
+                                    remove = Some(n);
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+            if let Some(n) = remove {
+                self.filters.remove(n);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if theme::button(ui, icon::PLUS, "Aggiungi condizione").clicked() {
+                    let col = cols.iter().find(|c| !c.title.is_empty()).map(|c| c.id.to_string()).unwrap_or_default();
+                    self.filters.push(Filter { col, ..Default::default() });
+                }
+                if theme::button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Azzera").clicked() {
+                    self.filters.clear();
+                    self.search_all.clear();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::primary(ui, icon::CHECK, "Chiudi").clicked() {
+                        close = true;
+                    }
+                    let n = rows.iter().filter(|r| self.passes(cols, *r)).count();
+                    ui.label(theme::muted(format!("{} di {} righe", n, rows.len())));
+                });
+            });
+        });
+        self.filters_open = open && !close;
+    }
+
+    /// Condizioni attive sopra l'elenco, ciascuna si toglie con un clic.
+    fn active_filters<T>(&mut self, ui: &mut Ui, cols: &[Col<T>], total: usize) {
+        let mut remove = None;
+        let mut clear = false;
+        let mut edit = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(egui::RichText::new(icon::FUNNEL).color(theme::ACCENT));
+            ui.label(theme::medium(format!("{} di {}", self.shown, total)).size(12.5));
+            if !self.search_all.trim().is_empty() && ui.small_button(format!("\"{}\" {}", self.search_all.trim(), icon::X)).clicked() {
+                self.search_all.clear();
+            }
+            for (n, f) in self.filters.iter().enumerate().filter(|(_, f)| f.is_set()) {
+                let title = cols.iter().find(|c| c.id == f.col).map(|c| c.title).unwrap_or("");
+                if ui.small_button(format!("{}: {} {}", title, f.summary(), icon::X)).on_hover_text("Togli questa condizione").clicked() {
+                    remove = Some(n);
+                }
+            }
+            if ui.link("Modifica").clicked() {
+                edit = true;
+            }
+            if ui.link("Azzera").clicked() {
+                clear = true;
+            }
+        });
+        if let Some(n) = remove {
+            self.filters.remove(n);
+        }
+        if clear {
+            self.filters.clear();
+            self.search_all.clear();
+        }
+        if edit {
+            self.filters_open = true;
+        }
+    }
+
+    /// Indici delle righe in ordine (gruppo, poi ordinamento scelto), filtri applicati.
     fn sorted<T>(&self, cols: &[Col<T>], rows: &[T]) -> Vec<usize> {
-        let mut idx: Vec<usize> = (0..rows.len()).collect();
+        let mut idx: Vec<usize> = (0..rows.len()).filter(|i| !self.filtering() || self.passes(cols, &rows[*i])).collect();
         let sort = self.prefs.sort.as_ref().and_then(|(id, desc)| cols.iter().find(|c| c.id == id).map(|c| (c, *desc)));
         let group = self.prefs.group.as_ref().and_then(|id| cols.iter().find(|c| c.id == id));
         if sort.is_none() && group.is_none() {
@@ -276,6 +630,18 @@ impl Grid {
     pub fn toolbar<T>(&mut self, ui: &mut Ui, store: &Store, msgs: &mut Msgs, cols: &[Col<T>], rows: &[T], title: &str) {
         self.load(store);
         let mut changed = false;
+        let active = self.filters.iter().filter(|f| f.is_set()).count() + (!self.search_all.trim().is_empty()) as usize;
+        let label = if active > 0 { format!("Filtri ({})", active) } else { "Filtri".to_string() };
+        if theme::button(ui, icon::FUNNEL, &label).on_hover_text("Filtra per qualsiasi dato: testo, numeri, importi e periodi").clicked() {
+            self.filters_open = !self.filters_open;
+            if self.filters_open && self.filters.is_empty() {
+                let col = cols.iter().find(|c| Self::kind_of(*c, rows) == Kind::Date).or(cols.first()).map(|c| c.id.to_string()).unwrap_or_default();
+                self.filters.push(Filter { col, ..Default::default() });
+            }
+        }
+        if self.filters_open {
+            self.filter_window(ui.ctx(), cols, rows, title);
+        }
         egui::menu::menu_custom_button(ui, theme::button_widget(icon::COLUMNS, "Colonne"), |ui| {
             ui.set_min_width(260.0);
             ui.label(theme::muted("Mostra, nascondi e sposta le colonne").size(12.0));
@@ -373,18 +739,23 @@ impl Grid {
         self.load(store);
         let mut ev = Events::default();
         let vis: Vec<usize> = self.ordered(cols).into_iter().filter(|i| self.visible(&cols[*i])).collect();
-        let ckey = format!("{}|{}|{:?}|{:?}|{:?}|{:?}", self.version, rows.len(), self.prefs.sort, self.prefs.group, self.collapsed, vis);
+        let ckey = format!("{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}", self.version, rows.len(), self.prefs.sort, self.prefs.group, self.collapsed, vis, self.filters, self.search_all);
         let fresh = self.version != 0 && self.cache.as_ref().map(|c| c.key == ckey).unwrap_or(false);
         if !fresh {
             let order = self.sorted(cols, rows);
             let lines = self.lines(cols, rows, &order, &vis);
             let keys: Vec<i64> = order.iter().map(|i| key(&rows[*i])).collect();
-            let totals = vis.iter().filter(|i| cols[**i].total).map(|i| (*i, rows.iter().filter_map(|r| (cols[*i].value)(r).number()).sum())).collect();
+            let totals = vis.iter().filter(|i| cols[**i].total).map(|i| (*i, order.iter().filter_map(|r| (cols[*i].value)(&rows[*r]).number()).sum())).collect();
             self.cache = Some(Cached { key: ckey, order, lines, keys, totals });
         }
         let cached = self.cache.take().unwrap();
         let (order, lines, keys_in_order) = (&cached.order, &cached.lines, &cached.keys);
-        let _ = order;
+        self.shown = order.len();
+        let mut height = height;
+        if self.filtering() {
+            self.active_filters(ui, cols, rows.len());
+            height -= 26.0;
+        }
         if !self.selected.is_empty() {
             let present: std::collections::HashSet<i64> = keys_in_order.iter().copied().collect();
             self.selected.retain(|k| present.contains(k));
@@ -429,7 +800,7 @@ impl Grid {
         tb.header(24.0, |mut h| {
             if checkboxes {
                 h.col(|ui| {
-                    let mut a = !rows.is_empty() && self.selected.len() == rows.len();
+                    let mut a = !order.is_empty() && self.selected.len() == order.len();
                     if ui.checkbox(&mut a, "").on_hover_text("Seleziona tutti").changed() {
                         all = Some(a);
                     }
@@ -484,7 +855,7 @@ impl Grid {
                         let t = &rows[*r];
                         let k = key(t);
                         let sel = self.selected.contains(&k);
-                        row.set_selected(sel);
+                        row.set_selected(sel && !self.keep_selection || self.keep_selection && self.anchor == Some(k));
                         if checkboxes {
                             row.col(|ui| {
                                 let mut s = sel;
@@ -500,7 +871,9 @@ impl Grid {
                                     f(ui, t);
                                 } else {
                                     let v = (c.value)(t).text();
-                                    if c.right {
+                                    if let Some(r) = c.opens.as_ref().and_then(|o| o(t)) {
+                                        super::quick::link(ui, v, r);
+                                    } else if c.right {
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             ui.add_space(8.0);
                                             ui.label(v);
@@ -568,7 +941,9 @@ impl Grid {
             self.anchor = Some(k);
         }
         if let Some((k, m)) = click {
-            if m.shift {
+            if self.keep_selection {
+                self.anchor = Some(k);
+            } else if m.shift {
                 if let (Some(a), Some(pk)) = (self.anchor.and_then(|a| keys_in_order.iter().position(|x| *x == a)), keys_in_order.iter().position(|x| *x == k)) {
                     let (lo, hi) = if a <= pk { (a, pk) } else { (pk, a) };
                     if !m.command {
@@ -672,6 +1047,44 @@ mod tests {
         }
         g.collapsed.insert("Trento".into());
         assert_eq!(g.lines(&cols, &rows, &order, &vis).len(), 3);
+    }
+
+    #[test]
+    fn filtri_per_testo_importo_e_periodo() {
+        let (rows, cols) = (rows(), cols());
+        let d = |m, g| NaiveDate::from_ymd_opt(2026, m, g).unwrap();
+        let mut g = Grid::new("prova");
+        assert_eq!(g.sorted(&cols, &rows).len(), 3);
+        g.filters.push(Filter { col: "city".into(), text: "tren".into(), ..Default::default() });
+        assert_eq!(g.sorted(&cols, &rows), vec![0, 2]);
+        g.filters.push(Filter { col: "amount".into(), min: Some(dec!(500)), ..Default::default() });
+        assert_eq!(g.sorted(&cols, &rows), vec![2]);
+        g.filters.clear();
+        // anche su una colonna nascosta
+        g.filters.push(Filter { col: "date".into(), from: Some(d(1, 20)), to: Some(d(2, 28)), ..Default::default() });
+        assert_eq!(g.sorted(&cols, &rows), vec![2]);
+        g.filters.clear();
+        g.filters.push(Filter { col: "city".into(), op: TextOp::Equals, text: "ROMA".into(), ..Default::default() });
+        assert_eq!(g.sorted(&cols, &rows), vec![1]);
+        g.filters[0].op = TextOp::NotContains;
+        assert_eq!(g.sorted(&cols, &rows), vec![0, 2]);
+        g.filters.clear();
+        g.search_all = "verdi trento".into();
+        assert_eq!(g.sorted(&cols, &rows), vec![2]);
+        assert!(g.filtering() && !g.has_filter("city"));
+    }
+
+    #[test]
+    fn i_periodi_sono_corretti() {
+        let today = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let p: BTreeMap<&str, (NaiveDate, NaiveDate)> = periods(today).into_iter().map(|(n, a, b)| (n, (a, b))).collect();
+        let d = |y, m, g| NaiveDate::from_ymd_opt(y, m, g).unwrap();
+        assert_eq!(p["Mese scorso"], (d(2025, 12, 1), d(2025, 12, 31)));
+        assert_eq!(p["Questo mese"], (d(2026, 1, 1), d(2026, 1, 31)));
+        assert_eq!(p["Questo trimestre"], (d(2026, 1, 1), d(2026, 3, 31)));
+        assert_eq!(p["Anno scorso"], (d(2025, 1, 1), d(2025, 12, 31)));
+        assert_eq!(p["Questa settimana"], (d(2026, 1, 12), d(2026, 1, 18)));
+        assert_eq!(p["Ultimi 7 giorni"], (d(2026, 1, 9), today));
     }
 
     #[test]

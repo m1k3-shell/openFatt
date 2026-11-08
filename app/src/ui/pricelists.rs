@@ -221,10 +221,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                         let specific = items.iter().find(|i| i.product_id == p.id && i.min_qty <= Decimal::ONE).map(|i| i.price);
                         let price = cx.store.list_price_of(list.id, p, Decimal::ONE).ok().flatten().map(|x| x.0);
                         row.col(|ui| {
-                            ui.label(&p.code);
+                            super::quick::link(ui, p.code.clone(), super::quick::Ref::Product(p.id));
                         });
                         row.col(|ui| {
-                            ui.label(&p.description);
+                            super::quick::link(ui, p.description.clone(), super::quick::Ref::Product(p.id));
                         });
                         row.col(|ui| {
                             let base = match list.base {

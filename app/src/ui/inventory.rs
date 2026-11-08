@@ -3,7 +3,8 @@
 
 use chrono::NaiveDate;
 use eframe::egui::{self, RichText};
-use egui_extras::{Column, TableBuilder};
+use super::grid::{Col, Grid, Val};
+use super::quick::Ref;
 use openfatt_core::money::{fmt_it_trim, parse_dec};
 use openfatt_interop::inventory::InventoryRow;
 use openfatt_store::{CountRow, InventoryLine, InventoryStatus};
@@ -21,6 +22,7 @@ enum Filter {
 }
 
 pub struct State {
+    grid: Grid,
     selected: Option<i64>,
     new_date: NaiveDate,
     new_warehouse: String,
@@ -42,6 +44,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         State {
+            grid: Grid::new("inventario-righe"),
             selected: None,
             new_date: chrono::Local::now().date_naive(),
             new_warehouse: String::new(),
@@ -481,79 +484,61 @@ fn session_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, s: &openfatt_st
         .filter(|l| q.is_empty() || [&l.code, &l.description, &l.lot, &l.serial, &l.variant, &l.barcode].iter().any(|x| x.to_lowercase().contains(&q)))
         .collect();
 
-    let avail = ui.available_height();
-    let mut updates: Vec<(i64, Option<Decimal>)> = Vec::new();
-    TableBuilder::new(ui)
-        .striped(true)
-        .max_scroll_height(avail)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::exact(70.0))
-        .column(Column::initial(190.0).at_least(110.0).clip(true))
-        .column(Column::exact(120.0).clip(true))
-        .column(Column::exact(60.0))
-        .column(Column::exact(92.0))
-        .column(Column::exact(70.0))
-        .column(Column::exact(76.0))
-        .column(Column::remainder().at_least(80.0).clip(true))
-        .header(22.0, |mut h| {
-            for t in ["Codice", "Descrizione", "Variante / lotto / serie", "Teorica", "Contata", "Differenza", "Valore diff.", "Note"] {
-                h.col(|ui| {
-                    ui.strong(t);
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(26.0, shown.len(), |mut row| {
-                let l = shown[row.index()];
-                row.col(|ui| {
-                    ui.label(&l.code);
-                });
-                row.col(|ui| {
-                    ui.label(&l.description);
-                });
-                row.col(|ui| {
-                    let mut parts = Vec::new();
-                    if !l.variant.is_empty() {
-                        parts.push(l.variant.clone());
-                    }
-                    if !l.lot.is_empty() {
-                        parts.push(format!("lotto {}{}", l.lot, l.expiry.map(|e| format!(" ({})", e.format("%d/%m/%y"))).unwrap_or_default()));
-                    }
-                    if !l.serial.is_empty() {
-                        parts.push(format!("S/N {}", l.serial));
-                    }
-                    ui.label(RichText::new(parts.join(" · ")).small());
-                });
-                row.col(|ui| {
-                    let t = fmt_it_trim(l.expected, 0, 3);
-                    ui.label(if l.expected.is_sign_negative() { RichText::new(t).color(RED) } else { RichText::new(t).color(GRAY) });
-                });
-                row.col(|ui| {
-                    if let Some(v) = count_field(ui, l, open) {
-                        updates.push((l.id, v));
-                    }
-                });
-                row.col(|ui| match l.difference() {
-                    Some(d) if d.is_zero() => {
-                        ui.label(RichText::new("\u{E182}").color(GREEN));
-                    }
-                    Some(d) => {
-                        ui.label(RichText::new(format!("{}{}", if d > Decimal::ZERO { "+" } else { "" }, fmt_it_trim(d, 0, 3))).strong().color(if d > Decimal::ZERO { GREEN } else { RED }));
-                    }
-                    None => {
-                        ui.label("");
-                    }
-                });
-                row.col(|ui| {
-                    if let Some(d) = l.difference().filter(|d| !d.is_zero()) {
-                        ui.label(eur(d * l.cost));
-                    }
-                });
-                row.col(|ui| {
-                    ui.label(RichText::new(&l.note).small());
-                });
+    let updates_cell: std::cell::RefCell<Vec<(i64, Option<Decimal>)>> = Default::default();
+    let updates_ref = &updates_cell;
+    let track = |l: &InventoryLine| {
+        let mut parts = Vec::new();
+        if !l.variant.is_empty() {
+            parts.push(l.variant.clone());
+        }
+        if !l.lot.is_empty() {
+            parts.push(format!("lotto {}{}", l.lot, l.expiry.map(|e| format!(" ({})", e.format("%d/%m/%y"))).unwrap_or_default()));
+        }
+        if !l.serial.is_empty() {
+            parts.push(format!("S/N {}", l.serial));
+        }
+        parts.join(" · ")
+    };
+    let cols: Vec<Col<&InventoryLine>> = vec![
+        Col::text("code", "Codice", 80.0, |l: &&InventoryLine| l.code.clone()).opens(|l: &&InventoryLine| Some(Ref::Product(l.product_id))),
+        Col::text("desc", "Descrizione", 230.0, |l: &&InventoryLine| l.description.clone()).opens(|l: &&InventoryLine| Some(Ref::Product(l.product_id))),
+        Col::text("cat", "Categoria", 150.0, |l: &&InventoryLine| l.category.clone()).hidden().group(),
+        Col::text("barcode", "Codice a barre", 130.0, |l: &&InventoryLine| l.barcode.clone()).hidden(),
+        Col::text("track", "Variante / lotto / serie", 150.0, move |l: &&InventoryLine| track(l)),
+        Col::new("expected", "Teorica", 70.0, |l: &&InventoryLine| Val::Num(l.expected, 3)).right().render(|ui: &mut egui::Ui, l: &&InventoryLine| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                let t = fmt_it_trim(l.expected, 0, 3);
+                ui.label(if l.expected.is_sign_negative() { RichText::new(t).color(RED) } else { RichText::new(t).color(GRAY) });
             });
+        }),
+        Col::new("counted", "Contata", 100.0, |l: &&InventoryLine| l.counted.map(|c| Val::Num(c, 3)).unwrap_or(Val::Text(String::new()))).right().render(move |ui: &mut egui::Ui, l: &&InventoryLine| {
+            if let Some(v) = count_field(ui, l, open) {
+                updates_ref.borrow_mut().push((l.id, v));
+            }
+        }),
+        Col::new("diff", "Differenza", 80.0, |l: &&InventoryLine| l.difference().map(|d| Val::Num(d, 3)).unwrap_or(Val::Text(String::new()))).right().render(|ui: &mut egui::Ui, l: &&InventoryLine| match l.difference() {
+            Some(d) if d.is_zero() => {
+                ui.label(RichText::new("\u{E182}").color(GREEN));
+            }
+            Some(d) => {
+                ui.label(RichText::new(format!("{}{}", if d > Decimal::ZERO { "+" } else { "" }, fmt_it_trim(d, 0, 3))).strong().color(if d > Decimal::ZERO { GREEN } else { RED }));
+            }
+            None => {}
+        }),
+        Col::money("diff_value", "Valore diff.", 85.0, |l: &&InventoryLine| l.difference().map(|d| d * l.cost).unwrap_or_default()).total(),
+        Col::text("note", "Note", 180.0, |l: &&InventoryLine| l.note.clone()),
+    ];
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &shown, "Inventario");
         });
+    });
+    let avail = ui.available_height() - 4.0;
+    st.grid.version = 0;
+    st.grid.show(ui, cx.store, &cols, &shown, |l| l.id, avail, false, 26.0);
+    drop(cols);
+    let updates = updates_cell.into_inner();
     for (id, v) in updates {
         cx.msgs.check(cx.store.set_inventory_count(id, v, None), "");
     }

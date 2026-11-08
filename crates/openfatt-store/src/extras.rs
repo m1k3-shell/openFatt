@@ -555,6 +555,7 @@ pub fn copy_line(l: &DocLine) -> DocLine {
     c.source_doc_id = None;
     c.source_line_id = None;
     c.serials.clear();
+    c.arrived_qty = Decimal::ZERO;
     c
 }
 
