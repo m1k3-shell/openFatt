@@ -53,6 +53,7 @@ impl ScriptedClicks {
 }
 
 pub struct OpenFattApp {
+    updates: crate::updates::Checker,
     backups: crate::backups::Manager,
     backup_ui: ui::backup::State,
     closing: bool,
@@ -106,6 +107,7 @@ impl OpenFattApp {
         let (mail_tx, mail_rx) = channel();
         let cfg = AppConfig::load();
         let mut app = OpenFattApp {
+            updates: crate::updates::Checker::start(&cc.egui_ctx),
             cfg,
             store: None,
             screen: Screen::Home,
@@ -751,6 +753,7 @@ impl eframe::App for OpenFattApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         self.closing_flow(ctx);
+        self.updates.poll();
         if self.store.is_some() && !self.needs_login {
             self.backups.tick(&mut self.msgs);
             ctx.request_repaint_after(std::time::Duration::from_secs(if self.backups.running() { 1 } else { 30 }));
@@ -805,6 +808,25 @@ impl eframe::App for OpenFattApp {
             egui::TopBottomPanel::top("toolbar").exact_height(62.0).frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(egui::Margin::symmetric(6, 0))).show(ctx, |ui| {
                 ui::shell::tool_bar(ui, store, &self.cfg.recent, &mut self.search, self.pec_busy.is_some(), self.screen, editor, &self.badges, &mut self.nav);
             });
+            if let Some(update) = self.updates.notice().cloned() {
+                let mut hide = false;
+                egui::TopBottomPanel::top("update_banner").frame(egui::Frame::new().fill(theme::CURRENT).inner_margin(egui::Margin::symmetric(12, 5))).show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("È disponibile openFatt {} (questo computer ha la {}).", update.version, crate::updates::current()));
+                        if theme::ghost(ui, true, theme::icon::ARROW_RIGHT, "Scarica").clicked() {
+                            crate::updates::open_page(&update);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Più tardi").clicked() {
+                                hide = true;
+                            }
+                        });
+                    });
+                });
+                if hide {
+                    self.updates.hide();
+                }
+            }
             if let Some(msg) = self.backups.banner() {
                 let mut hide = false;
                 egui::TopBottomPanel::top("backup_banner").frame(egui::Frame::new().fill(egui::Color32::from_rgb(0xff, 0xf1, 0xd6)).inner_margin(egui::Margin::symmetric(12, 5))).show(ctx, |ui| {

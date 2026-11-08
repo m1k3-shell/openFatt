@@ -123,6 +123,8 @@ Si mette l'archivio in una cartella condivisa (`\\server\dati` o un'unità di re
 
 Il file `openFatt-Setup-<versione>.exe` si scarica dalle [Releases](https://github.com/danielevanzetta-beep/openFatt/releases). Non chiede diritti di amministratore. Il programma non è firmato digitalmente: al primo avvio Windows può mostrare "Windows ha protetto il PC", si prosegue con *Ulteriori informazioni* → *Esegui comunque*.
 
+All'avvio il programma chiede a GitHub qual è l'ultima versione e, se ce n'è una più recente, mostra un avviso con il collegamento per scaricarla: GitHub riceve l'indirizzo di rete del computer, nessun dato dell'archivio. Si disattiva in *Opzioni* → *Dati, utenti e postazioni*.
+
 Per aggiornare basta eseguire il file di una versione più recente con openFatt chiuso. Archivi e impostazioni stanno in `Documenti\openFatt` e `%APPDATA%\openFatt`, fuori dalla cartella del programma: né l'aggiornamento né la disinstallazione li toccano.
 
 L'installatore si crea con `tools\crea-installatore.ps1` (serve anche NSIS 3); la versione è quella indicata in `Cargo.toml`.
@@ -153,7 +155,7 @@ Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con
 
 ## Verifiche
 
-- **191 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
+- **195 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
 - **Collaudo completo** (`cargo test -p openfatt collaudo -- --nocapture`): percorre tutte le funzioni (righe speciali, valuta, dichiarazione d'intento, NSO, produzione, distinte bancarie, LIPE, agenti, statistiche, ricorrenti, carte, negozio online, utenti e blocchi, fine anno, conservazione, interscambio, copie di sicurezza) e salva i file prodotti in `target/collaudo` con un rapporto.
 - I file prodotti sono **validi contro gli schemi ufficiali**: fatture elettroniche (`tools/valida-xsd.ps1`, schema VFPR12 1.2.3), bonifici e SDD CBI (`tools/valida-cbi.ps1`), Comunicazione LIPE (`tools/valida-lipe.ps1`).
 - Codici a barre riletti con un decodificatore indipendente (ZXing); firme verificate con il validatore di .NET.

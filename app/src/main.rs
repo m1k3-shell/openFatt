@@ -13,6 +13,7 @@ mod reports;
 mod mailer;
 mod services;
 mod ui;
+mod updates;
 mod vatfiles;
 
 fn main() -> eframe::Result<()> {
