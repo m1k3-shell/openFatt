@@ -108,6 +108,7 @@ pub fn prepare(store: &Store, kind: BankKind, dues: &[DueRow], execution: NaiveD
     let year = today.year();
     let number = store.next_batch_number(kind, year).map_err(|e| vec![e.to_string()])?;
     let groups = group(store, dues);
+    let drafts = dues.iter().filter(|d| d.draft).count();
     let tag = match kind {
         BankKind::Riba => "RB",
         BankKind::Sdd => "DD",
@@ -115,6 +116,9 @@ pub fn prepare(store: &Store, kind: BankKind, dues: &[DueRow], execution: NaiveD
     };
     let msg_id = format!("GA{}{}{:04}{}", tag, year, number, now.format("%m%d%H%M%S"));
     let mut warnings = Vec::new();
+    if drafts > 0 {
+        warnings.push(format!("{} scadenze vengono da documenti ancora in bozza: ricordarsi di emetterli e trasmetterli", drafts));
+    }
     let mut items = Vec::new();
     let mut first_sdd = Vec::new();
     let reference = |i: usize| format!("{}{}-{}-{}", tag, year, number, i + 1);
@@ -228,6 +232,30 @@ pub fn issue(store: &Store, p: &Prepared) -> Result<BankBatch, String> {
     Ok(b)
 }
 
+/// Stampa della distinta senza registrarla: per controllarla o consegnarla in banca.
+pub fn preview_pdf(store: &Store, kind: BankKind, dues: &[DueRow]) -> Vec<u8> {
+    let now = chrono::Local::now().naive_local();
+    let total: Decimal = dues.iter().map(|d| d.residual()).sum();
+    let b = BankBatch {
+        id: 0,
+        kind,
+        year: now.date().year(),
+        number: store.next_batch_number(kind, now.date().year()).unwrap_or(1),
+        created_at: now,
+        date: dues.first().map(|d| d.date).unwrap_or(now.date()),
+        file_name: "non ancora esportato".into(),
+        content: String::new(),
+        total,
+        count: dues.len() as i64,
+        status: openfatt_store::BatchStatus::Issued,
+        note: String::new(),
+        open_items: dues.len() as i64,
+        unpaid_items: 0,
+    };
+    let items: Vec<BatchItem> = dues.iter().map(|d| BatchItem { id: 0, due: d.clone(), amount: d.residual(), reference: String::new(), unpaid: false }).collect();
+    batch_pdf(store, &b, &items)
+}
+
 /// Stampa della distinta (da allegare o consegnare in banca).
 pub fn batch_pdf(store: &Store, b: &BankBatch, items: &[BatchItem]) -> Vec<u8> {
     use openfatt_core::money::fmt_eur;
@@ -281,6 +309,17 @@ pub fn batch_pdf(store: &Store, b: &BankBatch, items: &[BatchItem]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stampa_distinta_senza_registrarla() {
+        let s = openfatt_store::Store::open_in_memory().unwrap();
+        crate::demo::populate(&s).unwrap();
+        let pending = s.bank_pending(BankKind::Riba).unwrap();
+        assert!(!pending.is_empty());
+        let pdf = preview_pdf(&s, BankKind::Riba, &pending);
+        assert!(pdf.starts_with(b"%PDF"));
+        assert_eq!(s.bank_pending(BankKind::Riba).unwrap().len(), pending.len(), "la stampa non consuma le scadenze");
+    }
 
     #[test]
     fn distinte_dall_archivio_dimostrativo() {

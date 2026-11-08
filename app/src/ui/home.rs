@@ -354,7 +354,7 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
         parts.push((if todo.is_empty() { "nessuna attività in sospeso".into() } else { format!("{} attività da completare", todo.len()) }, false));
     }
     let sub = theme::subline(&parts.iter().map(|(t, b)| (t.as_str(), *b)).collect::<Vec<_>>());
-    theme::title_row(ui, &[], "Scrivania", Some(sub), |ui| {
+    theme::title_row(ui, &[], "Start", Some(sub), |ui| {
         if theme::primary(ui, icon::PLUS, "Nuova fattura").clicked() {
             cx.nav.push(Nav::NewDocument(DocKind::Invoice));
         }

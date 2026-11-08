@@ -383,7 +383,7 @@ impl Drop for Database {
 }
 
 /// Tabelle lette per l'importazione da Easyfatt.
-pub const EASYFATT_TABLES: [&str; 14] = [
+pub const EASYFATT_TABLES: [&str; 16] = [
     "TConfig",
     "TIva",
     "TPagamenti",
@@ -392,6 +392,8 @@ pub const EASYFATT_TABLES: [&str; 14] = [
     "TAnagraficaDest",
     "TArticoli",
     "TArticoliCodBarre",
+    "TArticoliForn",
+    "TListini",
     "TDiba",
     "TDocTestate",
     "TDocRighe",

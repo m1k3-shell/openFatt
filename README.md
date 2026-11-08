@@ -52,6 +52,28 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 - Stampe con tre modelli, logo e colore aziendale; etichette con codici a barre (A4 o rotolo).
 - **Editor grafico dei modelli di stampa**: ogni elemento (dati dell'azienda e del cliente, numero, data, righe, totali, scadenze, testi fissi, logo, riquadri) si sposta e si ridimensiona col mouse, in millimetri; le righe continuano nelle pagine seguenti. **Moduli prestampati**: si carica la scansione del modulo come sfondo, si posizionano i campi sopra le caselle e si stampano solo i dati, con la correzione dell'allineamento della stampante.
 
+**Lavoro quotidiano**
+- Un'unica barra con le sezioni sempre visibili (Nuovo, Banco, Start, Clienti, Fornitori, Prodotti, Documenti, Fatture elettr., Pagamenti, Magazzino, Agenda, Analisi, Strumenti, Opzioni, Archivi); elenchi fitti con raggruppamenti, colonne ed esportazione; finestra del documento con schede e pulsanti in basso.
+- **Scheda laterale di clienti e fornitori**, modificabile direttamente, con *Documenti* e *Pagamenti* collegati e *Nuovo Doc.*
+- **Prezzo di acquisto, prezzo netto e margine** riga per riga in preventivi e documenti, con il margine totale in fondo; non compaiono in stampa e le colonne si scelgono da *Colonne...*. **Listino a tendina** nel documento e prezzi netti o ivati.
+- **Scheda prodotto** a destra dell'elenco (Prodotto, Caratteristiche, Dim. e peso, Magazzino, Fornitori): prezzo di acquisto, aliquota e prezzi di ogni listino, netti o ivati, con margine e ricarichi rapidi. L'elenco mostra il listino scelto.
+- **Preventivi fornitori**, da trasformare in ordine, arrivo merce o fattura di acquisto.
+- **Stato degli ordini** clienti e fornitori: da confermare, confermato, parzialmente concluso, concluso, con il collegamento ai documenti che li hanno evasi, data prevista in rosso se in ritardo e commento interno.
+- **Più fornitori per articolo**, ciascuno con il proprio codice e prezzo: nei documenti di acquisto si propongono quelli del fornitore scelto.
+- **Numero e scadenze già dal salvataggio in bozza**: le Ri.Ba. si possono emettere anche da una fattura non ancora confermata.
+- **Menu Pagamenti**: tutti, entrate, uscite, da saldare al..., solleciti, RIBA da emettere, bonifici da pagare; *Esporta file per home banking* e *Stampa distinta* sulla voce corrente o su tutte le voci visibili.
+- **Aliquote con scissione dei pagamenti** (22sp, 10sp, 5sp, 4sp) proposte da sole per la Pubblica Amministrazione.
+- **Autofatture e integrazioni** (TD16-TD29) dal menu Fatture elettr. o direttamente dalla fattura di acquisto, con tipo proposto, estremi della fattura originale e IVA da integrare.
+
+**Copie di sicurezza automatiche** (*Archivi > Copie di sicurezza*)
+- Su **hard disk esterno o NAS**, sul **cloud** tramite la cartella di OneDrive, Google Drive o Dropbox, oppure via **WebDAV** (Nextcloud e simili, solo https). Più destinazioni insieme: un guasto a una non ferma le altre.
+- Ogni due ore mentre si lavora (intervallo a scelta) e a ogni chiusura, senza fermare il lavoro. Alla chiusura il programma attende la copia e avvisa se una destinazione è ferma da troppi giorni; un avviso resta visibile anche durante il lavoro.
+- **Ogni copia è verificata**: istantanea coerente con controllo di integrità, scrittura sotto nome provvisorio, rilettura con impronta SHA-256, solo allora il nome definitivo. Le copie interrotte non vengono mai scambiate per buone.
+- Rotazione con copie recenti, giornaliere, settimanali, mensili e annuali, più la più vecchia; si elimina solo dopo aver verificato la nuova. Se i documenti calano bruscamente non si elimina nulla.
+- Il disco si riconosce da un file proprio, non dalla lettera di unità: su una chiavetta diversa non si scrive. Le copie già fatte sui dischi vengono ricontrollate a rotazione per scoprire un guasto in tempo.
+- Cifratura facoltativa AES-256 con password dell'utente. Senza password le copie cifrate non si recuperano.
+- Il **ripristino** crea sempre un archivio nuovo, controllato, e non tocca quello in uso; funziona anche su un computer nuovo partendo dal solo file.
+
 **Passaggio da Easyfatt**
 - **Importazione diretta dell'archivio** (file `.eft`): azienda, aliquote, pagamenti, agenti, clienti e fornitori, articoli con distinte base, tutti i documenti con righe, spese, cassa previdenziale e ritenute, scadenze con incassi e pagamenti, movimenti di magazzino e spese fuori campo IVA. Le fatture importate restano bloccate perché la fattura elettronica l'ha già trasmessa Easyfatt. Provata sui due archivi dimostrativi distribuiti con Easyfatt: tutti i documenti importati e tutti i totali ricalcolati uguali a quelli di Easyfatt, tranne gli acquisti in reverse charge (l'integrazione IVA va registrata a parte).
 - L'archivio si legge **in sola lettura, da una copia**, con il motore Firebird già installato insieme a Easyfatt (a 32 bit), tramite il piccolo lettore `openfatt-easyfatt.exe`. Anche da riga di comando: `openfatt.exe --importa-easyfatt archivio.eft nuovo.gadb`.
@@ -123,7 +145,7 @@ Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con
 
 ## Verifiche
 
-- **165 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
+- **191 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
 - **Collaudo completo** (`cargo test -p openfatt collaudo -- --nocapture`): percorre tutte le funzioni (righe speciali, valuta, dichiarazione d'intento, NSO, produzione, distinte bancarie, LIPE, agenti, statistiche, ricorrenti, carte, negozio online, utenti e blocchi, fine anno, conservazione, interscambio, copie di sicurezza) e salva i file prodotti in `target/collaudo` con un rapporto.
 - I file prodotti sono **validi contro gli schemi ufficiali**: fatture elettroniche (`tools/valida-xsd.ps1`, schema VFPR12 1.2.3), bonifici e SDD CBI (`tools/valida-cbi.ps1`), Comunicazione LIPE (`tools/valida-lipe.ps1`).
 - Codici a barre riletti con un decodificatore indipendente (ZXing); firme verificate con il validatore di .NET.
@@ -138,6 +160,8 @@ Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con
 - Più postazioni su una vera cartella di rete (provato con due connessioni sullo stesso file).
 - Importazione da Easyfatt su archivi reali diversi dai due dimostrativi e da versioni di Easyfatt con motore Firebird diverso dal 2.5.
 - Stampa dei moduli prestampati su una stampante e un modulo reali (va regolata la correzione dell'allineamento).
+- Copie su un cloud WebDAV reale (provate con un server di prova che simula guasti) e caricamento effettivo da parte di OneDrive, Google Drive o Dropbox.
+- Caricamento dei file delle distinte in un portale bancario reale (InBank o altri): i file seguono gli standard CBI ma non sono stati provati con una banca.
 
 ## Struttura
 
@@ -151,6 +175,7 @@ crates/openfatt-bank       Ri.Ba. CBI, SDD e bonifici SEPA in XML CBI
 crates/openfatt-pos        registratori telematici (INI, Epson XML, comandi a modelli, simulatore)
 crates/openfatt-pdf        stampe PDF, etichette, codici a barre
 crates/openfatt-interop    Easyfatt-XML, CSV, Excel, Metel, ordini NSO, WooCommerce/Shopify
+crates/openfatt-backup     copie di sicurezza verificate: disco, cartella cloud, WebDAV
 crates/openfatt-fbread     lettura in sola lettura degli archivi Firebird (lettore openfatt-easyfatt, 32 bit)
 app/                       applicazione desktop (egui)
 specs/                     schemi XSD ufficiali ed esempi (vedi specs/README.md)

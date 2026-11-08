@@ -6,6 +6,7 @@ mod collaudo;
 mod bankfiles;
 mod config;
 mod demo;
+mod backups;
 mod easyfatt;
 mod printing;
 mod reports;

@@ -449,3 +449,176 @@ fn bulk_updates_are_all_or_nothing() {
     .is_err());
     assert!(s.products("", false).unwrap().iter().all(|x| x.category == "Ufficio"));
 }
+
+// ---- documento salvato in bozza, preventivi fornitori, stato ordini, aliquote "sp", autofatture
+
+fn fornitore(s: &Store, country: &str) -> Party {
+    s.save_party(&Party { role: PartyRole::Supplier, name: format!("Fornitore {}", country), vat_number: "01234567897".into(), country: country.into(), vat_country: country.into(), ..Default::default() }).unwrap()
+}
+
+#[test]
+fn bozza_ha_numero_e_scadenze_per_le_riba() {
+    let s = Store::open_in_memory().unwrap();
+    let c = s.save_party(&Party { role: PartyRole::Customer, name: "Cliente".into(), vat_number: "01234567897".into(), iban: "IT60X0542811101000000123456".into(), ..Default::default() }).unwrap();
+    let v = s.vat_codes().unwrap().into_iter().find(|v| v.code == "22").unwrap();
+    let mut pay = PaymentMethod { name: "Ri.Ba. 30gg".into(), mp_code: "MP12".into(), installments: vec![Installment { days: 30, percent: dec!(100), ..Default::default() }], active: true, ..Default::default() };
+    pay.id = s.save_payment_method(&pay).unwrap();
+    let mut d = Document::new(DocKind::Invoice);
+    d.party_id = Some(c.id);
+    d.party = c.clone();
+    d.payment_id = Some(pay.id);
+    d.payment = Some(pay.clone());
+    d.lines.push(DocLine { description: "Servizio".into(), unit_price: dec!(100), vat: VatRef::from_code(&v), ..Default::default() });
+    let d = s.save_document(&d).unwrap();
+    assert_eq!(d.status, DocStatus::Draft);
+    assert_eq!(d.number, Some(1), "la bozza prende il numero");
+    assert_eq!(d.due_dates.len(), 1, "la bozza ha le scadenze");
+    assert!(s.bank_pending(BankKind::Riba).unwrap().iter().any(|r| r.document_id == d.id && r.draft));
+    // le scadenze delle bozze non entrano nei calcoli ufficiali
+    assert!(s.due_list(true, None).unwrap().is_empty());
+    // risalvare non cambia il numero e non duplica le scadenze
+    let again = s.save_document(&d).unwrap();
+    assert_eq!(again.number, Some(1));
+    assert_eq!(again.due_dates.len(), 1);
+    // in distinta il documento si blocca, ma si emette conservando la scadenza
+    let due = again.due_dates[0].id;
+    let b = s.create_batch(BankKind::Riba, 2026, 1, again.due_dates[0].date, "r.txt", "x", &[(due, dec!(122), "R1".into())]).unwrap();
+    assert!(s.document_in_batch(again.id).unwrap());
+    assert!(s.save_document(&again).is_err());
+    let issued = s.issue_document(again.id).unwrap();
+    assert_eq!(issued.status, DocStatus::Issued);
+    assert_eq!(issued.number, Some(1));
+    assert_eq!(issued.due_dates[0].id, due, "la scadenza in distinta non viene rigenerata");
+    assert_eq!(s.batch(b.id).unwrap().1.len(), 1);
+}
+
+#[test]
+fn numero_cambia_con_anno_o_serie_in_bozza() {
+    let s = Store::open_in_memory().unwrap();
+    let mk = |y: i32| {
+        let mut d = Document::new(DocKind::Quote);
+        d.date = NaiveDate::from_ymd_opt(y, 3, 1).unwrap();
+        d
+    };
+    let a = s.save_document(&mk(2026)).unwrap();
+    let b = s.save_document(&mk(2026)).unwrap();
+    assert_eq!((a.number, b.number), (Some(1), Some(2)));
+    let mut c = b.clone();
+    c.date = NaiveDate::from_ymd_opt(2027, 1, 2).unwrap();
+    let c = s.save_document(&c).unwrap();
+    assert_eq!(c.number, Some(1));
+}
+
+#[test]
+fn preventivo_fornitore_diventa_ordine_e_stato_ordine() {
+    let s = Store::open_in_memory().unwrap();
+    let f = fornitore(&s, "IT");
+    let v = s.vat_codes().unwrap().into_iter().find(|v| v.code == "22").unwrap();
+    let mut q = Document::new(DocKind::SupplierQuote);
+    q.party_id = Some(f.id);
+    q.party = f.clone();
+    q.lines.push(DocLine { description: "Sedia".into(), qty: dec!(10), unit_price: dec!(20), vat: VatRef::from_code(&v), ..Default::default() });
+    let q = s.save_document(&q).unwrap();
+    assert!(q.kind.is_purchase());
+    let mut o = s.transform(&[q.id], DocKind::SupplierOrder).unwrap();
+    assert_eq!(o.kind, DocKind::SupplierOrder);
+    assert_eq!(o.order_status, OrderStatus::ToConfirm);
+    o.order_status = OrderStatus::Confirmed;
+    o.expected_date = NaiveDate::from_ymd_opt(2026, 12, 1);
+    o.internal_notes = "Sollecitare".into();
+    let o = s.save_document(&o).unwrap();
+    let list = s.documents(&DocFilter { kinds: vec![DocKind::SupplierOrder], ..Default::default() }).unwrap();
+    assert_eq!(list[0].order_status, OrderStatus::Confirmed);
+    assert_eq!(list[0].expected_date, NaiveDate::from_ymd_opt(2026, 12, 1));
+    assert_eq!(list[0].comment, "Sollecitare");
+    // arrivo parziale: 4 su 10
+    let mut a = s.transform(&[o.id], DocKind::GoodsReceipt).unwrap();
+    a.lines.iter_mut().filter(|l| l.kind == LineKind::Item).for_each(|l| l.qty = dec!(4));
+    let a = s.save_document(&a).unwrap();
+    let p = s.order_progress(&[DocKind::SupplierOrder]).unwrap();
+    let pr = &p[&o.id];
+    assert!(pr.any && !pr.all);
+    assert_eq!(pr.targets.len(), 1);
+    assert_eq!(pr.targets[0].0, a.id);
+    assert!(pr.targets[0].1.starts_with("Arrivo"));
+    assert_eq!(list[0].order_status.effective(pr.any, pr.all), OrderStatus::Partial);
+    // arrivo del resto: concluso, con due documenti collegati
+    s.transform(&[o.id], DocKind::GoodsReceipt).unwrap();
+    let p = s.order_progress(&[DocKind::SupplierOrder]).unwrap();
+    assert!(p[&o.id].all);
+    assert_eq!(p[&o.id].targets.len(), 2);
+    assert_eq!(list[0].order_status.effective(p[&o.id].any, p[&o.id].all), OrderStatus::Concluded);
+}
+
+#[test]
+fn aliquota_sp_mette_il_documento_in_scissione() {
+    let s = Store::open_in_memory().unwrap();
+    let v = s.vat_codes().unwrap().into_iter().find(|v| v.code == "22sp").expect("22sp presente");
+    assert!(v.split_payment);
+    let pa = s.save_party(&Party { role: PartyRole::Customer, name: "Comune".into(), vat_number: "01234567897".into(), is_pa: true, ..Default::default() }).unwrap();
+    let mut d = Document::new(DocKind::Invoice);
+    d.party_id = Some(pa.id);
+    d.party = pa;
+    d.lines.push(DocLine { description: "Fornitura".into(), unit_price: dec!(100), vat: VatRef::from_code(&v), ..Default::default() });
+    let t = openfatt_core::calc::compute(&d).unwrap();
+    assert_eq!(t.total, dec!(122));
+    assert_eq!(t.net_to_pay, dec!(100), "l'IVA la versa la PA");
+    let d = s.save_document(&d).unwrap();
+    assert_eq!(d.vat_liability, "S");
+    assert_eq!(d.due_dates.iter().map(|x| x.amount).sum::<Decimal>(), dec!(100));
+}
+
+#[test]
+fn piu_fornitori_per_articolo() {
+    let s = Store::open_in_memory().unwrap();
+    let a = fornitore(&s, "IT");
+    let b = s.save_party(&Party { role: PartyRole::Supplier, name: "Altro".into(), vat_number: "12345678903".into(), ..Default::default() }).unwrap();
+    let p = s.save_product(&Product { description: "Sedia".into(), cost: dec!(50), supplier_id: Some(a.id), supplier_code: "A-1".into(), supplier_price: dec!(40), other_suppliers: vec![ProductSupplier { supplier_id: b.id, code: "B-9".into(), price: dec!(38), notes: "minimo 5".into() }, ProductSupplier::default()], ..Default::default() }).unwrap();
+    assert_eq!(p.other_suppliers.len(), 1, "le righe vuote si scartano");
+    let today = NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+    assert_eq!(s.quote(Some(&a), &p, dec!(1), today, true).unwrap().price, dec!(40));
+    assert_eq!(s.quote(Some(&b), &p, dec!(1), today, true).unwrap().price, dec!(38));
+    assert_eq!(p.supplier_terms(b.id).unwrap().0, "B-9");
+    let c = s.save_party(&Party { role: PartyRole::Supplier, name: "Terzo".into(), vat_number: "02345678907".into(), ..Default::default() }).unwrap();
+    assert_eq!(s.quote(Some(&c), &p, dec!(1), today, true).unwrap().price, dec!(50), "altri fornitori: costo");
+}
+
+#[test]
+fn autofattura_da_fattura_di_acquisto() {
+    let s = Store::open_in_memory().unwrap();
+    let f = fornitore(&s, "DE");
+    let n = s.vat_codes().unwrap().into_iter().find(|v| v.code == "N6.9").unwrap();
+    let mut d = Document::new(DocKind::PurchaseInvoice);
+    d.party_id = Some(f.id);
+    d.party = f.clone();
+    d.external_number = "INV-77".into();
+    d.date = NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+    d.lines.push(DocLine { description: "Consulenza".into(), unit_price: dec!(1000), vat: VatRef::from_code(&n), ..Default::default() });
+    let d = s.save_document(&d).unwrap();
+    let a = s.transform(&[d.id], DocKind::SelfInvoice).unwrap();
+    assert_eq!(a.fe_type, "TD17", "servizi da fornitore UE");
+    assert_eq!(a.related[0].kind, "FATTURA");
+    assert_eq!(a.related[0].number, "INV-77");
+    assert_eq!(a.lines[0].vat.rate, dec!(22));
+    assert!(a.payment_id.is_none());
+    assert!(a.due_dates.is_empty());
+    assert!(a.causale.contains("INV-77"));
+    assert_eq!(openfatt_core::calc::compute(&a).unwrap().total, dec!(1220));
+}
+
+#[test]
+fn prezzi_di_un_listino_per_molti_articoli() {
+    use openfatt_core::pricing::{PriceList, PriceListKind};
+    let s = Store::open_in_memory().unwrap();
+    let a = s.save_product(&Product { description: "A".into(), price: dec!(100), ..Default::default() }).unwrap();
+    let b = s.save_product(&Product { description: "B".into(), price: dec!(50), ..Default::default() }).unwrap();
+    let l = s.save_price_list(&PriceList { name: "Vip".into(), kind: PriceListKind::Derived, percent: dec!(-10), ..Default::default() }).unwrap();
+    s.set_price_list_item(l.id, b.id, dec!(0), Some(dec!(40))).unwrap();
+    let m = s.list_prices_for(l.id, &[a.clone(), b.clone()]).unwrap();
+    assert_eq!(m[&a.id], dec!(90));
+    assert_eq!(m[&b.id], dec!(40));
+    let o = s.product_list_overrides(b.id).unwrap();
+    assert_eq!(o[&l.id], dec!(40));
+    assert!(s.product_list_overrides(a.id).unwrap().is_empty());
+    assert_eq!(s.base_list_name(), "Prezzo base");
+}

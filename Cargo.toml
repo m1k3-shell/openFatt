@@ -28,6 +28,7 @@ openfatt-interop = { path = "crates/openfatt-interop" }
 openfatt-sign = { path = "crates/openfatt-sign" }
 openfatt-pos = { path = "crates/openfatt-pos" }
 openfatt-bank = { path = "crates/openfatt-bank" }
+openfatt-backup = { path = "crates/openfatt-backup" }
 
 [profile.release]
 opt-level = 3

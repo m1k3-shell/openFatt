@@ -2,6 +2,7 @@
 
 pub mod agenda;
 pub mod agents;
+pub mod backup;
 pub mod bank;
 pub mod business;
 pub mod cards;
@@ -148,6 +149,7 @@ pub enum DocGroup {
     Invoices,
     Proforma,
     SelfInvoices,
+    SupplierQuotes,
     SupplierOrders,
     GoodsReceipts,
     PurchaseInvoices,
@@ -156,7 +158,7 @@ pub enum DocGroup {
 
 impl DocGroup {
     pub const SALES: [DocGroup; 6] = [DocGroup::Quotes, DocGroup::Orders, DocGroup::DeliveryNotes, DocGroup::Invoices, DocGroup::Proforma, DocGroup::SelfInvoices];
-    pub const PURCHASES: [DocGroup; 3] = [DocGroup::SupplierOrders, DocGroup::GoodsReceipts, DocGroup::PurchaseInvoices];
+    pub const PURCHASES: [DocGroup; 4] = [DocGroup::SupplierQuotes, DocGroup::SupplierOrders, DocGroup::GoodsReceipts, DocGroup::PurchaseInvoices];
 
     pub fn kinds(self) -> Vec<DocKind> {
         match self {
@@ -166,6 +168,7 @@ impl DocGroup {
             DocGroup::Invoices => vec![DocKind::Invoice, DocKind::AccompanyingInvoice, DocKind::CreditNote, DocKind::DebitNote, DocKind::DownPaymentInvoice, DocKind::Fee],
             DocGroup::Proforma => vec![DocKind::Proforma],
             DocGroup::SelfInvoices => vec![DocKind::SelfInvoice],
+            DocGroup::SupplierQuotes => vec![DocKind::SupplierQuote],
             DocGroup::SupplierOrders => vec![DocKind::SupplierOrder],
             DocGroup::GoodsReceipts => vec![DocKind::GoodsReceipt],
             DocGroup::PurchaseInvoices => vec![DocKind::PurchaseInvoice, DocKind::PurchaseCreditNote],
@@ -181,6 +184,7 @@ impl DocGroup {
             DocGroup::Invoices => "Fatture e note",
             DocGroup::Proforma => "Proforma",
             DocGroup::SelfInvoices => "Autofatture / integrazioni",
+            DocGroup::SupplierQuotes => "Preventivi fornitori",
             DocGroup::SupplierOrders => "Ordini fornitori",
             DocGroup::GoodsReceipts => "Arrivi merce",
             DocGroup::PurchaseInvoices => "Fatture di acquisto",
@@ -208,6 +212,7 @@ pub enum Screen {
     Inventory,
     Settings,
     Tools,
+    Backup,
     /// Schermate delle funzioni avanzate (ricorrenti, agenti, statistiche, agenda...)
     Extra(business::Extra),
 }
@@ -239,6 +244,8 @@ pub enum Nav {
     MailTest(openfatt_pec::mail::SmtpAccount, String),
     /// Scadenzario, scheda dei solleciti.
     Reminders,
+    /// Scadenzario su una vista precisa (tutti, entrate, uscite, da saldare).
+    Payments(ledger::PayView),
     /// Impostazioni, scheda email e solleciti.
     MailSettings,
     /// Impostazioni, scheda banca e distinte.
@@ -301,7 +308,7 @@ pub fn screen_area(s: Screen) -> openfatt_store::Area {
         Screen::EInvoicesOut | Screen::EInvoicesIn => Area::EInvoice,
         Screen::Stock | Screen::Inventory => Area::Stock,
         Screen::Dues | Screen::Cash | Screen::Bank | Screen::Vat => Area::Accounting,
-        Screen::Settings | Screen::Tools => Area::Settings,
+        Screen::Settings | Screen::Tools | Screen::Backup => Area::Settings,
         Screen::Extra(x) => match x {
             Extra::Recurring | Extra::Shop => Area::Sales,
             Extra::Cards => Area::Counter,
@@ -326,9 +333,7 @@ pub fn kind_area(k: DocKind) -> openfatt_store::Area {
     }
 }
 
-/// Titolo della schermata (24 px, grassetto).
+/// Titolo della schermata: la barra della sezione.
 pub fn title(ui: &mut egui::Ui, t: &str) {
-    ui.add_space(4.0);
-    ui.label(theme::bold(t).size(24.0));
-    ui.add_space(10.0);
+    theme::title_row(ui, &[], t, None, |_| {});
 }

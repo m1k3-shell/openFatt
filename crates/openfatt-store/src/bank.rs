@@ -126,7 +126,8 @@ impl Store {
 
     /// Scadenze aperte da presentare (o pagare) con questo tipo di distinta.
     pub fn bank_pending(&self, kind: BankKind) -> Result<Vec<DueRow>> {
-        Ok(self.due_list(true, None)?.into_iter().filter(|d| kind.accepts(d) && d.batch_id.is_none() && d.residual() > Decimal::ZERO).collect())
+        // anche le fatture salvate in bozza: numero e scadenze sono già registrati
+        Ok(self.due_list_with_drafts(true, None)?.into_iter().filter(|d| kind.accepts(d) && d.batch_id.is_none() && d.residual() > Decimal::ZERO).collect())
     }
 
     /// Numero che avrà la prossima distinta di questo tipo nell'anno.
@@ -221,7 +222,7 @@ impl Store {
     /// Distinta con le sue voci.
     pub fn batch(&self, id: i64) -> Result<(BankBatch, Vec<BatchItem>)> {
         let b = self.batches(None)?.into_iter().find(|b| b.id == id).ok_or_else(|| StoreError::NotFound("distinta".into()))?;
-        let dues = self.due_list(false, None)?;
+        let dues = self.due_list_with_drafts(false, None)?;
         let mut st = self.conn().prepare("SELECT id, due_id, amount, ref, status FROM bank_batch_items WHERE batch_id = ?1 ORDER BY id")?;
         let rows = st.query_map([id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))?;
         let mut items = Vec::new();

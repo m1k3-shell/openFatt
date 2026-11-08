@@ -27,6 +27,8 @@ pub struct DueRow {
     pub mp_code: String,
     /// true = da incassare (vendite), false = da pagare (acquisti)
     pub receivable: bool,
+    /// Il documento è ancora in bozza.
+    pub draft: bool,
 }
 
 impl DueRow {
@@ -44,14 +46,27 @@ pub struct AccountBalance {
 impl Store {
     /// Scadenze (aperte o tutte) ordinate per data.
     pub fn due_list(&self, only_open: bool, to: Option<NaiveDate>) -> Result<Vec<DueRow>> {
-        let mut st = self.conn().prepare(
+        self.due_rows(only_open, to, false)
+    }
+
+    /// Come `due_list`, comprese le scadenze dei documenti in bozza.
+    pub fn due_list_with_drafts(&self, only_open: bool, to: Option<NaiveDate>) -> Result<Vec<DueRow>> {
+        self.due_rows(only_open, to, true)
+    }
+
+    fn due_rows(&self, only_open: bool, to: Option<NaiveDate>, drafts: bool) -> Result<Vec<DueRow>> {
+        let statuses = if drafts { "('EMESSO','BOZZA')" } else { "('EMESSO')" };
+        let sql = format!(
             "SELECT s.id, s.document_id, d.kind, d.number, d.series, d.date, d.party_name, s.date, s.amount, s.paid, s.mp_code, s.writeoff, d.party_id,
                     (SELECT bi.batch_id FROM bank_batch_items bi JOIN bank_batches b ON b.id = bi.batch_id
-                      WHERE bi.due_id = s.id AND b.status <> 'ANNULLATA' AND bi.status = '' ORDER BY b.id DESC LIMIT 1)
+                      WHERE bi.due_id = s.id AND b.status <> 'ANNULLATA' AND bi.status = '' ORDER BY b.id DESC LIMIT 1),
+                    d.status
              FROM due_dates s JOIN documents d ON d.id = s.document_id
-             WHERE d.status = 'EMESSO' AND (?1 IS NULL OR s.date <= ?1)
+             WHERE d.status IN {} AND (?1 IS NULL OR s.date <= ?1)
              ORDER BY s.date, s.id",
-        )?;
+            statuses
+        );
+        let mut st = self.conn().prepare(&sql)?;
         let rows = st.query_map([to.map(date_to_sql)], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -68,11 +83,12 @@ impl Store {
                 r.get::<_, String>(11)?,
                 r.get::<_, Option<i64>>(12)?,
                 r.get::<_, Option<i64>>(13)?,
+                r.get::<_, String>(14)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, doc_id, kind, number, series, ddate, party, date, amount, paid, mp, wo, party_id, batch_id) = row?;
+            let (id, doc_id, kind, number, series, ddate, party, date, amount, paid, mp, wo, party_id, batch_id, status) = row?;
             let kind = DocKind::from_code(&kind).unwrap_or_default();
             let receivable = kind.is_sale() != kind.is_credit();
             let r = DueRow {
@@ -95,6 +111,7 @@ impl Store {
                 writeoff: dec_from_sql(Some(wo)),
                 mp_code: mp.unwrap_or_default(),
                 receivable,
+                draft: status == "BOZZA",
             };
             if !only_open || r.residual() > Decimal::ZERO {
                 out.push(r);

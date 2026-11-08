@@ -24,6 +24,15 @@ enum DuesView {
     Reminders,
 }
 
+/// Voci del menu Pagamenti.
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum PayView {
+    All,
+    In,
+    Out,
+    Until,
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum DueFilter {
     Receivable,
@@ -38,6 +47,8 @@ pub struct State {
     attach_pdfs: bool,
     due_filter: DueFilter,
     only_open: bool,
+    until: Option<NaiveDate>,
+    search: String,
     paying: Option<(i64, NaiveDate, Decimal, String, bool, String)>,
     confirm_unpay: Option<i64>,
     cash_from: NaiveDate,
@@ -56,6 +67,8 @@ impl Default for State {
             attach_pdfs: true,
             due_filter: DueFilter::Receivable,
             only_open: true,
+            until: None,
+            search: String::new(),
             paying: None,
             confirm_unpay: None,
             cash_from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(),
@@ -67,6 +80,31 @@ impl Default for State {
 }
 
 impl State {
+    /// Apre lo scadenzario sulla vista scelta dal menu Pagamenti.
+    pub fn show_view(&mut self, v: PayView) {
+        self.view = DuesView::Dues;
+        self.until = None;
+        match v {
+            PayView::All => {
+                self.due_filter = DueFilter::All;
+                self.only_open = false;
+            }
+            PayView::In => {
+                self.due_filter = DueFilter::Receivable;
+                self.only_open = false;
+            }
+            PayView::Out => {
+                self.due_filter = DueFilter::Payable;
+                self.only_open = false;
+            }
+            PayView::Until => {
+                self.due_filter = DueFilter::All;
+                self.only_open = true;
+                self.until = Some(chrono::Local::now().date_naive());
+            }
+        }
+    }
+
     /// Apre lo scadenzario sulla scheda dei solleciti, con la selezione proposta.
     pub fn show_reminders(&mut self) {
         self.view = DuesView::Reminders;
@@ -82,16 +120,21 @@ fn rem_key(c: &ReminderCandidate) -> String {
 }
 
 pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
-    super::title(ui, "Scadenzario");
+    let title = if st.view == DuesView::Reminders {
+        "Invio solleciti"
+    } else if st.until.is_some() {
+        "Da saldare"
+    } else {
+        match st.due_filter {
+            DueFilter::All => "Pagamenti",
+            DueFilter::Receivable => "Pagamenti: entrate",
+            DueFilter::Payable => "Pagamenti: uscite",
+        }
+    };
+    super::title(ui, title);
     let today = chrono::Local::now().date_naive();
     let tpl = mailer::templates(cx.store);
     let candidates = cx.store.reminder_candidates(today, tpl.grace_days, tpl.min_days_between).unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut st.view, DuesView::Dues, format!("{}  Scadenze", icon::CALENDAR_CHECK));
-        let n = candidates.len();
-        ui.selectable_value(&mut st.view, DuesView::Reminders, format!("{}  Solleciti{}", icon::ENVELOPE_SIMPLE, if n > 0 { format!(" ({})", n) } else { String::new() }));
-    });
-    ui.add_space(8.0);
     if st.view == DuesView::Reminders {
         reminders(ui, cx, st, &candidates, &tpl);
         return;
@@ -148,25 +191,29 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     }
 
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut st.due_filter, DueFilter::Receivable, "Da incassare (clienti)");
-        ui.selectable_value(&mut st.due_filter, DueFilter::Payable, "Da pagare (fornitori)");
-        ui.selectable_value(&mut st.due_filter, DueFilter::All, "Tutte");
+        ui.add(egui::TextEdit::singleline(&mut st.search).hint_text(format!("{}  Cliente, fornitore, documento", icon::MAGNIFYING_GLASS)).desired_width(240.0));
+        ui.selectable_value(&mut st.due_filter, DueFilter::All, "Tutti");
+        ui.selectable_value(&mut st.due_filter, DueFilter::Receivable, "Entrate");
+        ui.selectable_value(&mut st.due_filter, DueFilter::Payable, "Uscite");
         ui.separator();
-        ui.checkbox(&mut st.only_open, "solo aperte");
+        ui.checkbox(&mut st.only_open, "solo da saldare");
         ui.separator();
-        if theme::ghost(ui, true, icon::BANK, "Distinte bancarie").clicked() {
-            cx.nav.push(Nav::Go(super::Screen::Bank));
-        }
+        ui.label("Fino al");
+        widgets::opt_date_field(ui, "due_until", &mut st.until);
     });
     let list: Vec<_> = cx
         .store
-        .due_list(st.only_open, None)
+        .due_list_with_drafts(st.only_open, st.until)
         .unwrap_or_default()
         .into_iter()
         .filter(|d| match st.due_filter {
             DueFilter::Receivable => d.receivable,
             DueFilter::Payable => !d.receivable,
             DueFilter::All => true,
+        })
+        .filter(|d| {
+            let q = st.search.trim().to_lowercase();
+            q.is_empty() || d.party_name.to_lowercase().contains(&q) || d.doc_label.to_lowercase().contains(&q)
         })
         .collect();
     let overdue: Decimal = list.iter().filter(|d| d.date < today).map(|d| d.residual()).sum();
@@ -204,6 +251,9 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     if ui.link(&d.doc_label).clicked() {
                         cx.nav.push(Nav::OpenDocument(d.document_id));
                     }
+                    if d.draft {
+                        theme::pill(ui, "bozza", Tone::Warning);
+                    }
                 });
                 row.col(|ui| {
                     ui.label(&d.party_name);
@@ -211,7 +261,7 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                 row.col(|ui| {
                     ui.label(codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code));
                     if d.batch_id.is_some() {
-                        theme::pill(ui, "in distinta", Tone::Neutral).on_hover_text("Presentata in banca con una distinta (Contabilità > Distinte bancarie)");
+                        theme::pill(ui, "in distinta", Tone::Neutral).on_hover_text("Presentata in banca con una distinta (Pagamenti > Distinte emesse)");
                     }
                 });
                 row.col(|ui| {
@@ -253,7 +303,7 @@ fn reminders(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, list: &[ReminderCa
     ui.add_space(6.0);
     if list.is_empty() {
         theme::card(ui, "Nessun sollecito da inviare", |_| {}, |ui| {
-            ui.label(theme::muted("Tutte le scadenze dei clienti sono incassate o entro la tolleranza impostata (Impostazioni > Email e solleciti)."));
+            ui.label(theme::muted("Tutte le scadenze dei clienti sono incassate o entro la tolleranza impostata (Opzioni > Email e solleciti)."));
         });
         return;
     }

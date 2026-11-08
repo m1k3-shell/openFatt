@@ -323,6 +323,28 @@ pub struct VatCode {
     /// Riferimento normativo da riportare in fattura (es. "Art. 10 DPR 633/72").
     pub legal_ref: String,
     pub active: bool,
+    /// Scissione dei pagamenti (art. 17-ter DPR 633/72): l'IVA la versa la Pubblica Amministrazione.
+    pub split_payment: bool,
+}
+
+impl Product {
+    /// Codice e prezzo dell'articolo presso un fornitore (principale o aggiuntivo).
+    pub fn supplier_terms(&self, supplier: Id) -> Option<(String, Decimal)> {
+        if self.supplier_id == Some(supplier) {
+            return Some((self.supplier_code.clone(), self.supplier_price));
+        }
+        self.other_suppliers.iter().find(|s| s.supplier_id == supplier).map(|s| (s.code.clone(), s.price))
+    }
+}
+
+/// Fornitore aggiuntivo di un articolo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ProductSupplier {
+    pub supplier_id: Id,
+    pub code: String,
+    pub price: Decimal,
+    pub notes: String,
 }
 
 /// Riferimento all'aliquota memorizzato nella riga (storicizzato).
@@ -333,15 +355,18 @@ pub struct VatRef {
     pub rate: Decimal,
     pub natura: Option<String>,
     pub legal_ref: String,
+    /// Aliquota con scissione dei pagamenti ("22sp")
+    pub split: bool,
 }
 
 impl VatRef {
     pub fn from_code(v: &VatCode) -> Self {
-        VatRef { vat_id: Some(v.id), rate: v.rate, natura: v.natura.clone(), legal_ref: v.legal_ref.clone() }
+        VatRef { vat_id: Some(v.id), rate: v.rate, natura: v.natura.clone(), legal_ref: v.legal_ref.clone(), split: v.split_payment }
     }
     pub fn label(&self) -> String {
         match &self.natura {
             Some(n) if self.rate.is_zero() => n.clone(),
+            _ if self.split => format!("{}sp", crate::money::fmt_it_trim(self.rate, 0, 2)),
             _ => format!("{}%", crate::money::fmt_it_trim(self.rate, 0, 2)),
         }
     }
@@ -401,8 +426,27 @@ pub struct Product {
     pub is_service: bool,
     pub manage_stock: bool,
     pub min_stock: Decimal,
+    /// Fornitore principale, con il suo codice, prezzo e note
     pub supplier_id: Option<Id>,
     pub supplier_code: String,
+    pub supplier_price: Decimal,
+    pub supplier_notes: String,
+    /// Fornitori aggiuntivi, ciascuno col proprio codice e prezzo
+    pub other_suppliers: Vec<ProductSupplier>,
+    /// Caratteristiche
+    pub producer: String,
+    pub url: String,
+    /// Dimensioni: unità, netto e imballo (larghezza, altezza, profondità)
+    pub dim_unit: String,
+    pub dim_net: [Decimal; 3],
+    pub dim_pack: [Decimal; 3],
+    /// Peso: unità, netto e lordo
+    pub weight_unit: String,
+    pub weight_net: Decimal,
+    pub weight_gross: Decimal,
+    /// Giorni per l'ordine al fornitore e multipli d'ordine
+    pub order_days: u32,
+    pub order_multiple: Decimal,
     pub notes: String,
     pub active: bool,
     /// Varianti (es. taglia e colore); vuoto = articolo senza varianti.
@@ -550,6 +594,19 @@ impl Default for Product {
             min_stock: Decimal::ZERO,
             supplier_id: None,
             supplier_code: String::new(),
+            supplier_price: Decimal::ZERO,
+            supplier_notes: String::new(),
+            other_suppliers: Vec::new(),
+            producer: String::new(),
+            url: String::new(),
+            dim_unit: String::new(),
+            dim_net: [Decimal::ZERO; 3],
+            dim_pack: [Decimal::ZERO; 3],
+            weight_unit: String::new(),
+            weight_net: Decimal::ZERO,
+            weight_gross: Decimal::ZERO,
+            order_days: 0,
+            order_multiple: Decimal::ZERO,
             notes: String::new(),
             active: true,
             variants: VariantSpec::default(),
@@ -596,6 +653,8 @@ pub enum DocKind {
     Proforma,
     /// Autofattura / integrazione (TD16-TD29)
     SelfInvoice,
+    /// Preventivo ricevuto da un fornitore
+    SupplierQuote,
     /// Ordine a fornitore
     SupplierOrder,
     /// Arrivo merce (DDT del fornitore)
@@ -613,7 +672,7 @@ pub enum DocKind {
 }
 
 impl DocKind {
-    pub const ALL: [DocKind; 18] = [
+    pub const ALL: [DocKind; 19] = [
         DocKind::Quote,
         DocKind::CustomerOrder,
         DocKind::DeliveryNote,
@@ -625,6 +684,7 @@ impl DocKind {
         DocKind::Fee,
         DocKind::Proforma,
         DocKind::SelfInvoice,
+        DocKind::SupplierQuote,
         DocKind::SupplierOrder,
         DocKind::GoodsReceipt,
         DocKind::PurchaseInvoice,
@@ -647,6 +707,7 @@ impl DocKind {
             DocKind::Fee => "PAR",
             DocKind::Proforma => "PRO",
             DocKind::SelfInvoice => "AUT",
+            DocKind::SupplierQuote => "PRF",
             DocKind::SupplierOrder => "ORF",
             DocKind::GoodsReceipt => "ARR",
             DocKind::PurchaseInvoice => "FAQ",
@@ -674,6 +735,7 @@ impl DocKind {
             DocKind::Fee => "Parcella",
             DocKind::Proforma => "Fattura proforma",
             DocKind::SelfInvoice => "Autofattura / integrazione",
+            DocKind::SupplierQuote => "Preventivo fornitore",
             DocKind::SupplierOrder => "Ordine fornitore",
             DocKind::GoodsReceipt => "Arrivo merce",
             DocKind::PurchaseInvoice => "Fattura di acquisto",
@@ -697,6 +759,7 @@ impl DocKind {
             DocKind::Fee => "Parcelle",
             DocKind::Proforma => "Proforma",
             DocKind::SelfInvoice => "Autofatture",
+            DocKind::SupplierQuote => "Preventivi fornitori",
             DocKind::SupplierOrder => "Ordini fornitori",
             DocKind::GoodsReceipt => "Arrivi merce",
             DocKind::PurchaseInvoice => "Fatture di acquisto",
@@ -710,7 +773,7 @@ impl DocKind {
     pub fn is_purchase(self) -> bool {
         matches!(
             self,
-            DocKind::SupplierOrder | DocKind::GoodsReceipt | DocKind::PurchaseInvoice | DocKind::PurchaseCreditNote
+            DocKind::SupplierQuote | DocKind::SupplierOrder | DocKind::GoodsReceipt | DocKind::PurchaseInvoice | DocKind::PurchaseCreditNote
         )
     }
 
@@ -746,6 +809,11 @@ impl DocKind {
             DocKind::SelfInvoice => Some("TD17"),
             _ => None,
         }
+    }
+
+    /// Ordini: hanno uno stato (da confermare, confermato, concluso) e una data prevista.
+    pub fn has_order_state(self) -> bool {
+        matches!(self, DocKind::CustomerOrder | DocKind::SupplierOrder)
     }
 
     /// Documento fiscale che va numerato in modo progressivo e trasmesso.
@@ -800,10 +868,55 @@ impl DocKind {
             DocKind::DeliveryNote => &[DocKind::Invoice],
             DocKind::Proforma => &[DocKind::Invoice],
             DocKind::Invoice | DocKind::AccompanyingInvoice => &[DocKind::CreditNote],
+            DocKind::SupplierQuote => &[DocKind::SupplierOrder, DocKind::GoodsReceipt, DocKind::PurchaseInvoice],
             DocKind::SupplierOrder => &[DocKind::GoodsReceipt, DocKind::PurchaseInvoice],
             DocKind::GoodsReceipt => &[DocKind::PurchaseInvoice],
-            DocKind::PurchaseInvoice => &[DocKind::PurchaseCreditNote],
+            DocKind::PurchaseInvoice => &[DocKind::SelfInvoice, DocKind::PurchaseCreditNote],
             _ => &[],
+        }
+    }
+}
+
+/// Stato di un ordine. "In parte concluso" e "Concluso" si ricavano anche da soli dalle
+/// righe evase; si possono però impostare a mano (ordine chiuso senza altri documenti).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum OrderStatus {
+    #[default]
+    ToConfirm,
+    Confirmed,
+    Partial,
+    Concluded,
+}
+
+impl OrderStatus {
+    pub const ALL: [OrderStatus; 4] = [OrderStatus::ToConfirm, OrderStatus::Confirmed, OrderStatus::Partial, OrderStatus::Concluded];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OrderStatus::ToConfirm => "Da confermare",
+            OrderStatus::Confirmed => "Confermato",
+            OrderStatus::Partial => "Parz. concluso",
+            OrderStatus::Concluded => "Concluso",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Self {
+        match s {
+            "Confirmed" => OrderStatus::Confirmed,
+            "Partial" => OrderStatus::Partial,
+            "Concluded" => OrderStatus::Concluded,
+            _ => OrderStatus::ToConfirm,
+        }
+    }
+
+    /// Stato effettivo, tenendo conto delle righe già evase.
+    pub fn effective(self, any_fulfilled: bool, all_fulfilled: bool) -> Self {
+        if all_fulfilled {
+            OrderStatus::Concluded
+        } else if any_fulfilled && self != OrderStatus::Concluded {
+            OrderStatus::Partial
+        } else {
+            self
         }
     }
 }
@@ -1006,7 +1119,7 @@ impl Default for PensionFund {
         PensionFund {
             kind: "TC22".into(),
             rate: Decimal::from(4),
-            vat: VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new() },
+            vat: VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false },
             subject_to_withholding: true,
         }
     }
@@ -1254,6 +1367,11 @@ pub struct Document {
     pub shop_order: String,
     /// Documento importato da un altro programma, che ne ha già gestito la fattura elettronica
     pub legacy_fe: bool,
+    /// Listino scelto nel documento: vuoto = quello del cliente, 0 = prezzo base
+    pub price_list_id: Option<Id>,
+    /// Ordini: stato e data prevista di conclusione
+    pub order_status: OrderStatus,
+    pub expected_date: Option<NaiveDate>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub version: i64,
@@ -1300,6 +1418,9 @@ impl Default for Document {
             intent_protocol: String::new(),
             shop_order: String::new(),
             legacy_fe: false,
+            price_list_id: None,
+            order_status: OrderStatus::ToConfirm,
+            expected_date: None,
             created_at: None,
             updated_at: None,
             version: 0,
@@ -1312,6 +1433,9 @@ impl Document {
         let mut d = Document { kind, ..Default::default() };
         if kind.has_transport() {
             d.transport = Some(Transport::default());
+        }
+        if kind == DocKind::CustomerOrder {
+            d.order_status = OrderStatus::Confirmed;
         }
         d
     }

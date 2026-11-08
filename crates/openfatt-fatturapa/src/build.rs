@@ -100,7 +100,7 @@ fn clean_code(s: &str) -> String {
 
 fn company_as_cedente(c: &Company) -> Result<CedentePrestatore, BuildError> {
     if c.vat_number.trim().is_empty() {
-        return Err(BuildError("Partita IVA dell'azienda mancante (Impostazioni > Azienda)".into()));
+        return Err(BuildError("Partita IVA dell'azienda mancante (Opzioni > Azienda)".into()));
     }
     if c.address.trim().is_empty() || c.city.trim().is_empty() {
         return Err(BuildError("Indirizzo della sede dell'azienda incompleto".into()));

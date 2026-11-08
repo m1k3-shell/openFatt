@@ -25,6 +25,31 @@ pub struct Editor {
     fulfillment: (bool, bool),
     pub tools: super::linetools::Tools,
     intent_cache: Option<(u64, String, Option<openfatt_store::IntentUsage>)>,
+    /// Scadenze già in una distinta: il documento resta bloccato ma si può emettere
+    in_batch: bool,
+    tab: DocTab,
+    cols: LineCols,
+}
+
+/// Colonne facoltative delle righe, ricordate nell'archivio.
+#[derive(Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct LineCols {
+    hide_cost: bool,
+    hide_net: bool,
+    hide_margin: bool,
+}
+
+/// Schede della finestra del documento.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocTab {
+    Lines,
+    Payment,
+    Transport,
+    Notes,
+    Addresses,
+    FeProps,
+    Options,
 }
 
 fn group_of(k: DocKind) -> DocGroup {
@@ -34,6 +59,7 @@ fn group_of(k: DocKind) -> DocGroup {
         DocKind::DeliveryNote => DocGroup::DeliveryNotes,
         DocKind::Proforma => DocGroup::Proforma,
         DocKind::SelfInvoice => DocGroup::SelfInvoices,
+        DocKind::SupplierQuote => DocGroup::SupplierQuotes,
         DocKind::SupplierOrder => DocGroup::SupplierOrders,
         DocKind::GoodsReceipt => DocGroup::GoodsReceipts,
         DocKind::PurchaseInvoice | DocKind::PurchaseCreditNote => DocGroup::PurchaseInvoices,
@@ -47,6 +73,7 @@ impl Editor {
         let lock = if doc.id != 0 { store.document_lock_reason(doc.id).ok().flatten() } else { None };
         let fe_status = if doc.id != 0 { store.einvoice_for_document(doc.id).ok().flatten().map(|e| e.status.label().to_string()) } else { None };
         let fulfillment = if doc.id != 0 { store.fulfillment_state(&doc).unwrap_or((false, false)) } else { (false, false) };
+        let in_batch = doc.id != 0 && store.document_in_batch(doc.id).unwrap_or(false);
         Editor {
             manual_number: doc.number.map(|n| n.to_string()).unwrap_or_default(),
             doc,
@@ -60,6 +87,9 @@ impl Editor {
             fulfillment,
             tools: Default::default(),
             intent_cache: None,
+            in_batch,
+            tab: DocTab::Lines,
+            cols: store.get_setting("doc_line_columns").unwrap_or_default(),
         }
     }
 
@@ -84,15 +114,41 @@ impl Editor {
     fn default_vat(&self) -> VatRef {
         if let Some(id) = self.doc.party.default_vat_id {
             if let Some(v) = self.vats.iter().find(|v| v.id == id) {
-                return VatRef::from_code(v);
+                return self.pa_vat(VatRef::from_code(v));
             }
         }
-        self.vats.iter().find(|v| v.code == "22").map(VatRef::from_code).unwrap_or(VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new() })
+        let base = self.vats.iter().find(|v| v.code == "22").map(VatRef::from_code).unwrap_or(VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false });
+        self.pa_vat(base)
+    }
+
+    /// Fatture alla Pubblica Amministrazione con scissione: si usa l'aliquota "sp" corrispondente.
+    fn pa_vat(&self, v: VatRef) -> VatRef {
+        if !(self.doc.party.is_pa && self.doc.kind.is_fiscal() && self.doc.vat_liability == "S") || v.rate.is_zero() || v.split {
+            return v;
+        }
+        self.vats.iter().find(|x| x.active && x.split_payment && x.rate == v.rate).map(VatRef::from_code).unwrap_or(v)
+    }
+
+    /// Allinea le aliquote delle righe al soggetto (con o senza scissione dei pagamenti).
+    fn sync_split_lines(&mut self) {
+        let want = self.doc.party.is_pa && self.doc.kind.is_fiscal() && self.doc.vat_liability == "S";
+        for i in 0..self.doc.lines.len() {
+            let v = self.doc.lines[i].vat.clone();
+            if want {
+                self.doc.lines[i].vat = self.pa_vat(v);
+            } else if v.split {
+                if let Some(x) = self.vats.iter().find(|x| x.active && !x.split_payment && x.rate == v.rate && x.natura.is_none()) {
+                    self.doc.lines[i].vat = VatRef::from_code(x);
+                }
+            }
+        }
     }
 
     /// Prezzo (con eventuale conversione a IVA inclusa), sconti e provenienza per l'articolo.
     fn priced(&self, store: &openfatt_store::Store, p: &Product, qty: Decimal, vat_rate: Decimal) -> (Decimal, String, String) {
-        let party = if self.doc.party_id.is_some() { Some(&self.doc.party) } else { None };
+        // il listino scelto nel documento vale al posto di quello del cliente
+        let with_list = self.doc.price_list_id.filter(|_| self.doc.kind.is_sale()).map(|l| Party { price_list_id: if l == 0 { None } else { Some(l) }, ..self.doc.party.clone() });
+        let party = with_list.as_ref().or(if self.doc.party_id.is_some() { Some(&self.doc.party) } else { None });
         let q = store.quote(party, p, qty, self.doc.date, self.doc.kind.is_purchase()).unwrap_or_default();
         let mut price = q.price;
         if self.doc.prices_include_vat {
@@ -109,25 +165,67 @@ impl Editor {
             let Some(pid) = l.product_id else { continue };
             let Some(p) = store.product(pid).ok().flatten() else { continue };
             let (price, disc, note) = self.priced(store, &p, l.qty, l.vat.rate);
+            let code = self.supplier_code_of(&p);
             let l = &mut self.doc.lines[i];
             l.unit_price = price;
             l.discounts = disc;
             l.price_note = note;
+            l.code = code;
             n += 1;
         }
         n
+    }
+
+    /// Passa da prezzi netti a prezzi IVA inclusa (o viceversa) convertendo le righe.
+    fn set_price_mode(&mut self, include_vat: bool) {
+        if self.doc.prices_include_vat == include_vat {
+            return;
+        }
+        self.doc.prices_include_vat = include_vat;
+        for l in self.doc.lines.iter_mut().filter(|l| l.kind == LineKind::Item && l.calc_percent.is_none()) {
+            let k = Decimal::ONE + l.vat.rate / Decimal::ONE_HUNDRED;
+            l.unit_price = openfatt_core::money::round_dp(if include_vat { l.unit_price * k } else { l.unit_price / k }, 6);
+        }
+        self.dirty = true;
+    }
+
+    /// Ricavo e costo delle righe con prezzo di acquisto, e quante righe ne sono prive.
+    fn margin_totals(&self, t: &calc::Totals) -> (Decimal, Decimal, usize) {
+        let (mut rev, mut cost, mut missing) = (Decimal::ZERO, Decimal::ZERO, 0);
+        for lc in &t.lines {
+            let Some(l) = lc.index.and_then(|i| self.doc.lines.get(i)).filter(|l| l.kind == LineKind::Item && l.calc_percent.is_none()) else { continue };
+            if l.unit_cost.is_zero() {
+                if !lc.total.is_zero() {
+                    missing += 1;
+                }
+                continue;
+            }
+            rev += lc.total;
+            cost += l.unit_cost * l.qty;
+        }
+        (rev, cost, missing)
+    }
+
+    /// Codice da mostrare in riga: negli acquisti quello del fornitore del documento.
+    fn supplier_code_of(&self, p: &Product) -> String {
+        if self.doc.kind.is_purchase() {
+            if let Some((c, _)) = self.doc.party_id.and_then(|id| p.supplier_terms(id)).filter(|(c, _)| !c.trim().is_empty()) {
+                return c;
+            }
+        }
+        p.code.clone()
     }
 
     fn line_from_product(&self, store: &openfatt_store::Store, p: &Product) -> DocLine {
         let vat = if self.doc.party.default_vat_id.is_some() {
             self.default_vat()
         } else {
-            p.vat_id.and_then(|id| self.vats.iter().find(|v| v.id == id)).map(VatRef::from_code).unwrap_or_else(|| self.default_vat())
+            p.vat_id.and_then(|id| self.vats.iter().find(|v| v.id == id)).map(|v| self.pa_vat(VatRef::from_code(v))).unwrap_or_else(|| self.default_vat())
         };
         let (price, discounts, price_note) = self.priced(store, p, Decimal::ONE, vat.rate);
         DocLine {
             product_id: Some(p.id),
-            code: if self.doc.kind.is_purchase() && !p.supplier_code.is_empty() { p.supplier_code.clone() } else { p.code.clone() },
+            code: self.supplier_code_of(p),
             description: p.description.clone(),
             qty: Decimal::ONE,
             unit: p.unit.clone(),
@@ -190,6 +288,8 @@ impl Editor {
         }
         if p.is_pa && self.doc.kind.is_fiscal() && self.doc.vat_liability == "I" {
             self.doc.vat_liability = "S".into();
+        } else if !p.is_pa && self.doc.vat_liability == "S" {
+            self.doc.vat_liability = "I".into();
         }
         if self.doc.agent_id.is_none() && self.doc.kind.is_sale() {
             self.doc.agent_id = p.agent_id;
@@ -202,6 +302,10 @@ impl Editor {
         }
         self.doc.party = p;
         self.dirty = true;
+        if changed_party {
+            self.doc.price_list_id = None;
+        }
+        self.sync_split_lines();
         // in bozza i prezzi seguono listino e condizioni del nuovo soggetto
         if changed_party && self.doc.status == DocStatus::Draft && self.doc.lines.iter().any(|l| l.product_id.is_some()) {
             let n = self.reprice_all(store);
@@ -221,6 +325,7 @@ impl Editor {
         let was_issued = self.doc.status == DocStatus::Issued;
         match cx.store.save_document(&self.doc) {
             Ok(d) => {
+                self.manual_number = d.number.map(|n| n.to_string()).unwrap_or_default();
                 self.doc = d;
                 self.dirty = false;
                 if was_issued {
@@ -241,178 +346,194 @@ impl Editor {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+    fn title_bar(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
         let locked = self.lock.is_some();
         let save_shortcut = ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S));
         if save_shortcut && !locked && self.doc.status != DocStatus::Cancelled && self.save(cx) {
             cx.msgs.ok("Documento salvato");
         }
+        let title = if self.doc.number.is_some() { format!("{} {}", self.doc.kind.label(), self.doc.number_label()) } else { format!("{} (nuovo)", self.doc.kind.label()) };
+        let mut sub = String::new();
+        if let Some(l) = &self.lock {
+            sub = format!("sola lettura: {}", l);
+        }
+        let job = theme::subline(&[(sub.as_str(), false)]);
+        let status = self.doc.status;
+        let dirty = self.dirty;
+        let ff = self.fulfillment;
+        theme::title_row(ui, &[], &title, Some(job), |ui| {
+            let tone = match status {
+                DocStatus::Draft => Tone::Warning,
+                DocStatus::Issued => Tone::Positive,
+                DocStatus::Cancelled => Tone::Negative,
+            };
+            theme::pill(ui, status.label(), tone);
+            if dirty {
+                theme::pill(ui, "Modifiche non salvate", Tone::Warning);
+            }
+            if ff.0 {
+                theme::pill(ui, "Evaso", Tone::Positive);
+            } else if ff.1 {
+                theme::pill(ui, "Evaso in parte", Tone::Warning);
+            }
+        });
+    }
+
+    fn issue(&mut self, cx: &mut Ctx) {
+        let frozen = self.in_batch || self.doc.due_dates.iter().any(|d| !d.paid.is_zero() || !d.writeoff.is_zero());
+        if !frozen && !self.save(cx) {
+            return;
+        }
+        match cx.store.issue_document(self.doc.id) {
+            Ok(d) => {
+                cx.msgs.ok(format!("{} emesso con numero {}", d.kind.label(), d.number_label()));
+                self.manual_number = d.number.map(|n| n.to_string()).unwrap_or_default();
+                self.doc = d;
+            }
+            Err(e) => cx.msgs.err(e.to_string()),
+        }
+    }
+
+    /// Pulsanti in fondo alla finestra del documento.
+    fn action_bar(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+        let locked = self.lock.is_some();
         let group = group_of(self.doc.kind);
         let purchase = DocGroup::PURCHASES.contains(&group);
-        let can_fe = self.doc.kind.is_fiscal() && self.doc.status == DocStatus::Issued && self.fe_status.is_none() && !purchase;
-        ui.add_space(4.0);
+        let can_fe = self.doc.kind.is_fiscal() && self.doc.status == DocStatus::Issued && self.fe_status.is_none() && !purchase && !self.doc.legacy_fe;
+        let can_save = !locked && self.doc.status != DocStatus::Cancelled;
+        let saved = self.doc.id != 0 && !self.dirty;
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let muted = |t: &str| RichText::new(t).size(13.0).color(theme::MUTED);
-                    ui.label(muted(if purchase { "Acquisti" } else { "Vendite" }));
-                    ui.label(RichText::new(icon::CARET_RIGHT).size(11.0).color(theme::MUTED));
-                    if ui.add(egui::Label::new(muted(group.label())).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        cx.nav.push(Nav::Go(Screen::Documents(group)));
-                    }
-                });
-                ui.horizontal(|ui| {
-                    let title = if self.doc.number.is_some() { format!("{} {}", self.doc.kind.label(), self.doc.number_label()) } else { format!("{} (nuovo)", self.doc.kind.label()) };
-                    ui.label(theme::bold(title).size(24.0));
-                    ui.add_space(4.0);
-                    let tone = match self.doc.status {
-                        DocStatus::Draft => Tone::Warning,
-                        DocStatus::Issued => Tone::Positive,
-                        DocStatus::Cancelled => Tone::Negative,
-                    };
-                    theme::pill(ui, self.doc.status.label(), tone);
-                    if self.dirty {
-                        theme::pill(ui, "Modifiche non salvate", Tone::Warning);
-                    }
-                    if self.fulfillment.0 {
-                        theme::pill(ui, "Evaso", Tone::Positive);
-                    } else if self.fulfillment.1 {
-                        theme::pill(ui, "Evaso in parte", Tone::Warning);
-                    }
-                });
-                let mut sub = Vec::new();
-                let party = self.doc.party.display_name();
-                if !party.is_empty() {
-                    sub.push(party);
+            ui.spacing_mut().item_spacing.x = 3.0;
+            if theme::ghost(ui, true, icon::PRINTER, "Stampa").on_hover_text("Anteprima di stampa in PDF").clicked() {
+                self.open_pdf(cx);
+            }
+            egui::menu::menu_custom_button(ui, egui::Button::new(format!("{}  Etichette", icon::TAG)).frame(false).min_size(egui::vec2(0.0, 27.0)), |ui| {
+                if ui.button("Etichette degli articoli...").clicked() {
+                    ui.close_menu();
+                    cx.nav.push(Nav::Labels(crate::printing::document_items(cx.store, &self.doc)));
                 }
-                sub.push(self.doc.date.format("%d/%m/%Y").to_string());
-                if let Some(l) = &self.lock {
-                    sub.push(format!("sola lettura: {}", l));
+                if crate::printing::is_shipping_doc(self.doc.kind) && self.doc.id != 0 && ui.button("Etichette di spedizione...").clicked() {
+                    ui.close_menu();
+                    cx.nav.push(Nav::Labels(vec![crate::printing::shipping_item(cx.store, &self.doc)]));
                 }
-                if self.doc.id != 0 {
-                    if let Ok(Some(m)) = cx.store.document_last_mail(self.doc.id) {
-                        sub.push(format!("{} {} il {} a {}", icon::ENVELOPE_SIMPLE, if m.status == openfatt_store::MailStatus::Sent { "inviato per email" } else { "preparato per email" }, m.ts.format("%d/%m/%Y"), m.recipients));
-                    }
-                }
-                ui.label(RichText::new(sub.join(" · ")).size(15.0).color(theme::MUTED));
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
-                if theme::icon_button(ui, icon::X, "Chiudi il documento").clicked() {
+            if self.doc.id != 0 {
+                let n = cx.store.attachments("document", self.doc.id).map(|a| a.len()).unwrap_or(0);
+                if theme::ghost(ui, true, icon::PAPERCLIP, &if n > 0 { format!("Allegati ({})", n) } else { "Allegati...".to_string() }).clicked() {
+                    self.tools.attachments = Some(super::linetools::Attachments::new("document", self.doc.id, self.doc.title()));
+                }
+            }
+            if !purchase && self.doc.kind.is_fiscal() && !locked && theme::ghost(ui, true, icon::PERCENT, "Rit. acconto").clicked() {
+                self.tab = DocTab::Payment;
+            }
+            if can_save && theme::ghost(ui, true, icon::COPY, "Includi doc.").on_hover_text("Copia le righe da un altro documento").clicked() {
+                self.tools.copy = Some(Default::default());
+            }
+            if saved && self.doc.status != DocStatus::Cancelled {
+                let targets = self.doc.kind.transform_targets();
+                if self.doc.kind.has_order_state() && !self.fulfillment.0 {
+                    egui::menu::menu_custom_button(ui, egui::Button::new(theme::bold(format!("{}  Concludi ordine", icon::CHECK_CIRCLE))).frame(false).min_size(egui::vec2(0.0, 27.0)), |ui| {
+                        for t in targets {
+                            if ui.button(t.label()).clicked() {
+                                ui.close_menu();
+                                if let Some(d) = cx.msgs.check(cx.store.transform(&[self.doc.id], *t), "") {
+                                    cx.msgs.ok(format!("{} creato", t.label()));
+                                    cx.nav.push(Nav::OpenDocument(d.id));
+                                }
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Segna come concluso, senza altri documenti").clicked() {
+                            ui.close_menu();
+                            self.doc.order_status = OrderStatus::Concluded;
+                            self.dirty = true;
+                        }
+                    });
+                } else if !self.doc.kind.has_order_state() {
+                    for t in targets {
+                        let label = if *t == DocKind::SelfInvoice { "Autofattura / integrazione" } else { t.label() };
+                        if theme::ghost(ui, true, icon::ARROW_RIGHT, label).clicked() {
+                            if let Some(d) = cx.msgs.check(cx.store.transform(&[self.doc.id], *t), "") {
+                                cx.msgs.ok(format!("{} creato", t.label()));
+                                cx.nav.push(Nav::OpenDocument(d.id));
+                            }
+                        }
+                    }
+                }
+            }
+            if can_fe && !self.dirty && theme::primary(ui, icon::FILE_ARROW_UP, "Fattura elettr.").on_hover_text("Genera la fattura elettronica").clicked() {
+                self.generate_fe(cx);
+            }
+            egui::menu::menu_custom_button(ui, egui::Button::new(format!("{}  Altro", icon::DOTS_THREE)).frame(false).min_size(egui::vec2(0.0, 27.0)), |ui| {
+                if !purchase && self.doc.id != 0 && !self.dirty && self.doc.status != DocStatus::Cancelled && ui.button(format!("{}  Invia per email...", icon::ENVELOPE_SIMPLE)).clicked() {
+                    ui.close_menu();
+                    match crate::mailer::for_document(cx.store, &self.doc) {
+                        Ok(c) => cx.nav.push(Nav::Mail(vec![c])),
+                        Err(e) => cx.msgs.err(e),
+                    }
+                }
+                if ui.button(format!("{}  Salva PDF in una cartella...", icon::DOWNLOAD_SIMPLE)).clicked() {
+                    ui.close_menu();
+                    if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(format!("{} {}.pdf", self.doc.kind.label(), self.doc.number_label().replace('/', "-"))).save_file() {
+                        match services::document_pdf(cx.store, &self.doc).and_then(|pdf| std::fs::write(&p, pdf).map_err(|e| e.to_string())) {
+                            Ok(_) => cx.msgs.ok(format!("PDF salvato in {}", p.display())),
+                            Err(e) => cx.msgs.err(e),
+                        }
+                    }
+                }
+                if self.doc.kind.is_sale() && !self.doc.kind.is_internal() && self.doc.kind != DocKind::RetailSale && self.doc.status == DocStatus::Draft {
+                    let existing = cx.store.recurrences().unwrap_or_default().into_iter().find(|r| r.template_id == self.doc.id && self.doc.id != 0);
+                    let label = if existing.is_some() { "Modifica la ricorrenza..." } else { "Rendi ricorrente..." };
+                    if ui.button(format!("{}  {}", icon::REPEAT, label)).clicked() {
+                        ui.close_menu();
+                        self.tools.recurring = Some(existing.unwrap_or_else(|| openfatt_store::Recurrence { template_id: self.doc.id, description: self.doc.party.display_name(), next_date: openfatt_store::add_months(self.doc.date, 1), ..Default::default() }));
+                    }
+                }
+                if self.doc.kind.is_purchase() && self.doc.id != 0 && !self.dirty && ui.button(format!("{}  Carica gli articoli in anagrafica", icon::PACKAGE)).clicked() {
+                    ui.close_menu();
+                    if let Some(r) = cx.msgs.check(cx.store.import_products_from_purchase(self.doc.id, "", true), "") {
+                        cx.msgs.ok(format!("Articoli: {} nuovi, {} aggiornati, {} righe saltate", r.created, r.updated, r.skipped));
+                        if let Ok(d) = cx.store.document(self.doc.id) {
+                            self.doc = d;
+                        }
+                    }
+                }
+                if ui.button(format!("{}  Personalizza la stampa...", icon::PAINT_BRUSH)).clicked() {
+                    ui.close_menu();
+                    cx.nav.push(Nav::PrintSettings);
+                }
+                if self.doc.status == DocStatus::Issued && !locked && ui.button(format!("{}  Riporta in bozza", icon::ARROW_COUNTER_CLOCKWISE)).clicked() {
+                    ui.close_menu();
+                    if let Some(d) = cx.msgs.check(cx.store.revert_to_draft(self.doc.id), "Documento riportato in bozza") {
+                        self.doc = d;
+                    }
+                }
+                if self.doc.status != DocStatus::Draft && self.dirty && ui.button(format!("{}  Annulla le modifiche", icon::ARROW_COUNTER_CLOCKWISE)).clicked() {
+                    ui.close_menu();
+                    cx.nav.push(Nav::OpenDocument(self.doc.id));
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::ghost(ui, true, icon::X, "Chiudi").clicked() {
                     if self.dirty {
                         self.confirm_close = true;
                     } else {
                         cx.nav.push(Nav::CloseEditor);
                     }
                 }
-                // azione principale: una sola, quella che serve adesso
-                let can_save = !locked && self.doc.status != DocStatus::Cancelled;
                 if self.doc.status == DocStatus::Draft {
-                    if theme::primary_enabled(ui, can_save, icon::CHECK, "Salva ed emetti").clicked() && self.save(cx) {
-                        match cx.store.issue_document(self.doc.id) {
-                            Ok(d) => {
-                                cx.msgs.ok(format!("{} emesso con numero {}", d.kind.label(), d.number_label()));
-                                self.manual_number = d.number.map(|n| n.to_string()).unwrap_or_default();
-                                self.doc = d;
-                            }
-                            Err(e) => cx.msgs.err(e.to_string()),
-                        }
+                    let frozen = self.in_batch || self.doc.due_dates.iter().any(|d| !d.paid.is_zero() || !d.writeoff.is_zero());
+                    if theme::primary_enabled(ui, can_save || frozen, icon::CHECK, "Emetti").on_hover_text("Conferma il documento: muove il magazzino e permette la fattura elettronica").clicked() {
+                        self.issue(cx);
                     }
-                    if theme::button_enabled(ui, can_save, icon::FLOPPY_DISK, "Salva bozza").on_hover_text("Ctrl+S").clicked() && self.save(cx) {
+                    if theme::button_enabled(ui, can_save, icon::FLOPPY_DISK, "Salva").on_hover_text("Ctrl+S: registra numero, dati e scadenze").clicked() && self.save(cx) {
                         cx.msgs.ok("Documento salvato");
                     }
-                } else if self.dirty {
-                    if theme::primary_enabled(ui, can_save, icon::FLOPPY_DISK, "Salva").on_hover_text("Ctrl+S").clicked() && self.save(cx) {
-                        cx.msgs.ok("Documento salvato");
-                    }
-                } else if can_fe {
-                    if theme::primary(ui, icon::FILE_ARROW_UP, "Genera fattura elettronica").clicked() {
-                        self.generate_fe(cx);
-                    }
-                } else if theme::primary(ui, icon::FILE_PDF, "Anteprima PDF").clicked() {
-                    self.open_pdf(cx);
+                } else if self.dirty && theme::primary_enabled(ui, can_save, icon::FLOPPY_DISK, "Salva").on_hover_text("Ctrl+S").clicked() && self.save(cx) {
+                    cx.msgs.ok("Documento salvato");
                 }
-                if (self.doc.status == DocStatus::Draft || self.dirty || can_fe) && theme::button(ui, icon::FILE_PDF, "PDF").on_hover_text("Anteprima di stampa").clicked() {
-                    self.open_pdf(cx);
-                }
-                if !purchase && self.doc.id != 0 && !self.dirty && self.doc.status != DocStatus::Cancelled && theme::button(ui, icon::ENVELOPE_SIMPLE, "Email").on_hover_text("Invia il PDF al cliente per email").clicked() {
-                    match crate::mailer::for_document(cx.store, &self.doc) {
-                        Ok(c) => cx.nav.push(Nav::Mail(vec![c])),
-                        Err(e) => cx.msgs.err(e),
-                    }
-                }
-                egui::menu::menu_custom_button(ui, theme::button_widget(icon::DOTS_THREE, "Altro"), |ui| {
-                    if ui.button(format!("{}  Salva PDF in una cartella...", icon::DOWNLOAD_SIMPLE)).clicked() {
-                        ui.close_menu();
-                        if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(format!("{} {}.pdf", self.doc.kind.label(), self.doc.number_label().replace('/', "-"))).save_file() {
-                            match services::document_pdf(cx.store, &self.doc).and_then(|pdf| std::fs::write(&p, pdf).map_err(|e| e.to_string())) {
-                                Ok(_) => cx.msgs.ok(format!("PDF salvato in {}", p.display())),
-                                Err(e) => cx.msgs.err(e),
-                            }
-                        }
-                    }
-                    if self.doc.status != DocStatus::Draft && self.doc.id != 0 {
-                        for t in self.doc.kind.transform_targets() {
-                            if ui.button(format!("{}  Crea {}", icon::ARROW_RIGHT, t.label().to_lowercase())).clicked() {
-                                ui.close_menu();
-                                if let Some(d) = cx.msgs.check(cx.store.transform(&[self.doc.id], *t), "") {
-                                    cx.msgs.ok(format!("{} creato in bozza", t.label()));
-                                    cx.nav.push(Nav::OpenDocument(d.id));
-                                }
-                            }
-                        }
-                    }
-                    if self.doc.id != 0 {
-                        let n = cx.store.attachments("document", self.doc.id).map(|a| a.len()).unwrap_or(0);
-                        if ui.button(format!("{}  Allegati ({})...", icon::PAPERCLIP, n)).clicked() {
-                            ui.close_menu();
-                            self.tools.attachments = Some(super::linetools::Attachments::new("document", self.doc.id, self.doc.title()));
-                        }
-                    }
-                    if self.doc.kind.is_sale() && !self.doc.kind.is_internal() && self.doc.kind != DocKind::RetailSale && self.doc.status == DocStatus::Draft {
-                        let existing = cx.store.recurrences().unwrap_or_default().into_iter().find(|r| r.template_id == self.doc.id && self.doc.id != 0);
-                        let label = if existing.is_some() { "Modifica la ricorrenza..." } else { "Rendi ricorrente..." };
-                        if ui.button(format!("{}  {}", icon::REPEAT, label)).on_hover_text("Canoni, abbonamenti, affitti: il documento si ripete ogni mese, trimestre o anno").clicked() {
-                            ui.close_menu();
-                            self.tools.recurring = Some(existing.unwrap_or_else(|| openfatt_store::Recurrence { template_id: self.doc.id, description: self.doc.party.display_name(), next_date: openfatt_store::add_months(self.doc.date, 1), ..Default::default() }));
-                        }
-                    }
-                    if self.doc.kind.is_purchase() && self.doc.id != 0 && !self.dirty && ui.button(format!("{}  Carica gli articoli in anagrafica", icon::PACKAGE)).on_hover_text("Crea gli articoli nuovi e aggiorna il costo di quelli esistenti").clicked() {
-                        ui.close_menu();
-                        if let Some(r) = cx.msgs.check(cx.store.import_products_from_purchase(self.doc.id, "", true), "") {
-                            cx.msgs.ok(format!("Articoli: {} nuovi, {} aggiornati, {} righe saltate", r.created, r.updated, r.skipped));
-                            if let Ok(d) = cx.store.document(self.doc.id) {
-                                self.doc = d;
-                            }
-                        }
-                    }
-                    if ui.button(format!("{}  Personalizza la stampa...", icon::PAINT_BRUSH)).clicked() {
-                        ui.close_menu();
-                        cx.nav.push(Nav::PrintSettings);
-                    }
-                    if ui.button(format!("{}  Etichette degli articoli...", icon::BARCODE)).clicked() {
-                        ui.close_menu();
-                        cx.nav.push(Nav::Labels(crate::printing::document_items(cx.store, &self.doc)));
-                    }
-                    if crate::printing::is_shipping_doc(self.doc.kind) && self.doc.id != 0 && ui.button(format!("{}  Etichette di spedizione...", icon::PACKAGE)).clicked() {
-                        ui.close_menu();
-                        cx.nav.push(Nav::Labels(vec![crate::printing::shipping_item(cx.store, &self.doc)]));
-                    }
-                    if self.doc.status == DocStatus::Issued && !locked && ui.button(format!("{}  Riporta in bozza", icon::ARROW_COUNTER_CLOCKWISE)).clicked() {
-                        ui.close_menu();
-                        if let Some(d) = cx.msgs.check(cx.store.revert_to_draft(self.doc.id), "Documento riportato in bozza") {
-                            self.doc = d;
-                        }
-                    }
-                    if self.doc.status != DocStatus::Draft && self.dirty && ui.button(format!("{}  Annulla le modifiche", icon::ARROW_COUNTER_CLOCKWISE)).clicked() {
-                        ui.close_menu();
-                        cx.nav.push(Nav::OpenDocument(self.doc.id));
-                    }
-                });
             });
         });
-        ui.add_space(12.0);
     }
 
     fn open_pdf(&self, cx: &mut Ctx) {
@@ -494,17 +615,139 @@ impl Editor {
         ui.add_space(12.0);
     }
 
-    fn header(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+    /// Testata: soggetto a sinistra, agente, data e numero a destra.
+    fn header_top(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
         let role = if self.doc.kind.is_purchase() || self.doc.kind == DocKind::SelfInvoice { Some(PartyRole::Supplier) } else { Some(PartyRole::Customer) };
         let warehouses = cx.store.warehouses().unwrap_or_default();
         let transfer = self.doc.kind == DocKind::StockTransfer;
         let production = self.doc.kind == DocKind::Production;
+        let draft = self.doc.status == DocStatus::Draft;
         let mut changed = false;
-        egui::Grid::new("doc_head").num_columns(6).spacing([10.0, 6.0]).show(ui, |ui| {
-            ui.label("Tipo");
-            let draft = self.doc.status == DocStatus::Draft;
+        fn cap(ui: &mut egui::Ui, t: &str) {
+            ui.label(theme::bold(t).size(12.0));
+        }
+        let total = ui.available_width();
+        let right_w = 640.0;
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width((total - right_w).max(280.0));
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if transfer {
+                    ui.horizontal(|ui| {
+                        cap(ui, "Da magazzino");
+                        changed |= widgets::warehouse_combo(ui, "doc_wh_from", &mut self.doc.warehouse, &warehouses, true, 200.0);
+                        cap(ui, "A magazzino");
+                        changed |= widgets::warehouse_combo(ui, "doc_wh_to", &mut self.doc.to_warehouse, &warehouses, false, 200.0);
+                    });
+                } else if production {
+                    ui.horizontal(|ui| {
+                        cap(ui, "Magazzino");
+                        changed |= widgets::warehouse_combo(ui, "doc_wh_prod", &mut self.doc.warehouse, &warehouses, true, 200.0);
+                    });
+                } else {
+                    cap(ui, if role == Some(PartyRole::Supplier) { "Fornitore" } else { "Cliente" });
+                    let current = self.doc.party.display_name();
+                    if let Some(p) = widgets::party_picker(ui, cx.store, "doc_party", &current, role, (total - right_w - 20.0).clamp(260.0, 640.0)) {
+                        self.set_party(cx.store, cx.msgs, p);
+                    }
+                    let p = &self.doc.party;
+                    if !p.display_name().is_empty() {
+                        let mut t = format!("{} · {}", p.full_address(), p.city_line());
+                        if !p.vat_number.is_empty() {
+                            t.push_str(&format!(" · P.IVA {}", p.vat_number));
+                        } else if !p.tax_code.is_empty() {
+                            t.push_str(&format!(" · CF {}", p.tax_code));
+                        }
+                        ui.label(RichText::new(widgets::truncate(&t, 110)).size(11.5).color(GRAY));
+                    }
+                }
+            });
+            ui.spacing_mut().item_spacing.x = 8.0;
+            fn stack<R>(ui: &mut egui::Ui, w: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+                ui.allocate_ui_with_layout(egui::vec2(w, 46.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    add(ui)
+                })
+                .inner
+            }
+            if self.doc.kind.is_purchase() {
+                stack(ui, 116.0, |ui| {
+                    cap(ui, "N. doc. fornitore");
+                    changed |= ui.add(egui::TextEdit::singleline(&mut self.doc.external_number).desired_width(110.0)).changed();
+                });
+            }
+            if self.doc.kind.is_sale() && !transfer && !production && self.doc.kind != DocKind::RetailSale {
+                let lists = cx.store.price_lists().unwrap_or_default();
+                let base = cx.store.base_list_name();
+                let shown = match self.doc.price_list_id {
+                    Some(0) => base.clone(),
+                    Some(id) => lists.iter().find(|l| l.id == id).map(|l| l.name.clone()).unwrap_or_else(|| base.clone()),
+                    None => self.doc.party.price_list_id.and_then(|id| lists.iter().find(|l| l.id == id)).map(|l| l.name.clone()).unwrap_or_else(|| base.clone()),
+                };
+                let before = self.doc.price_list_id;
+                stack(ui, 156.0, |ui| {
+                    cap(ui, "Listino");
+                    ui.add_enabled_ui(draft, |ui| {
+                        egui::ComboBox::from_id_salt("doc_list").width(150.0).selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.doc.price_list_id, Some(0), &base);
+                            for l in lists.iter().filter(|l| l.active) {
+                                ui.selectable_value(&mut self.doc.price_list_id, Some(l.id), &l.name);
+                            }
+                        });
+                    });
+                });
+                if before != self.doc.price_list_id {
+                    changed = true;
+                    let n = self.reprice_all(cx.store);
+                    if n > 0 {
+                        cx.msgs.ok(format!("Prezzi di {} righe aggiornati dal listino", n));
+                    }
+                }
+            }
+            if self.doc.kind.is_sale() && !transfer && !production {
+                stack(ui, 156.0, |ui| {
+                    cap(ui, "Agente");
+                    let agents = cx.store.agents(false).unwrap_or_default();
+                    let name = self.doc.agent_id.and_then(|id| agents.iter().find(|a| a.id == id)).map(|a| a.name.clone()).unwrap_or_else(|| "nessuno".into());
+                    egui::ComboBox::from_id_salt("doc_agent").width(150.0).selected_text(name).show_ui(ui, |ui| {
+                        changed |= ui.selectable_value(&mut self.doc.agent_id, None, "nessuno").changed();
+                        for a in &agents {
+                            changed |= ui.selectable_value(&mut self.doc.agent_id, Some(a.id), format!("{} ({}%)", a.name, fmt_it_trim(a.rate, 0, 2))).changed();
+                        }
+                    });
+                });
+            }
+            stack(ui, 124.0, |ui| {
+                cap(ui, "Data");
+                ui.horizontal(|ui| {
+                    changed |= widgets::date_field(ui, "doc_date", &mut self.doc.date);
+                });
+            });
+            stack(ui, 66.0, |ui| {
+                cap(ui, "Numero");
+                ui.add_enabled_ui(draft, |ui| {
+                    changed |= ui.add(egui::TextEdit::singleline(&mut self.manual_number).hint_text("auto").desired_width(60.0)).changed();
+                });
+            });
+            stack(ui, 60.0, |ui| {
+                cap(ui, "Numeraz.");
+                changed |= ui.add(egui::TextEdit::singleline(&mut self.doc.series).desired_width(50.0)).changed();
+            });
+        });
+        if changed {
+            self.dirty = true;
+        }
+    }
+
+    /// Scheda Opzioni: tipo, prezzi, sconto, valuta, magazzino, provvigione, dichiarazione d'intento.
+    fn tab_options(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+        let warehouses = cx.store.warehouses().unwrap_or_default();
+        let draft = self.doc.status == DocStatus::Draft;
+        let mut changed = false;
+        egui::Grid::new("doc_opts").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Tipo documento");
             ui.add_enabled_ui(draft, |ui| {
-                egui::ComboBox::from_id_salt("doc_kind").width(200.0).selected_text(self.doc.kind.label()).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("doc_kind").width(240.0).selected_text(self.doc.kind.label()).show_ui(ui, |ui| {
                     for k in DocKind::ALL {
                         let special = |x: DocKind| matches!(x, DocKind::RetailSale | DocKind::StockTransfer | DocKind::Production);
                         if special(k) || special(self.doc.kind) {
@@ -519,211 +762,89 @@ impl Editor {
                     }
                 });
             });
-            ui.label("Data");
-            if widgets::date_field(ui, "doc_date", &mut self.doc.date) {
-                changed = true;
-            }
-            ui.label("Numero / serie");
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(draft, |ui| {
-                    if ui.add(egui::TextEdit::singleline(&mut self.manual_number).hint_text("automatico").desired_width(70.0)).changed() {
-                        changed = true;
-                    }
-                });
-                ui.label("/");
-                if ui.add(egui::TextEdit::singleline(&mut self.doc.series).desired_width(40.0).hint_text("serie")).changed() {
-                    changed = true;
-                }
-            });
             ui.end_row();
-
-            if transfer {
-                ui.label("Da magazzino");
-                changed |= widgets::warehouse_combo(ui, "doc_wh_from", &mut self.doc.warehouse, &warehouses, true, 220.0);
-                ui.label("A magazzino");
-                changed |= widgets::warehouse_combo(ui, "doc_wh_to", &mut self.doc.to_warehouse, &warehouses, false, 220.0);
-                ui.label("");
-                ui.label("");
-                ui.end_row();
-                return;
-            }
-            if production {
-                ui.label("Magazzino");
-                changed |= widgets::warehouse_combo(ui, "doc_wh_prod", &mut self.doc.warehouse, &warehouses, true, 220.0);
-                ui.label("");
-                ui.label(RichText::new("Carica i prodotti finiti e scarica i componenti della distinta base").small().color(GRAY));
-                ui.label("");
-                ui.label("");
-                ui.end_row();
-                return;
-            }
-            ui.label(if role == Some(PartyRole::Supplier) { "Fornitore" } else { "Cliente" });
-            let current = self.doc.party.display_name();
-            if let Some(p) = widgets::party_picker(ui, cx.store, "doc_party", &current, role, 340.0) {
-                self.set_party(cx.store, cx.msgs, p);
-            }
-            ui.label("Pagamento");
-            if widgets::payment_combo(ui, "doc_pay", &mut self.doc.payment_id, &self.payments, 220.0) {
-                changed = true;
-            }
-            if self.doc.kind.is_purchase() {
-                ui.label("N. doc. fornitore");
-                if ui.add(egui::TextEdit::singleline(&mut self.doc.external_number).desired_width(120.0)).changed() {
-                    changed = true;
-                }
-            } else {
-                ui.label("");
-                ui.label("");
-            }
-            ui.end_row();
-
-            ui.label("");
-            let p = &self.doc.party;
-            if p.display_name().is_empty() {
-                ui.label(RichText::new("nessun soggetto selezionato").color(GRAY));
-            } else {
-                let mut s = format!("{} · {}", p.full_address(), p.city_line());
-                if !p.vat_number.is_empty() {
-                    s.push_str(&format!(" · P.IVA {}", p.vat_number));
-                } else if !p.tax_code.is_empty() {
-                    s.push_str(&format!(" · CF {}", p.tax_code));
-                }
-                if self.doc.kind.is_fiscal() {
-                    if !p.sdi_code.is_empty() {
-                        s.push_str(&format!(" · SdI {}", p.sdi_code));
-                    } else if !p.pec.is_empty() {
-                        s.push_str(&format!(" · PEC {}", p.pec));
-                    } else if p.country == "IT" {
-                        s.push_str(" · SdI 0000000 (cassetto fiscale)");
-                    }
-                }
-                ui.label(RichText::new(widgets::truncate(&s, 90)).small().color(GRAY));
-            }
             ui.label("Prezzi");
-            if ui.checkbox(&mut self.doc.prices_include_vat, "IVA inclusa").changed() {
-                changed = true;
-            }
-            ui.label("Sconto documento %");
-            if ui.add(egui::TextEdit::singleline(&mut self.doc.discount).desired_width(70.0).hint_text("es. 5 o 3+2")).changed() {
-                changed = true;
+            let mut inc = self.doc.prices_include_vat;
+            if ui.checkbox(&mut inc, "IVA inclusa").changed() {
+                self.set_price_mode(inc);
             }
             ui.end_row();
-
+            ui.label("Sconto documento %");
+            changed |= ui.add(egui::TextEdit::singleline(&mut self.doc.discount).desired_width(90.0).hint_text("es. 5 o 3+2")).changed();
+            ui.end_row();
             if self.doc.kind.stock_effect() != 0 && warehouses.len() > 1 {
                 ui.label("Magazzino");
                 changed |= widgets::warehouse_combo(ui, "doc_wh", &mut self.doc.warehouse, &warehouses, true, 220.0);
-                ui.label("");
-                ui.label("");
-                ui.label("");
-                ui.label("");
                 ui.end_row();
             }
-            if self.doc.kind.is_sale() || self.doc.kind.is_purchase() {
-                ui.label("Valuta");
-                ui.horizontal(|ui| {
-                    let cur = self.doc.currency_code().to_string();
-                    egui::ComboBox::from_id_salt("doc_cur").width(70.0).selected_text(cur.clone()).show_ui(ui, |ui| {
-                        for c in ["EUR", "USD", "GBP", "CHF", "JPY", "CNY", "CAD", "AUD", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "RON", "TRY", "AED", "INR", "BRL"] {
-                            if ui.selectable_label(cur == c, c).clicked() {
-                                self.doc.currency = if c == "EUR" { String::new() } else { c.to_string() };
-                                if c == "EUR" {
-                                    self.doc.exchange_rate = Decimal::ONE;
-                                }
-                                changed = true;
+            ui.label("Valuta");
+            ui.horizontal(|ui| {
+                let cur = self.doc.currency_code().to_string();
+                egui::ComboBox::from_id_salt("doc_cur").width(70.0).selected_text(cur.clone()).show_ui(ui, |ui| {
+                    for c in ["EUR", "USD", "GBP", "CHF", "JPY", "CNY", "CAD", "AUD", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "RON", "TRY", "AED", "INR", "BRL"] {
+                        if ui.selectable_label(cur == c, c).clicked() {
+                            self.doc.currency = if c == "EUR" { String::new() } else { c.to_string() };
+                            if c == "EUR" {
+                                self.doc.exchange_rate = Decimal::ONE;
                             }
-                        }
-                    });
-                    if self.doc.is_foreign_currency() {
-                        ui.label("1 EUR =");
-                        if widgets::dec_field(ui, "doc_rate", &mut self.doc.exchange_rate, 70.0, 6) {
                             changed = true;
                         }
                     }
                 });
-                if self.doc.kind.is_sale() {
-                    ui.label("Agente");
-                    let agents = cx.store.agents(false).unwrap_or_default();
-                    let name = self.doc.agent_id.and_then(|id| agents.iter().find(|a| a.id == id)).map(|a| a.name.clone()).unwrap_or_else(|| "nessuno".into());
-                    ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt("doc_agent").width(150.0).selected_text(name).show_ui(ui, |ui| {
-                            if ui.selectable_value(&mut self.doc.agent_id, None, "nessuno").changed() {
-                                changed = true;
-                            }
-                            for a in &agents {
-                                if ui.selectable_value(&mut self.doc.agent_id, Some(a.id), format!("{} ({}%)", a.name, fmt_it_trim(a.rate, 0, 2))).changed() {
-                                    changed = true;
-                                }
-                            }
-                        });
-                        if self.doc.agent_id.is_some() {
-                            let mut has = self.doc.commission_rate.is_some();
-                            if ui.checkbox(&mut has, "provv. %").on_hover_text("Provvigione specifica del documento").changed() {
-                                self.doc.commission_rate = if has { Some(Decimal::ZERO) } else { None };
-                                changed = true;
-                            }
-                            if let Some(r) = &mut self.doc.commission_rate {
-                                changed |= widgets::dec_field(ui, "doc_comm", r, 50.0, 2);
-                            }
-                        }
-                    });
-                } else {
-                    ui.label("");
-                    ui.label("");
+                if self.doc.is_foreign_currency() {
+                    ui.label("1 EUR =");
+                    changed |= widgets::dec_field(ui, "doc_rate", &mut self.doc.exchange_rate, 70.0, 6);
                 }
-                if self.doc.kind.is_fiscal() && !self.doc.party.intents.is_empty() {
-                    ui.label("Dich. d'intento");
-                    let txt = if self.doc.intent_protocol.is_empty() { "nessuna".to_string() } else { self.doc.intent_protocol.clone() };
-                    ui.vertical(|ui| {
-                        egui::ComboBox::from_id_salt("doc_intent").width(220.0).selected_text(txt).show_ui(ui, |ui| {
-                            if ui.selectable_label(self.doc.intent_protocol.is_empty(), "nessuna").clicked() {
-                                self.doc.intent_protocol.clear();
-                                changed = true;
-                            }
-                            for i in &self.doc.party.intents {
-                                if ui.selectable_label(self.doc.intent_protocol == i.protocol, format!("{} ({})", i.protocol, i.year)).clicked() {
-                                    self.doc.intent_protocol = i.protocol.clone();
-                                    changed = true;
-                                }
-                            }
-                        });
-                        if !self.doc.intent_protocol.is_empty() {
-                            if let Some(pid) = self.doc.party_id {
-                                let gen = cx.store.generation();
-                                let fresh = matches!(&self.intent_cache, Some((g, p, _)) if *g == gen && *p == self.doc.intent_protocol);
-                                if !fresh {
-                                    self.intent_cache = Some((gen, self.doc.intent_protocol.clone(), cx.store.intent_usage(pid, &self.doc.intent_protocol, Some(self.doc.id)).ok()));
-                                }
-                                if let Some(u) = self.intent_cache.as_ref().and_then(|c| c.2.clone()) {
-                                    let this = openfatt_store::intent_amount(&self.doc);
-                                    if let Some(res) = u.residual() {
-                                        let left = res - this;
-                                        let t = format!("plafond residuo € {} (questo documento € {})", eur(left), eur(this));
-                                        ui.label(RichText::new(t).small().color(if left < Decimal::ZERO { RED } else { GRAY }));
-                                    }
-                                }
-                            }
-                        }
-                    });
-                } else {
-                    ui.label("");
-                    ui.label("");
-                }
+            });
+            ui.end_row();
+            if self.doc.kind.is_sale() && self.doc.agent_id.is_some() {
+                ui.label("Provvigione %");
+                ui.horizontal(|ui| {
+                    let mut has = self.doc.commission_rate.is_some();
+                    if ui.checkbox(&mut has, "specifica del documento").changed() {
+                        self.doc.commission_rate = if has { Some(Decimal::ZERO) } else { None };
+                        changed = true;
+                    }
+                    if let Some(r) = &mut self.doc.commission_rate {
+                        changed |= widgets::dec_field(ui, "doc_comm", r, 60.0, 2);
+                    }
+                });
                 ui.end_row();
             }
-            if self.doc.kind.is_fiscal() || self.doc.kind.is_purchase() {
-                ui.label("Tipo FatturaPA");
-                let default = self.doc.kind.default_fe_type().unwrap_or("");
-                let mut fe = if self.doc.fe_type.is_empty() { default.to_string() } else { self.doc.fe_type.clone() };
-                if widgets::code_combo(ui, "fe_type", &mut fe, codes::TIPO_DOCUMENTO, 320.0, false) {
-                    self.doc.fe_type = if fe == default { String::new() } else { fe };
-                    changed = true;
-                }
-                ui.label("Esigibilità IVA");
-                if widgets::code_combo(ui, "esig", &mut self.doc.vat_liability, codes::ESIGIBILITA_IVA, 200.0, false) {
-                    changed = true;
-                }
-                ui.label("");
-                ui.label("");
+            if self.doc.kind.is_fiscal() && !self.doc.party.intents.is_empty() {
+                ui.label("Dich. d'intento");
+                let txt = if self.doc.intent_protocol.is_empty() { "nessuna".to_string() } else { self.doc.intent_protocol.clone() };
+                ui.vertical(|ui| {
+                    egui::ComboBox::from_id_salt("doc_intent").width(260.0).selected_text(txt).show_ui(ui, |ui| {
+                        if ui.selectable_label(self.doc.intent_protocol.is_empty(), "nessuna").clicked() {
+                            self.doc.intent_protocol.clear();
+                            changed = true;
+                        }
+                        for i in &self.doc.party.intents {
+                            if ui.selectable_label(self.doc.intent_protocol == i.protocol, format!("{} ({})", i.protocol, i.year)).clicked() {
+                                self.doc.intent_protocol = i.protocol.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+                    if !self.doc.intent_protocol.is_empty() {
+                        if let Some(pid) = self.doc.party_id {
+                            let gen = cx.store.generation();
+                            let fresh = matches!(&self.intent_cache, Some((g, p, _)) if *g == gen && *p == self.doc.intent_protocol);
+                            if !fresh {
+                                self.intent_cache = Some((gen, self.doc.intent_protocol.clone(), cx.store.intent_usage(pid, &self.doc.intent_protocol, Some(self.doc.id)).ok()));
+                            }
+                            if let Some(u) = self.intent_cache.as_ref().and_then(|c| c.2.clone()) {
+                                let this = openfatt_store::intent_amount(&self.doc);
+                                if let Some(res) = u.residual() {
+                                    let left = res - this;
+                                    let t = format!("plafond residuo € {} (questo documento € {})", eur(left), eur(this));
+                                    ui.label(RichText::new(t).small().color(if left < Decimal::ZERO { RED } else { GRAY }));
+                                }
+                            }
+                        }
+                    }
+                });
                 ui.end_row();
             }
         });
@@ -732,7 +853,122 @@ impl Editor {
         }
     }
 
-    fn lines(&mut self, ui: &mut egui::Ui, cx: &mut Ctx, totals: &Option<calc::Totals>) {
+    /// Scheda Proprietà fattura elettronica.
+    fn tab_fe(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+        self.sdi_track(ui, cx);
+        let mut changed = false;
+        egui::Grid::new("doc_fe").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Tipo documento elettr.");
+            let default = self.doc.kind.default_fe_type().unwrap_or("");
+            let mut fe = if self.doc.fe_type.is_empty() { default.to_string() } else { self.doc.fe_type.clone() };
+            if widgets::code_combo(ui, "fe_type", &mut fe, codes::TIPO_DOCUMENTO, 420.0, false) {
+                self.doc.fe_type = if fe == default { String::new() } else { fe };
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("Esigibilità IVA");
+            if widgets::code_combo(ui, "esig", &mut self.doc.vat_liability, codes::ESIGIBILITA_IVA, 240.0, false) {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("Causale");
+            changed |= ui.add(egui::TextEdit::multiline(&mut self.doc.causale).desired_rows(2).desired_width(620.0)).changed();
+            ui.end_row();
+        });
+        if changed {
+            self.dirty = true;
+        }
+        ui.add_space(6.0);
+        self.refs_section(ui);
+    }
+
+    /// Stato dell'ordine e commento interno, sopra ai pulsanti.
+    fn bottom_fields(&mut self, ui: &mut egui::Ui, totals: &Result<calc::Totals, calc::CalcError>) {
+        let mut changed = false;
+        let width = ui.available_width();
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width((width - 490.0).max(300.0));
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.horizontal(|ui| {
+                    if self.doc.kind.has_order_state() {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new("Stato").size(11.5));
+                            let eff = self.doc.order_status.effective(self.fulfillment.1 || self.fulfillment.0, self.fulfillment.0);
+                            egui::ComboBox::from_id_salt("order_status").width(120.0).selected_text(eff.label()).show_ui(ui, |ui| {
+                                for s in OrderStatus::ALL {
+                                    changed |= ui.selectable_value(&mut self.doc.order_status, s, s.label()).changed();
+                                }
+                            });
+                        });
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new("Data prevista concl.").size(11.5));
+                            ui.horizontal(|ui| {
+                                let before = self.doc.expected_date;
+                                widgets::opt_date_field(ui, "order_expected", &mut self.doc.expected_date);
+                                changed |= before != self.doc.expected_date;
+                            });
+                        });
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(RichText::new("Commento ad uso interno").size(11.5));
+                        changed |= ui.add(egui::TextEdit::singleline(&mut self.doc.internal_notes).desired_width(f32::INFINITY)).changed();
+                    });
+                });
+            });
+            let show_margin = self.doc.kind.is_sale() && !self.cols.hide_margin;
+            let margin = totals.as_ref().ok().map(|t| self.margin_totals(t));
+            ui.allocate_ui_with_layout(egui::vec2(180.0, 74.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(180.0);
+                ui.spacing_mut().item_spacing.y = 1.0;
+                if let Some((rev, cost, missing)) = margin.filter(|_| show_margin) {
+                    let m = rev - cost;
+                    let pct = if rev.is_zero() { Decimal::ZERO } else { (m / rev * Decimal::ONE_HUNDRED).round_dp(1) };
+                    let color = if m < Decimal::ZERO { RED } else { theme::INK };
+                    if !cost.is_zero() || !rev.is_zero() {
+                        ui.label(RichText::new(format!("Acquisto € {}", eur(cost))).size(12.0));
+                        ui.label(RichText::new(format!("Margine € {}  ({}%)", eur(m), fmt_it_trim(pct, 0, 1))).size(12.5).strong().color(color));
+                    }
+                    if missing > 0 {
+                        ui.label(RichText::new(format!("{} righe senza prezzo acquisto", missing)).size(11.0).color(ORANGE));
+                    }
+                }
+            });
+            ui.allocate_ui_with_layout(egui::vec2(290.0, 74.0), egui::Layout::top_down(egui::Align::Max), |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                fn row(ui: &mut egui::Ui, l: RichText, v: RichText) {
+                    ui.allocate_ui_with_layout(egui::vec2(280.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_width(280.0);
+                        ui.label(l);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(v));
+                    });
+                }
+                match totals {
+                    Err(e) => {
+                        ui.label(RichText::new(e.to_string()).color(RED));
+                    }
+                    Ok(t) => {
+                        let vat: Decimal = t.vat_rows.iter().map(|r| r.tax).sum();
+                        row(ui, RichText::new("Tot. netto").size(12.0), RichText::new(format!("€ {}", eur(t.taxable))));
+                        row(ui, RichText::new("Iva").size(12.0), RichText::new(format!("€ {}", eur(vat))));
+                        let cur = if self.doc.is_foreign_currency() { self.doc.currency_code().to_string() } else { "€".to_string() };
+                        row(ui, theme::bold("Totale documento").size(13.0), theme::bold(format!("{} {}", cur, eur(t.total))).size(14.0));
+                        if t.net_to_pay != t.total {
+                            row(ui, RichText::new("Netto a pagare").size(12.0), RichText::new(format!("€ {}", eur(t.net_to_pay))));
+                        }
+                    }
+                }
+            });
+        });
+        if changed {
+            self.dirty = true;
+        }
+    }
+
+    fn lines(&mut self, ui: &mut egui::Ui, cx: &mut Ctx, totals: &Option<calc::Totals>, height: f32) {
         let mut remove: Option<usize> = None;
         let mut swap: Option<(usize, usize)> = None;
         let mut changed = false;
@@ -743,60 +979,126 @@ impl Editor {
         // documenti senza effetto sul magazzino: si mostra la scelta come per un'uscita
         let effect = if self.doc.kind.stock_effect() == 0 { -1 } else { self.doc.kind.stock_effect() };
         let out_wh = cx.store.resolve_warehouse(&self.doc.warehouse).ok();
-        egui::ScrollArea::both().id_salt("lines_scroll").max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
-            egui::Grid::new("lines").striped(true).num_columns(13).spacing([6.0, 4.0]).show(ui, |ui| {
-                for h in ["#", "Codice", "Descrizione", "Variante / lotto / serie", "Q.tà", "U.M.", "Prezzo", "Sconti %", "IVA", "Rit.", "Cassa", "Importo", ""] {
-                    ui.label(RichText::new(h).strong());
+        // colonne facoltative: compaiono solo se servono
+        let show_track = products.iter().flatten().any(|p| p.tracking != Tracking::None || !p.variants.is_empty());
+        let show_wh = !self.doc.withholdings.is_empty();
+        let show_pf = self.doc.pension_fund.is_some();
+        let sale = self.doc.kind.is_sale() && !self.doc.kind.is_internal();
+        let show_cost = sale && !self.cols.hide_cost;
+        let show_net = !self.doc.kind.is_internal() && !self.cols.hide_net;
+        let show_margin = sale && !self.cols.hide_margin;
+        let blanks = 5 + show_track as usize + show_wh as usize + show_pf as usize + show_cost as usize + show_net as usize;
+        let desc_w = (ui.available_width() - 700.0 - if show_track { 170.0 } else { 0.0 } - if show_wh { 36.0 } else { 0.0 } - if show_pf { 36.0 } else { 0.0 } - if show_cost { 92.0 } else { 0.0 } - if show_net { 82.0 } else { 0.0 } - if show_margin { 116.0 } else { 0.0 }).max(180.0);
+        let mut price_mode: Option<bool> = None;
+        let include_vat = self.doc.prices_include_vat;
+        egui::ScrollArea::both().id_salt("lines_scroll").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+            egui::Grid::new("lines").striped(true).num_columns(13).spacing([6.0, 3.0]).show(ui, |ui| {
+                let mut heads = vec!["Cod.", "Descrizione"];
+                if show_track {
+                    heads.push("Variante / lotto / serie");
+                }
+                heads.extend(["Q.tà", "U.M."]);
+                if show_cost {
+                    heads.push("Prezzo acq.");
+                }
+                heads.extend(["#prezzo", "Sconti %"]);
+                if show_net {
+                    heads.push("Netto sc.");
+                }
+                heads.push("IVA");
+                if show_wh {
+                    heads.push("Rit.");
+                }
+                if show_pf {
+                    heads.push("Cassa");
+                }
+                heads.push("Importo");
+                if show_margin {
+                    heads.push("Margine");
+                }
+                heads.push("");
+                for h in heads {
+                    if h == "#prezzo" {
+                        // come nell'intestazione "Prezzo netto": si sceglie netto o ivato
+                        ui.scope(|ui| {
+                            ui.visuals_mut().button_frame = false;
+                            ui.menu_button(RichText::new(format!("{} {}", if include_vat { "Prezzo ivato" } else { "Prezzo netto" }, icon::CARET_DOWN)).strong().color(ui.visuals().hyperlink_color), |ui| {
+                                if ui.selectable_label(!include_vat, "Prezzo netto (IVA esclusa)").clicked() {
+                                    price_mode = Some(false);
+                                    ui.close_menu();
+                                }
+                                if ui.selectable_label(include_vat, "Prezzo ivato (IVA inclusa)").clicked() {
+                                    price_mode = Some(true);
+                                    ui.close_menu();
+                                }
+                            });
+                        });
+                    } else {
+                        ui.label(RichText::new(h).strong());
+                    }
                 }
                 ui.end_row();
                 for i in 0..n {
                     let total = totals.as_ref().and_then(|t| t.lines.iter().find(|l| l.index == Some(i))).map(|l| l.total);
                     let l = &mut self.doc.lines[i];
-                    ui.label(RichText::new((i + 1).to_string()).color(GRAY));
                     if l.kind == LineKind::Text || l.kind == LineKind::Subtotal {
                         let sub = l.kind == LineKind::Subtotal;
                         ui.label(RichText::new(if sub { "subtotale" } else { "testo" }).small().color(GRAY));
-                        if ui.add_sized([420.0, 20.0], egui::TextEdit::singleline(&mut l.description).hint_text(if sub { "Subtotale" } else { "" })).changed() {
+                        if ui.add_sized([desc_w, 20.0], egui::TextEdit::singleline(&mut l.description).hint_text(if sub { "Subtotale" } else { "" })).changed() {
                             changed = true;
                         }
-                        for _ in 0..8 {
+                        for _ in 0..blanks {
                             ui.label("");
                         }
                         let st = totals.as_ref().and_then(|t| t.lines.iter().find(|x| x.index == Some(i))).and_then(|x| x.subtotal);
                         ui.label(theme::medium(st.map(eur).unwrap_or_default()));
+                        if show_margin {
+                            ui.label("");
+                        }
                     } else if let Some(pct) = l.calc_percent {
                         ui.label(RichText::new("calcolata").small().color(GRAY));
-                        if ui.add_sized([320.0, 20.0], egui::TextEdit::singleline(&mut l.description)).changed() {
+                        if ui.add_sized([desc_w, 20.0], egui::TextEdit::singleline(&mut l.description)).changed() {
                             changed = true;
                         }
-                        ui.label(RichText::new(format!("{}% delle righe sopra", fmt_it_trim(pct, 0, 4))).small().color(GRAY));
+                        if show_track {
+                            ui.label(RichText::new(format!("{}% delle righe sopra", fmt_it_trim(pct, 0, 4))).small().color(GRAY));
+                        }
                         let mut p = pct;
                         if widgets::dec_field(ui, ("pc", i), &mut p, 70.0, 4) {
                             l.calc_percent = Some(p);
                             changed = true;
                         }
                         ui.label("%");
+                        if show_cost {
+                            ui.label("");
+                        }
                         ui.label("");
                         ui.label("");
+                        if show_net {
+                            ui.label("");
+                        }
                         if widgets::vat_combo(ui, ("v", i), &mut l.vat, &vats, 70.0) {
                             changed = true;
                         }
-                        if ui.checkbox(&mut l.withholding, "").changed() {
+                        if show_wh && ui.checkbox(&mut l.withholding, "").changed() {
                             changed = true;
                         }
-                        if ui.checkbox(&mut l.pension_fund, "").changed() {
+                        if show_pf && ui.checkbox(&mut l.pension_fund, "").changed() {
                             changed = true;
                         }
                         ui.label(total.map(eur).unwrap_or_else(|| "-".into()));
+                        if show_margin {
+                            ui.label("");
+                        }
                     } else {
                         if ui.add_sized([90.0, 20.0], egui::TextEdit::singleline(&mut l.code)).changed() {
                             changed = true;
                         }
-                        if ui.add_sized([320.0, 20.0], egui::TextEdit::singleline(&mut l.description)).changed() {
+                        if ui.add_sized([desc_w, 20.0], egui::TextEdit::singleline(&mut l.description)).changed() {
                             changed = true;
                         }
                         let incoming = effect * if l.qty.is_sign_negative() { -1 } else { 1 } > 0;
-                        if super::tracking::cell(ui, cx.store, products[i].as_ref(), l, i, incoming, out_wh.as_deref()) {
+                        if show_track && super::tracking::cell(ui, cx.store, products[i].as_ref(), l, i, incoming, out_wh.as_deref()) {
                             changed = true;
                         }
                         if widgets::dec_field(ui, ("q", i), &mut l.qty, 70.0, 4) {
@@ -809,6 +1111,9 @@ impl Editor {
                         if ui.add(egui::TextEdit::singleline(&mut l.unit).desired_width(36.0)).changed() {
                             changed = true;
                         }
+                        if show_cost && widgets::dec_field(ui, ("c", i), &mut l.unit_cost, 80.0, 4) {
+                            changed = true;
+                        }
                         if widgets::dec_field(ui, ("p", i), &mut l.unit_price, 90.0, 6) {
                             changed = true;
                             if l.product_id.is_some() {
@@ -819,18 +1124,34 @@ impl Editor {
                         if ui.add(egui::TextEdit::singleline(&mut l.discounts).desired_width(70.0).text_color(if disc_ok { ui.visuals().text_color() } else { RED })).changed() {
                             changed = true;
                         }
+                        if show_net {
+                            let net = totals.as_ref().and_then(|t| t.lines.iter().find(|x| x.index == Some(i))).map(|x| x.unit_discounted);
+                            ui.label(net.map(|n| fmt_it_trim(n.round_dp(4), 2, 4)).unwrap_or_else(|| "-".into()));
+                        }
                         if widgets::vat_combo(ui, ("v", i), &mut l.vat, &vats, 70.0) {
                             changed = true;
                         }
-                        if ui.checkbox(&mut l.withholding, "").changed() {
+                        if show_wh && ui.checkbox(&mut l.withholding, "").changed() {
                             changed = true;
                         }
-                        if ui.checkbox(&mut l.pension_fund, "").changed() {
+                        if show_pf && ui.checkbox(&mut l.pension_fund, "").changed() {
                             changed = true;
                         }
                         let r = ui.label(total.map(eur).unwrap_or_else(|| "-".into()));
                         if !l.price_note.is_empty() {
                             r.on_hover_text(format!("Prezzo: {}", l.price_note));
+                        }
+                        if show_margin {
+                            match total.filter(|_| !l.unit_cost.is_zero()) {
+                                Some(t) => {
+                                    let m = t - l.unit_cost * l.qty;
+                                    let pct = if t.is_zero() { Decimal::ZERO } else { (m / t * Decimal::ONE_HUNDRED).round_dp(1) };
+                                    ui.label(RichText::new(format!("{} ({}%)", eur(m), fmt_it_trim(pct, 0, 1))).color(if m < Decimal::ZERO { RED } else { ui.visuals().text_color() }));
+                                }
+                                None => {
+                                    ui.label(RichText::new("-").color(GRAY));
+                                }
+                            }
                         }
                     }
                     ui.horizontal(|ui| {
@@ -902,6 +1223,9 @@ impl Editor {
                 }
             });
         });
+        if let Some(m) = price_mode {
+            self.set_price_mode(m);
+        }
         for i in requote {
             if let Some(p) = products.get(i).cloned().flatten() {
                 let (qty, rate) = (self.doc.lines[i].qty, self.doc.lines[i].vat.rate);
@@ -921,41 +1245,18 @@ impl Editor {
             changed = true;
         }
 
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("\u{E3D4} Riga").clicked() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.label(theme::muted("Aggiungi riga:"));
+            if theme::ghost(ui, true, icon::PENCIL_LINE, "Manuale").clicked() {
                 let vat = self.default_vat();
                 self.doc.lines.push(DocLine { vat, discounts: self.doc.party.default_discount.clone(), pension_fund: self.doc.pension_fund.is_some(), withholding: !self.doc.withholdings.is_empty(), ..Default::default() });
                 changed = true;
             }
-            if self.doc.lines.iter().any(|l| l.product_id.is_some()) && ui.button("\u{E036} Prezzi da listino").on_hover_text("Ricalcola prezzi e sconti secondo listino e condizioni del soggetto").clicked() {
-                let n = self.reprice_all(cx.store);
-                cx.msgs.ok(format!("Prezzi ricalcolati su {} righe", n));
-                changed = true;
-            }
-            if ui.button("\u{E3D4} Descrizione").clicked() {
-                self.doc.lines.push(DocLine { kind: LineKind::Text, ..Default::default() });
-                changed = true;
-            }
-            if !self.doc.kind.is_internal() {
-                if ui.button(format!("{} Subtotale", icon::LIST_PLUS)).on_hover_text("Somma delle righe dall'ultimo subtotale").clicked() {
-                    self.doc.lines.push(DocLine { kind: LineKind::Subtotal, ..Default::default() });
-                    changed = true;
-                }
-                if ui.button(format!("{} Riga calcolata %", icon::PERCENT)).on_hover_text("Percentuale delle righe precedenti: trasporto, imballo...").clicked() {
-                    self.tools.percent = Some(("Spese di trasporto".into(), String::new()));
-                }
-                if ui.button(format!("{} Porta il totale a...", icon::CALCULATOR)).on_hover_text("Calcolo inverso: sconto sul documento per arrivare al totale desiderato").clicked() {
-                    self.tools.target_total = Some(String::new());
-                }
-            }
-            if ui.button(format!("{} Copia righe da...", icon::COPY)).on_hover_text("Copia le righe da un altro documento").clicked() {
-                self.tools.copy = Some(Default::default());
-            }
-            ui.label("Articolo:");
             let search_id = ui.make_persistent_id("prod_search");
             let mut search: String = ui.data_mut(|d| d.get_temp(search_id)).unwrap_or_default();
             let mut picked: Option<Product> = None;
-            egui::ComboBox::from_id_salt("add_product").width(260.0).height(400.0).selected_text("cerca e aggiungi...").show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("add_product").width(150.0).height(400.0).selected_text(format!("{}  Prodotti", icon::PACKAGE)).show_ui(ui, |ui| {
                 ui.add(egui::TextEdit::singleline(&mut search).hint_text("codice o descrizione").desired_width(240.0)).request_focus();
                 for p in cx.store.products_page(&search, false, 60).unwrap_or_default() {
                     if ui.selectable_label(false, format!("{}  {}  € {}", p.code, p.description, eur(p.price))).clicked() {
@@ -969,8 +1270,7 @@ impl Editor {
                 self.doc.lines.extend(lines);
                 changed = true;
             }
-            ui.label("Codice/barcode:");
-            let r = ui.add(egui::TextEdit::singleline(&mut self.quick_code).desired_width(140.0).hint_text("e premi Invio"));
+            let r = ui.add(egui::TextEdit::singleline(&mut self.quick_code).desired_width(120.0).hint_text("Cod. barre + Invio"));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.quick_code.trim().is_empty() {
                 match cx.store.find_by_code(&self.quick_code) {
                     Ok(Some((p, variant))) => {
@@ -991,9 +1291,57 @@ impl Editor {
                 self.quick_code.clear();
                 r.request_focus();
             }
+            if !self.doc.kind.is_internal() && theme::ghost(ui, true, icon::PERCENT, "Calcolata").on_hover_text("Percentuale delle righe precedenti: trasporto, imballo...").clicked() {
+                self.tools.percent = Some(("Spese di trasporto".into(), String::new()));
+            }
+            if theme::ghost(ui, true, icon::NOTE, "Nota").clicked() {
+                self.doc.lines.push(DocLine { kind: LineKind::Text, ..Default::default() });
+                changed = true;
+            }
+            egui::menu::menu_custom_button(ui, egui::Button::new(format!("{}  Utilità", icon::WRENCH)).frame(false).min_size(egui::vec2(0.0, 27.0)), |ui| {
+                if !self.doc.kind.is_internal() {
+                    if ui.button(format!("{}  Subtotale", icon::LIST_PLUS)).clicked() {
+                        ui.close_menu();
+                        self.doc.lines.push(DocLine { kind: LineKind::Subtotal, ..Default::default() });
+                        changed = true;
+                    }
+                    if ui.button(format!("{}  Porta il totale a...", icon::CALCULATOR)).clicked() {
+                        ui.close_menu();
+                        self.tools.target_total = Some(String::new());
+                    }
+                }
+                if self.doc.lines.iter().any(|l| l.product_id.is_some()) && ui.button(format!("{}  Prezzi da listino", icon::TAG)).clicked() {
+                    ui.close_menu();
+                    let n = self.reprice_all(cx.store);
+                    cx.msgs.ok(format!("Prezzi ricalcolati su {} righe", n));
+                    changed = true;
+                }
+                if ui.button(format!("{}  Copia righe da...", icon::COPY)).clicked() {
+                    ui.close_menu();
+                    self.tools.copy = Some(Default::default());
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::menu::menu_custom_button(ui, egui::Button::new(RichText::new("Colonne...").color(ui.visuals().hyperlink_color)).frame(false), |ui| {
+                    let before = self.cols;
+                    let mut c = !self.cols.hide_cost;
+                    let mut n = !self.cols.hide_net;
+                    let mut m = !self.cols.hide_margin;
+                    ui.checkbox(&mut c, "Prezzo di acquisto");
+                    ui.checkbox(&mut n, "Prezzo netto scontato");
+                    ui.checkbox(&mut m, "Margine");
+                    self.cols = LineCols { hide_cost: !c, hide_net: !n, hide_margin: !m };
+                    if before != self.cols {
+                        let _ = cx.store.set_setting("doc_line_columns", &self.cols);
+                    }
+                });
+            });
         });
         if changed {
             self.dirty = true;
+            if self.doc.lines.iter().any(|l| l.vat.split) {
+                self.doc.vat_liability = "S".into();
+            }
         }
     }
 
@@ -1126,8 +1474,6 @@ impl Editor {
                 ui.label("");
                 ui.end_row();
             });
-            ui.label("Destinazione merce (se diversa dalla sede)");
-            changed |= ui.add(egui::TextEdit::multiline(&mut self.doc.destination).desired_rows(2).desired_width(500.0)).changed();
         });
         if changed {
             self.dirty = true;
@@ -1168,14 +1514,6 @@ impl Editor {
                 self.doc.related.push(RelatedDoc { kind: if self.doc.kind.is_credit() { "FATTURA".into() } else { "ORDINE".into() }, ..Default::default() });
                 changed = true;
             }
-        });
-        egui::CollapsingHeader::new("Causale e note").default_open(!self.doc.notes.is_empty() || !self.doc.causale.is_empty()).show(ui, |ui| {
-            ui.label("Causale (riportata nella fattura elettronica)");
-            changed |= ui.add(egui::TextEdit::multiline(&mut self.doc.causale).desired_rows(2).desired_width(f32::INFINITY)).changed();
-            ui.label("Note in stampa");
-            changed |= ui.add(egui::TextEdit::multiline(&mut self.doc.notes).desired_rows(2).desired_width(f32::INFINITY)).changed();
-            ui.label("Note interne (non stampate)");
-            changed |= ui.add(egui::TextEdit::multiline(&mut self.doc.internal_notes).desired_rows(2).desired_width(f32::INFINITY)).changed();
         });
         if changed {
             self.dirty = true;
@@ -1239,12 +1577,10 @@ impl Editor {
                     for w in &t.warnings {
                         ui.label(RichText::new(format!("\u{E4E0} {}", w)).color(ORANGE).small());
                     }
-                    // margine
                     if self.doc.kind.is_sale() {
-                        let cost: Decimal = self.doc.lines.iter().filter(|l| l.kind == LineKind::Item).map(|l| l.unit_cost * l.qty).sum();
+                        let (rev, cost, _) = self.margin_totals(t);
                         if !cost.is_zero() {
-                            let margin = t.taxable - cost;
-                            ui.label(RichText::new(format!("Margine stimato € {}", eur(margin))).small().color(GRAY));
+                            ui.label(RichText::new(format!("Margine € {}", eur(rev - cost))).small().color(GRAY));
                         }
                     }
                 }
@@ -1277,40 +1613,8 @@ impl Editor {
         }));
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
-        if self.confirm_close {
-            match widgets::confirm(ui.ctx(), "Modifiche non salvate", "Chiudere il documento senza salvare le modifiche?") {
-                Some(true) => {
-                    self.confirm_close = false;
-                    cx.nav.push(Nav::CloseEditor);
-                }
-                Some(false) => self.confirm_close = false,
-                None => {}
-            }
-        }
-        self.toolbar(ui, cx);
-        if let super::linetools::LineAction::Changed = self.tools.show(ui.ctx(), cx.store, cx.msgs, &mut self.doc) {
-            self.dirty = true;
-        }
-        let totals = calc::compute(&self.doc);
-        let locked = self.lock.is_some() || self.doc.status == DocStatus::Cancelled;
-        egui::ScrollArea::vertical().id_salt("editor_scroll").auto_shrink([false, false]).show(ui, |ui| {
-            self.sdi_track(ui, cx);
-            ui.add_enabled_ui(!locked, |ui| {
-                theme::card_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    self.header(ui, cx);
-                });
-                ui.add_space(12.0);
-                theme::card_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(theme::medium("Righe").size(16.0));
-                    ui.add_space(4.0);
-                    let t = totals.as_ref().ok().cloned();
-                    self.lines(ui, cx, &t);
-                });
-                ui.add_space(12.0);
-            });
+    /// Quantità e valore dei documenti interni (produzione e trasferimenti).
+    fn internal_info(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
             if self.doc.kind == DocKind::Production {
                 theme::card_frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -1350,7 +1654,6 @@ impl Editor {
                     ui.add_space(4.0);
                     ui.label(format!("Valore della produzione al costo dei componenti: € {}", eur(value)));
                 });
-                return;
             }
             if self.doc.kind == DocKind::StockTransfer {
                 // nessun valore fiscale: quantità e valore della merce al costo
@@ -1369,20 +1672,118 @@ impl Editor {
                         ui.label(RichText::new("Il trasferimento non ha effetti fiscali: sposta la merce tra due magazzini dell'azienda in un'unica operazione.").small().color(GRAY));
                     });
                 });
-                ui.add_enabled_ui(!locked, |ui| self.refs_section(ui));
-                return;
             }
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width((ui.available_width() - 340.0).max(400.0));
-                    ui.add_enabled_ui(!locked, |ui| {
-                        self.fiscal_section(ui);
-                        self.transport_section(ui);
-                        self.refs_section(ui);
-                    });
-                });
-                self.totals_panel(ui, &totals);
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+        if self.confirm_close {
+            match widgets::confirm(ui.ctx(), "Modifiche non salvate", "Chiudere il documento senza salvare le modifiche?") {
+                Some(true) => {
+                    self.confirm_close = false;
+                    cx.nav.push(Nav::CloseEditor);
+                }
+                Some(false) => self.confirm_close = false,
+                None => {}
+            }
+        }
+        self.title_bar(ui, cx);
+        if let super::linetools::LineAction::Changed = self.tools.show(ui.ctx(), cx.store, cx.msgs, &mut self.doc) {
+            self.dirty = true;
+        }
+        let totals = calc::compute(&self.doc);
+        let locked = self.lock.is_some() || self.doc.status == DocStatus::Cancelled;
+        let internal = self.doc.kind.is_internal();
+        egui::TopBottomPanel::bottom("doc_actions").show_separator_line(true).frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 0 })).show_inside(ui, |ui| self.action_bar(ui, cx));
+        if !internal {
+            egui::TopBottomPanel::bottom("doc_bottom").show_separator_line(true).exact_height(84.0).frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 4 })).show_inside(ui, |ui| {
+                ui.add_enabled_ui(!locked, |ui| self.bottom_fields(ui, &totals));
             });
+        }
+        egui::TopBottomPanel::top("doc_head").show_separator_line(false).frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 4 })).show_inside(ui, |ui| {
+            ui.add_enabled_ui(!locked, |ui| self.header_top(ui, cx));
+            if !internal {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let mut tabs = vec![(DocTab::Lines, "Righe documento"), (DocTab::Payment, "Pagamento")];
+                    if self.doc.kind.has_transport() {
+                        tabs.push((DocTab::Transport, "Trasporto"));
+                    }
+                    tabs.push((DocTab::Notes, "Note"));
+                    tabs.push((DocTab::Addresses, "Indirizzi"));
+                    if self.doc.kind.is_fiscal() || self.doc.kind.is_purchase() {
+                        tabs.push((DocTab::FeProps, "Proprietà fattura elettr."));
+                    }
+                    tabs.push((DocTab::Options, "Opzioni"));
+                    for (t, label) in tabs {
+                        ui.selectable_value(&mut self.tab, t, label);
+                    }
+                });
+            }
+        });
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(6)).show_inside(ui, |ui| {
+            if internal {
+                self.tab = DocTab::Lines;
+            }
+            match self.tab {
+                DocTab::Lines => {
+                    let h = (ui.available_height() - 40.0 - if internal { 170.0 } else { 0.0 }).max(120.0);
+                    ui.add_enabled_ui(!locked, |ui| {
+                        let t = totals.as_ref().ok().cloned();
+                        self.lines(ui, cx, &t, h);
+                    });
+                    if internal {
+                        self.internal_info(ui, cx);
+                    }
+                }
+                other => {
+                    egui::ScrollArea::vertical().id_salt("doc_tab_scroll").auto_shrink([false, false]).show(ui, |ui| match other {
+                        DocTab::Payment => {
+                            ui.horizontal_top(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_max_width((ui.available_width() - 360.0).max(420.0));
+                                    ui.add_enabled_ui(!locked, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Pagamento");
+                                            if widgets::payment_combo(ui, "doc_pay", &mut self.doc.payment_id, &self.payments, 300.0) {
+                                                self.dirty = true;
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                        self.fiscal_section(ui);
+                                    });
+                                });
+                                self.totals_panel(ui, &totals);
+                            });
+                        }
+                        DocTab::Transport => {
+                            ui.add_enabled_ui(!locked, |ui| self.transport_section(ui));
+                        }
+                        DocTab::Notes => {
+                            ui.add_enabled_ui(!locked, |ui| {
+                                ui.label("Note riportate in stampa");
+                                if ui.add(egui::TextEdit::multiline(&mut self.doc.notes).desired_rows(8).desired_width(f32::INFINITY)).changed() {
+                                    self.dirty = true;
+                                }
+                            });
+                        }
+                        DocTab::Addresses => {
+                            ui.add_enabled_ui(!locked, |ui| {
+                                ui.label("Destinazione (se diversa dalla sede)");
+                                if ui.add(egui::TextEdit::multiline(&mut self.doc.destination).desired_rows(4).desired_width(520.0)).changed() {
+                                    self.dirty = true;
+                                }
+                            });
+                        }
+                        DocTab::FeProps => {
+                            ui.add_enabled_ui(!locked, |ui| self.tab_fe(ui, cx));
+                        }
+                        DocTab::Options => {
+                            ui.add_enabled_ui(!locked, |ui| self.tab_options(ui, cx));
+                        }
+                        DocTab::Lines => {}
+                    });
+                }
+            }
         });
     }
 }
@@ -1391,6 +1792,44 @@ impl Editor {
 mod tests {
     use super::*;
     use openfatt_core::dec;
+
+    #[test]
+    fn listino_del_documento_e_margine() {
+        let s = openfatt_store::Store::open_in_memory().unwrap();
+        crate::demo::populate(&s).unwrap();
+        let parties = s.parties(&openfatt_store::PartyFilter::default()).unwrap();
+        let rossi = parties.iter().find(|p| p.name.starts_with("Rossi")).unwrap().clone();
+        let sedia = s.product_by_code("SED01").unwrap().unwrap();
+        let mut d = Document::new(DocKind::Quote);
+        d.party_id = Some(rossi.id);
+        d.party = rossi;
+        let mut e = Editor::new(&s, d);
+        let l = e.line_from_product(&s, &sedia);
+        assert_eq!(l.unit_cost, sedia.cost);
+        assert_eq!(l.unit_price, dec!(126.7), "listino del cliente");
+        e.doc.lines.push(l);
+        // listino scelto nel documento: prezzo base
+        e.doc.price_list_id = Some(0);
+        e.reprice_all(&s);
+        assert_eq!(e.doc.lines[0].unit_price, sedia.price);
+        // margine: ricavo meno prezzo di acquisto
+        let t = calc::compute(&e.doc).unwrap();
+        let (rev, cost, missing) = e.margin_totals(&t);
+        assert_eq!(rev, t.lines[0].total);
+        assert_eq!(cost, sedia.cost);
+        assert_eq!(missing, 0);
+        // riga senza prezzo di acquisto: non falsa il margine
+        e.doc.lines.push(DocLine { description: "Manuale".into(), unit_price: dec!(50), vat: e.doc.lines[0].vat.clone(), ..Default::default() });
+        let t = calc::compute(&e.doc).unwrap();
+        let (_, cost2, missing) = e.margin_totals(&t);
+        assert_eq!((cost2, missing), (sedia.cost, 1));
+        // passaggio a prezzi ivati e ritorno: il totale non cambia
+        let before = t.total;
+        e.set_price_mode(true);
+        assert_eq!(calc::compute(&e.doc).unwrap().total, before);
+        e.set_price_mode(false);
+        assert_eq!(calc::compute(&e.doc).unwrap().total, before);
+    }
 
     #[test]
     fn prices_follow_lists_and_conditions() {

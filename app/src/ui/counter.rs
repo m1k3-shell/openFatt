@@ -90,7 +90,7 @@ pub fn rt_config(store: &openfatt_store::Store) -> RtConfig {
 }
 
 fn gross_price(p: &Product, vats: &[VatCode]) -> (Decimal, VatRef) {
-    let v = p.vat_id.and_then(|id| vats.iter().find(|v| v.id == id)).map(VatRef::from_code).unwrap_or(VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new() });
+    let v = p.vat_id.and_then(|id| vats.iter().find(|v| v.id == id)).map(VatRef::from_code).unwrap_or(VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false });
     (round2(p.price * (Decimal::ONE + v.rate / Decimal::ONE_HUNDRED)), v)
 }
 

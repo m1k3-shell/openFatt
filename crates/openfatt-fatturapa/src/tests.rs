@@ -46,7 +46,7 @@ pub fn sample_customer() -> Party {
 }
 
 fn v22() -> VatRef {
-    VatRef { vat_id: Some(1), rate: dec!(22), natura: None, legal_ref: String::new() }
+    VatRef { vat_id: Some(1), rate: dec!(22), natura: None, legal_ref: String::new(), split: false }
 }
 
 fn samples_dir() -> PathBuf {
@@ -105,7 +105,7 @@ fn invoice_full_roundtrip() {
         description: "Servizio esente".into(),
         qty: dec!(1),
         unit_price: dec!(40),
-        vat: VatRef { vat_id: None, rate: dec!(0), natura: Some("N4".into()), legal_ref: "Art. 10 DPR 633/72".into() },
+        vat: VatRef { vat_id: None, rate: dec!(0), natura: Some("N4".into()), legal_ref: "Art. 10 DPR 633/72".into(), split: false },
         ..Default::default()
     });
     let t = finalize(&mut doc);
@@ -144,7 +144,7 @@ fn forfettario_bollo_inps() {
     cust.sdi_code.clear();
     cust.pec = "lucia@pec.example.it".into();
     doc.party = cust;
-    let n22 = VatRef { vat_id: None, rate: dec!(0), natura: Some("N2.2".into()), legal_ref: "Operazione in franchigia art. 1 c. 54-89 L. 190/2014".into() };
+    let n22 = VatRef { vat_id: None, rate: dec!(0), natura: Some("N2.2".into()), legal_ref: "Operazione in franchigia art. 1 c. 54-89 L. 190/2014".into(), split: false };
     doc.lines.push(DocLine { description: "Consulenza".into(), qty: dec!(1), unit_price: dec!(800), vat: n22.clone(), pension_fund: true, ..Default::default() });
     doc.pension_fund = Some(PensionFund { kind: "TC22".into(), rate: dec!(4), vat: n22, subject_to_withholding: false });
     let t = finalize(&mut doc);
@@ -353,7 +353,7 @@ fn intent_subtotal_currency_and_nso() {
     doc.exchange_rate = dec!(1.0850);
     // ordine NSO: tripletta ID, data, #ufficio ordinante#
     doc.related.push(RelatedDoc { kind: "ORDINE".into(), number: "110".into(), date: NaiveDate::from_ymd_opt(2026, 3, 30), commessa: "#B9BGAQ#".into(), ..Default::default() });
-    let n35 = VatRef { vat_id: None, rate: dec!(0), natura: Some("N3.5".into()), legal_ref: "Non imponibile art. 8 c.1 lett. c DPR 633/72".into() };
+    let n35 = VatRef { vat_id: None, rate: dec!(0), natura: Some("N3.5".into()), legal_ref: "Non imponibile art. 8 c.1 lett. c DPR 633/72".into(), split: false };
     doc.lines.push(DocLine { description: "Macchina utensile".into(), qty: dec!(1), unit_price: dec!(1000), vat: n35.clone(), eco_fee: dec!(2.5), eco_label: "Contributo RAEE".into(), ..Default::default() });
     doc.lines.push(DocLine { kind: LineKind::Subtotal, ..Default::default() });
     doc.lines.push(DocLine { description: "Imballo 2%".into(), calc_percent: Some(dec!(2)), vat: n35, ..Default::default() });

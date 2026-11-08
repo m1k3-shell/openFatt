@@ -104,10 +104,10 @@ impl MailConfig {
         match self.mode {
             MailMode::Smtp | MailMode::MailClient => {
                 if !is_valid_address(self.address.trim()) {
-                    return Err(PecError::Config("indirizzo email del mittente mancante o non valido (Impostazioni > Email)".into()));
+                    return Err(PecError::Config("indirizzo email del mittente mancante o non valido (Opzioni > Email)".into()));
                 }
                 if self.mode == MailMode::Smtp && self.smtp_host.trim().is_empty() {
-                    return Err(PecError::Config("server SMTP mancante (Impostazioni > Email)".into()));
+                    return Err(PecError::Config("server SMTP mancante (Opzioni > Email)".into()));
                 }
                 Ok(SmtpAccount {
                     from_name: self.from_name.trim().to_string(),
@@ -120,7 +120,7 @@ impl MailConfig {
             }
             MailMode::Pec => {
                 if !is_valid_address(pec.address.trim()) || pec.smtp_host.trim().is_empty() {
-                    return Err(PecError::Config("casella PEC non configurata (Impostazioni > PEC)".into()));
+                    return Err(PecError::Config("casella PEC non configurata (Opzioni > PEC)".into()));
                 }
                 Ok(SmtpAccount {
                     from_name: self.from_name.trim().to_string(),

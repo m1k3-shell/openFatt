@@ -124,6 +124,7 @@ impl Store {
         if p.description.trim().is_empty() {
             return Err(StoreError::Invalid("La descrizione dell'articolo è obbligatoria".into()));
         }
+        p.other_suppliers.retain(|s| s.supplier_id != 0 && Some(s.supplier_id) != p.supplier_id);
         if p.is_service {
             p.manage_stock = false;
             p.tracking = Tracking::None;

@@ -142,7 +142,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             Err(_) => st.busy = None,
         }
     }
-    ui.label(RichText::new("Si usano le API ufficiali del negozio: per WooCommerce una chiave REST (Impostazioni > Avanzate > REST API) con permessi di lettura e scrittura, per Shopify un token di accesso di un'app personalizzata. Il segreto è salvato nel Gestore credenziali di Windows.").small().color(GRAY));
+    ui.label(RichText::new("Si usano le API ufficiali del negozio: per WooCommerce una chiave REST (Opzioni > Avanzate > REST API) con permessi di lettura e scrittura, per Shopify un token di accesso di un'app personalizzata. Il segreto è salvato nel Gestore credenziali di Windows.").small().color(GRAY));
     ui.add_space(6.0);
     let c = st.cfg.as_mut().unwrap();
     egui::Grid::new("shop_cfg").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {

@@ -233,6 +233,13 @@ pub fn quote(
     let q = qty.abs().max(Decimal::ONE);
     let base = if purchase { product.cost } else { product.price };
     let mut out = PriceQuote { price: base, discounts: String::new(), source: if purchase { "Costo d'acquisto".into() } else { "Prezzo base".into() } };
+    // acquisto da un fornitore dell'articolo: si propone il suo prezzo
+    if purchase {
+        if let Some((_, price)) = party.and_then(|p| product.supplier_terms(p.id)).filter(|(_, x)| !x.is_zero()) {
+            out.price = price;
+            out.source = "Prezzo del fornitore".into();
+        }
+    }
 
     // 3. listino del soggetto
     if let Some(l) = list.as_ref() {

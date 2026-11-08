@@ -27,6 +27,7 @@ pub struct State {
     quick: Quick,
     grids: Vec<(DocGroup, Grid)>,
     data: super::Cache<(String, Option<i32>, String, Option<&'static str>), Vec<DocSummary>>,
+    progress: super::Cache<String, std::collections::HashMap<i64, openfatt_store::OrderProgress>>,
 }
 
 fn grid_name(g: DocGroup) -> &'static str {
@@ -37,6 +38,7 @@ fn grid_name(g: DocGroup) -> &'static str {
         DocGroup::Invoices => "doc-fatture",
         DocGroup::Proforma => "doc-proforma",
         DocGroup::SelfInvoices => "doc-autofatture",
+        DocGroup::SupplierQuotes => "doc-preventivi-fornitori",
         DocGroup::SupplierOrders => "doc-ordini-fornitori",
         DocGroup::GoodsReceipts => "doc-arrivi",
         DocGroup::PurchaseInvoices => "doc-acquisti",
@@ -67,6 +69,7 @@ impl Default for State {
             quick: Quick::All,
             grids: Vec::new(),
             data: Default::default(),
+            progress: Default::default(),
         }
     }
 }
@@ -94,7 +97,7 @@ pub fn generate_einvoices(cx: &mut Ctx, ids: &[i64], issues_out: &mut Option<(St
         }
     }
     if ok > 0 {
-        cx.msgs.ok(format!("{} fatture elettroniche generate: si inviano da 'Fattura elettronica > Inviate'", ok));
+        cx.msgs.ok(format!("{} fatture elettroniche generate: si inviano da 'Fatture elettr. > Fatture inviate'", ok));
     }
     if !errors.is_empty() {
         cx.msgs.err(errors.join("\n\n"));
@@ -181,40 +184,171 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
     let selected: Vec<&DocSummary> = list.iter().copied().filter(|d| st.selected.contains(&d.id)).collect();
 
     // ---- titolo ----
-    let total: Decimal = all.iter().filter(|d| d.status == DocStatus::Issued).map(|d| if d.kind.is_credit() { -d.total } else { d.total }).sum();
     let open: Decimal = all.iter().map(|d| d.open_amount).sum();
-    let period = st.year.map(|y| format!(" nel {}", y)).unwrap_or_default();
-    let n_txt = if all.len() == 1 { format!("1 documento{}", period) } else { format!("{} documenti{}", all.len(), period) };
-    let tot_txt = format!(" · € {} emessi", eur(total));
     let open_txt = format!("€ {} {}", eur(open), if purchase { "da pagare" } else { "da incassare" });
-    let mut parts: Vec<(&str, bool)> = vec![(&n_txt, false), (&tot_txt, false)];
+    let n_txt = if all.len() == 1 { "1 voce".to_string() } else { format!("{} voci", all.len()) };
+    let mut parts: Vec<(&str, bool)> = vec![(&n_txt, false)];
     if open > Decimal::ZERO {
         parts.push((" · ", false));
         parts.push((&open_txt, true));
     }
-    let crumb = if group == DocGroup::Production { "Magazzino" } else if purchase { "Acquisti" } else { "Vendite" };
-    theme::title_row(ui, &[crumb], group.label(), Some(theme::subline(&parts)), |ui| {
-        if theme::primary(ui, icon::PLUS, &new_label(kinds[0])).on_hover_text("Ctrl+N").clicked() {
-            cx.nav.push(Nav::NewDocument(kinds[0]));
-        }
-        if kinds.len() > 1 {
-            egui::menu::menu_custom_button(ui, theme::button_widget(icon::CARET_DOWN, "Altri"), |ui| {
-                for k in kinds.iter().skip(1) {
-                    if ui.button(format!("{}  {}", icon::PLUS, k.label())).clicked() {
-                        cx.nav.push(Nav::NewDocument(*k));
+    theme::title_row(ui, &[], group.label(), Some(theme::subline(&parts)), |ui| {
+        if group == DocGroup::SelfInvoices {
+            egui::menu::menu_custom_button(ui, theme::button_widget(icon::PLUS, "Nuova autofattura"), |ui| {
+                for (code, desc) in openfatt_core::codes::TIPO_DOCUMENTO.iter().filter(|(c, _)| ("TD16".."TD30").contains(c) && !matches!(*c, "TD24" | "TD25")) {
+                    if ui.button(format!("{}  {}", code, desc)).clicked() {
+                        let mut d = openfatt_core::model::Document::new(DocKind::SelfInvoice);
+                        d.fe_type = code.to_string();
+                        cx.nav.push(Nav::EditDocument(d));
                         ui.close_menu();
                     }
                 }
             });
+        } else {
+            if theme::primary(ui, icon::PLUS, &new_label(kinds[0])).on_hover_text("Ctrl+N").clicked() {
+                cx.nav.push(Nav::NewDocument(kinds[0]));
+            }
+            if kinds.len() > 1 {
+                egui::menu::menu_custom_button(ui, theme::button_widget(icon::CARET_DOWN, "Altri"), |ui| {
+                    for k in kinds.iter().skip(1) {
+                        if ui.button(format!("{}  {}", icon::PLUS, k.label())).clicked() {
+                            cx.nav.push(Nav::NewDocument(*k));
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
         }
     });
 
     theme::card_frame().inner_margin(0).show(ui, |ui| {
         ui.set_width(ui.available_width());
+        let show_kind = kinds.len() > 1;
+        let party_title: &'static str = if purchase { "Fornitore" } else { "Cliente" };
+        let internal = group == DocGroup::Production;
+        let open_title: &'static str = if purchase { "Da pagare" } else { "Da incassare" };
+        let orders = kinds.iter().all(|k| k.has_order_state());
+        let has_dues = kinds.iter().any(|k| k.has_due_dates());
+        let prog_rc = st.progress.get(cx.store.generation(), &format!("{:?}", kinds), || if orders { cx.store.order_progress(&kinds).unwrap_or_default() } else { Default::default() });
+        let prog: &std::collections::HashMap<i64, openfatt_store::OrderProgress> = &prog_rc;
+        let open_req: std::cell::Cell<Option<i64>> = std::cell::Cell::new(None);
+        let open_ref = &open_req;
+        let today = chrono::Local::now().date_naive();
+        let effective = move |d: &DocSummary| {
+            let p = prog.get(&d.id);
+            d.order_status.effective(p.map(|x| x.any).unwrap_or(false), p.map(|x| x.all).unwrap_or(false))
+        };
+        let cols: Vec<Col<&DocSummary>> = {
+            let mut kind_col = Col::text("kind", "Tipo", 170.0, |d: &&DocSummary| d.kind.label().to_string()).group();
+            if !show_kind {
+                kind_col = kind_col.hidden();
+            }
+            let mut v = vec![
+                Col::new("date", "Data", 90.0, |d: &&DocSummary| Val::Date(Some(d.date))),
+                Col::new("num", "N.", 70.0, |d: &&DocSummary| d.number.map(|n| Val::Num(Decimal::from(n), 0)).unwrap_or(Val::Text(String::new()))).render(|ui: &mut egui::Ui, d: &&DocSummary| {
+                    ui.label(if d.number_label.is_empty() { "-".to_string() } else { d.number_label.clone() });
+                }),
+                kind_col,
+                Col::text("month", "Mese", 90.0, |d: &&DocSummary| d.date.format("%Y-%m").to_string()).hidden().group(),
+                Col::text("party", party_title, 300.0, |d: &&DocSummary| d.party_name.clone()).group(),
+            ];
+            if orders {
+                v.push(Col::text("order", "Stato", 320.0, move |d: &&DocSummary| effective(d).label().to_string()).group().render(move |ui: &mut egui::Ui, d: &&DocSummary| {
+                    let label = effective(d).label();
+                    let targets = prog.get(&d.id).map(|p| p.targets.as_slice()).unwrap_or(&[]);
+                    match targets {
+                        [] => {
+                            ui.label(label);
+                        }
+                        [(id, t)] => {
+                            if ui.link(format!("{}:   -> {}", label, t)).clicked() {
+                                open_ref.set(Some(*id));
+                            }
+                        }
+                        many => {
+                            ui.visuals_mut().button_frame = false;
+                            let txt = RichText::new(format!("{}:   -> Documenti...", label)).color(ui.visuals().hyperlink_color);
+                            ui.menu_button(txt, |ui| {
+                                for (id, t) in many {
+                                    if ui.button(t).clicked() {
+                                        open_ref.set(Some(*id));
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }));
+                v.push(Col::text("comment", "Commento", 240.0, |d: &&DocSummary| d.comment.clone()));
+                v.push(Col::new("expected", "Concl. prevista", 110.0, |d: &&DocSummary| Val::Date(d.expected_date)).render(move |ui: &mut egui::Ui, d: &&DocSummary| {
+                    if let Some(x) = d.expected_date {
+                        let late = x < today && matches!(effective(d), openfatt_core::model::OrderStatus::Partial | openfatt_core::model::OrderStatus::Confirmed);
+                        let t = x.format("%d/%m/%Y").to_string();
+                        if late {
+                            ui.label(theme::bold(t).color(theme::NEGATIVE));
+                        } else {
+                            ui.label(t);
+                        }
+                    }
+                }));
+            }
+            v.push(Col::text("ext", "N. fornitore", 110.0, |d: &&DocSummary| d.external_number.clone()).hidden());
+            v.push(Col::money("total", "Tot. documento", 110.0, |d: &&DocSummary| d.total).total());
+            let mut open_col = Col::money("open", open_title, 110.0, |d: &&DocSummary| d.open_amount).total().render(move |ui: &mut egui::Ui, d: &&DocSummary| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    if d.open_amount > Decimal::ZERO {
+                        ui.label(eur(d.open_amount));
+                    } else if d.kind.has_due_dates() && d.status == DocStatus::Issued {
+                        ui.label(if purchase { "Pagata" } else { "Incassata" });
+                    }
+                });
+            });
+            if !has_dues {
+                open_col = open_col.hidden();
+            }
+            v.push(open_col);
+            let mut status_col = Col::text("status", "Stato doc.", 80.0, |d: &&DocSummary| d.status.label().to_string()).group().render(|ui: &mut egui::Ui, d: &&DocSummary| {
+                let tone = match d.status {
+                    DocStatus::Draft => Tone::Warning,
+                    DocStatus::Issued => Tone::Neutral,
+                    DocStatus::Cancelled => Tone::Negative,
+                };
+                theme::pill(ui, d.status.label(), tone);
+            });
+            if orders {
+                status_col = status_col.hidden();
+            }
+            v.push(status_col);
+            let mut fe_col = Col::text("fe", if fiscal_group && !purchase { "Fattura elettronica" } else { "Note" }, if fiscal_group { 260.0 } else { 180.0 }, |d: &&DocSummary| d.fe_status.clone().unwrap_or_default())
+                .group()
+                .render(move |ui: &mut egui::Ui, d: &&DocSummary| {
+                    if fiscal_group && !purchase && d.kind.is_fiscal() && d.status == DocStatus::Issued {
+                        theme::sdi_steps(ui, d.fe_status.as_deref());
+                    } else if !d.external_number.is_empty() {
+                        ui.label(RichText::new(format!("n. fornitore {}", d.external_number)).color(MUTED));
+                    }
+                });
+            if orders || !(fiscal_group || purchase) {
+                fe_col = fe_col.hidden();
+            }
+            v.push(fe_col);
+            v
+        };
+        // la produzione non ha cliente né importi
+        let cols: Vec<Col<&DocSummary>> = cols.into_iter().map(|c| if internal && matches!(c.id, "party" | "total" | "open") { c.hidden() } else { c }).collect();
+        let gi = match st.grids.iter().position(|(g, _)| *g == group) {
+            Some(i) => i,
+            None => {
+                st.grids.push((group, Grid::new(grid_name(group))));
+                st.grids.len() - 1
+            }
+        };
+        let grid = &mut st.grids[gi].1;
         // ---- filtri ----
-        egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 20, top: 14, bottom: 14 }).show(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 4 }).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut st.search).hint_text(format!("{}  Cliente, numero, testo...", icon::MAGNIFYING_GLASS)).desired_width(280.0).margin(egui::Margin::symmetric(8, 8)));
+                ui.add(egui::TextEdit::singleline(&mut st.search).hint_text(format!("{}  Cliente, numero, testo...", icon::MAGNIFYING_GLASS)).desired_width(240.0));
                 egui::ComboBox::from_id_salt("doc_year").height(300.0).selected_text(format!("{}  {}", icon::CALENDAR_BLANK, st.year.map(|y| y.to_string()).unwrap_or_else(|| "Tutti gli anni".into()))).show_ui(ui, |ui| {
                     ui.selectable_value(&mut st.year, None, "Tutti gli anni");
                     let mut ys = years.clone();
@@ -252,7 +386,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
                                 let mut job = egui::text::LayoutJob::default();
                                 job.append(&label, 0.0, egui::TextFormat { font_id: egui::FontId::new(14.0, theme::medium_family()), color: if on { theme::INK } else { MUTED }, ..Default::default() });
                                 job.append(&n.to_string(), 6.0, egui::TextFormat { font_id: egui::FontId::new(12.0, egui::FontFamily::Proportional), color: MUTED, ..Default::default() });
-                                ui.add(egui::Button::new(job).min_size(Vec2::new(0.0, 30.0)))
+                                ui.add(egui::Button::new(job).min_size(Vec2::new(0.0, 22.0)))
                             })
                             .inner;
                         if r.clicked() {
@@ -260,13 +394,17 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
                         }
                     }
                 });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, group.label());
+                });
             });
         });
         theme::rule(ui);
 
         // ---- barra delle azioni sulla selezione ----
         let bar_fill = if selected.is_empty() { theme::SURFACE } else { egui::Color32::from_rgb(0xf5, 0xf8, 0xfc) };
-        egui::Frame::new().fill(bar_fill).inner_margin(egui::Margin::symmetric(14, 6)).show(ui, |ui| {
+        egui::Frame::new().fill(bar_fill).inner_margin(egui::Margin::symmetric(6, 3)).show(ui, |ui| {
+            ui.set_min_height(26.0);
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -280,11 +418,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
                     }
                 }
                 if selected.is_empty() {
-                    ui.label(RichText::new("Seleziona uno o più documenti per vedere le azioni; doppio clic per aprire").color(MUTED));
                     return;
                 }
                 let sel_total: Decimal = selected.iter().map(|d| d.total).sum();
-                ui.label(theme::medium(format!("{} selezionat{} · € {}", selected.len(), if selected.len() == 1 { "o" } else { "i" }, eur(sel_total))));
+                ui.label(format!("{} selezionat{} · € {}", selected.len(), if selected.len() == 1 { "o" } else { "i" }, eur(sel_total)));
                 ui.add_space(10.0);
                 let one = if selected.len() == 1 { Some(selected[0]) } else { None };
                 if theme::ghost(ui, one.is_some(), icon::PENCIL_SIMPLE, "Apri").clicked() {
@@ -332,7 +469,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
                 let k0 = selected[0].kind;
                 if selected.iter().all(|d| d.kind == k0) {
                     for t in k0.transform_targets() {
-                        let label = if selected.len() > 1 { format!("{} da {} documenti", t.label(), selected.len()) } else { format!("Crea {}", t.label().to_lowercase()) };
+                        let label = if selected.len() > 1 { format!("{} da {} documenti", t.label(), selected.len()) } else { format!("{}", t.label()) };
                         if theme::ghost(ui, true, icon::ARROW_RIGHT, &label).clicked() {
                             let ids: Vec<i64> = selected.iter().map(|d| d.id).collect();
                             if let Some(d) = cx.msgs.check(cx.store.transform(&ids, *t), "") {
@@ -362,79 +499,14 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
             });
             return;
         }
-        let show_kind = kinds.len() > 1;
-        let party_title: &'static str = if purchase { "Fornitore" } else { "Cliente" };
-        let internal = group == DocGroup::Production;
-        let open_title: &'static str = if purchase { "Da pagare" } else { "Da incassare" };
-        let cols: Vec<Col<&DocSummary>> = {
-            let mut kind_col = Col::text("kind", "Tipo", 170.0, |d: &&DocSummary| d.kind.label().to_string()).group();
-            if !show_kind {
-                kind_col = kind_col.hidden();
-            }
-            vec![
-                Col::new("num", "Numero", 96.0, |d: &&DocSummary| d.number.map(|n| Val::Num(Decimal::from(n), 0)).unwrap_or(Val::Text(String::new()))).render(|ui: &mut egui::Ui, d: &&DocSummary| {
-                    ui.label(theme::medium(if d.number_label.is_empty() { "-".to_string() } else { d.number_label.clone() }));
-                }),
-                kind_col,
-                Col::new("date", "Data", 100.0, |d: &&DocSummary| Val::Date(Some(d.date))),
-                Col::text("month", "Mese", 90.0, |d: &&DocSummary| d.date.format("%Y-%m").to_string()).hidden().group(),
-                Col::text("party", party_title, 260.0, |d: &&DocSummary| d.party_name.clone()).group(),
-                Col::text("ext", "N. fornitore", 110.0, |d: &&DocSummary| d.external_number.clone()).hidden(),
-                Col::money("total", "Totale", 120.0, |d: &&DocSummary| d.total).total(),
-                Col::money("open", open_title, 130.0, |d: &&DocSummary| d.open_amount).total().render(move |ui: &mut egui::Ui, d: &&DocSummary| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(12.0);
-                        if d.open_amount > Decimal::ZERO {
-                            ui.label(theme::medium(eur(d.open_amount)));
-                        } else if d.kind.has_due_dates() && d.status == DocStatus::Issued {
-                            theme::pill(ui, if purchase { "Pagata" } else { "Incassata" }, Tone::Positive);
-                        } else {
-                            ui.label(RichText::new("-").color(MUTED));
-                        }
-                    });
-                }),
-                Col::text("status", "Stato", 110.0, |d: &&DocSummary| d.status.label().to_string()).group().render(|ui: &mut egui::Ui, d: &&DocSummary| {
-                    let tone = match d.status {
-                        DocStatus::Draft => Tone::Warning,
-                        DocStatus::Issued => Tone::Neutral,
-                        DocStatus::Cancelled => Tone::Negative,
-                    };
-                    theme::pill(ui, d.status.label(), tone);
-                }),
-                Col::text("fe", if fiscal_group && !purchase { "Fattura elettronica" } else { "Note" }, if fiscal_group { 300.0 } else { 180.0 }, |d: &&DocSummary| d.fe_status.clone().unwrap_or_default())
-                    .group()
-                    .render(move |ui: &mut egui::Ui, d: &&DocSummary| {
-                        if fiscal_group && !purchase && d.kind.is_fiscal() && d.status == DocStatus::Issued {
-                            theme::sdi_steps(ui, d.fe_status.as_deref());
-                        } else if !d.external_number.is_empty() {
-                            ui.label(RichText::new(format!("n. fornitore {}", d.external_number)).color(MUTED));
-                        }
-                    }),
-            ]
-        };
-        // la produzione non ha cliente né importi
-        let cols: Vec<Col<&DocSummary>> = cols.into_iter().map(|c| if internal && matches!(c.id, "party" | "total" | "open") { c.hidden() } else { c }).collect();
-        let gi = match st.grids.iter().position(|(g, _)| *g == group) {
-            Some(i) => i,
-            None => {
-                st.grids.push((group, Grid::new(grid_name(group))));
-                st.grids.len() - 1
-            }
-        };
-        let grid = &mut st.grids[gi].1;
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.label(theme::muted("Clic sull'intestazione per ordinare · Ctrl o Maiusc + clic per selezionare più documenti · doppio clic per aprire").size(12.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(12.0);
-                grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, group.label());
-            });
-        });
         grid.selected = st.selected.clone();
         let avail = ui.available_height() - 4.0;
         grid.version = st.data.version.wrapping_mul(7).wrapping_add(st.quick as u64 + 1);
-        let ev = grid.show(ui, cx.store, &cols, &list, |d| d.id, avail, true, 44.0);
+        let ev = grid.show(ui, cx.store, &cols, &list, |d| d.id, avail, false, 24.0);
         st.selected = grid.selected.clone();
+        if let Some(id) = open_req.get() {
+            cx.nav.push(Nav::OpenDocument(id));
+        }
         if let Some(id) = ev.opened {
             cx.nav.push(Nav::OpenDocument(id));
         }

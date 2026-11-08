@@ -442,7 +442,7 @@ pub fn lipe_check(s: &LipeSubject) -> Vec<String> {
     let mut p = Vec::new();
     let cf = s.tax_code.trim().to_ascii_uppercase();
     if !(cf.len() == 11 && cf.chars().all(|c| c.is_ascii_digit())) && !crate::fiscal::codice_fiscale_valido(&cf) {
-        p.push("Codice fiscale dell'azienda mancante o non valido (Impostazioni > Azienda)".into());
+        p.push("Codice fiscale dell'azienda mancante o non valido (Opzioni > Azienda)".into());
     }
     if !crate::fiscal::partita_iva_valida(s.vat_number.trim()) {
         p.push("Partita IVA dell'azienda mancante o non valida".into());

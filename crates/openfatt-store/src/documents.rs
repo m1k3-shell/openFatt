@@ -31,6 +31,19 @@ pub struct DocSummary {
     pub fe_status: Option<String>,
     /// Residuo da incassare/pagare sulle scadenze.
     pub open_amount: Decimal,
+    /// Ordini: stato scelto, data prevista di conclusione e commento interno.
+    pub order_status: OrderStatus,
+    pub expected_date: Option<NaiveDate>,
+    pub comment: String,
+}
+
+/// Evasione di un ordine: righe evase e documenti che le hanno evase.
+#[derive(Debug, Clone, Default)]
+pub struct OrderProgress {
+    pub any: bool,
+    pub all: bool,
+    /// (id del documento, etichetta "Arrivo 5 del 24/2/22")
+    pub targets: Vec<(i64, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,7 +72,10 @@ impl Store {
             "SELECT d.id, d.kind, d.status, d.number, d.series, d.year, d.date, d.party_id, d.party_name, d.external_number,
                     d.total, d.net_to_pay,
                     (SELECT e.status FROM einvoices e WHERE e.document_id = d.id AND e.direction = 'OUT' ORDER BY e.id DESC LIMIT 1),
-                    COALESCE(json_extract(d.data, '$.legacy_fe'), 0)
+                    COALESCE(json_extract(d.data, '$.legacy_fe'), 0),
+                    COALESCE(json_extract(d.data, '$.order_status'), ''),
+                    json_extract(d.data, '$.expected_date'),
+                    COALESCE(json_extract(d.data, '$.internal_notes'), '')
              FROM documents d WHERE 1=1",
         );
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
@@ -119,12 +135,15 @@ impl Store {
                 r.get::<_, Option<String>>(11)?,
                 r.get::<_, Option<String>>(12)?,
                 r.get::<_, i64>(13)?,
+                r.get::<_, String>(14)?,
+                r.get::<_, Option<String>>(15)?,
+                r.get::<_, String>(16)?,
             ))
         })?;
         let open = self.open_amounts_by_doc()?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, kind, status, number, series, year, date, party_id, party_name, ext, total, net, fe, legacy) = row?;
+            let (id, kind, status, number, series, year, date, party_id, party_name, ext, total, net, fe, legacy, order_status, expected, comment) = row?;
             let kind = DocKind::from_code(&kind).unwrap_or_default();
             let number_label = match number {
                 Some(n) if series.is_empty() => n.to_string(),
@@ -147,7 +166,72 @@ impl Store {
                 net_to_pay: dec_from_sql(net),
                 fe_status: if fe.is_none() && legacy == 1 { Some("PRECEDENTE".into()) } else { fe },
                 open_amount: open.get(&id).copied().unwrap_or_default(),
+                order_status: OrderStatus::from_name(&order_status),
+                expected_date: expected.filter(|e| !e.is_empty()).map(|e| date_from_sql(&e)),
+                comment,
             });
+        }
+        Ok(out)
+    }
+
+    /// Evasione degli ordini di questi tipi: stato delle righe e documenti generati.
+    pub fn order_progress(&self, kinds: &[DocKind]) -> Result<HashMap<i64, OrderProgress>> {
+        let mut out: HashMap<i64, OrderProgress> = HashMap::new();
+        if kinds.is_empty() {
+            return Ok(out);
+        }
+        let marks = kinds.iter().map(|k| format!("'{}'", k.code())).collect::<Vec<_>>().join(",");
+        // quantità evasa per riga d'origine e documenti che l'hanno evasa
+        let mut done: HashMap<i64, Decimal> = HashMap::new();
+        let mut targets: HashMap<i64, BTreeMap<i64, String>> = HashMap::new();
+        {
+            let sql = format!(
+                "SELECT l.source_doc_id, l.source_line_id, l.qty, d.id, d.kind, d.number, d.series, d.date
+                 FROM doc_lines l JOIN documents d ON d.id = l.document_id
+                 JOIN documents o ON o.id = l.source_doc_id
+                 WHERE o.kind IN ({}) AND d.status <> 'ANNULLATO' AND l.source_line_id IS NOT NULL",
+                marks
+            );
+            let mut st = self.conn().prepare(&sql)?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<i64>>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?))
+            })?;
+            for row in rows {
+                let (src, line, qty, id, kind, number, series, date) = row?;
+                *done.entry(line).or_default() += dec_from_sql(Some(qty));
+                let kind = DocKind::from_code(&kind).unwrap_or_default();
+                let short = match kind {
+                    DocKind::GoodsReceipt => "Arrivo",
+                    DocKind::SupplierOrder => "Ordine",
+                    DocKind::DeliveryNote => "DDT",
+                    k => k.label(),
+                };
+                let num = number.map(|n| if series.is_empty() { n.to_string() } else { format!("{}/{}", n, series) }).unwrap_or_default();
+                targets.entry(src).or_default().insert(id, format!("{} {} del {}", short, num, date_from_sql(&date).format("%-d/%-m/%y")));
+            }
+        }
+        let sql = format!(
+            "SELECT d.id, json_extract(j.value, '$.id'), json_extract(j.value, '$.kind'), json_extract(j.value, '$.qty')
+             FROM documents d, json_each(d.data, '$.lines') j WHERE d.kind IN ({})",
+            marks
+        );
+        let mut st = self.conn().prepare(&sql)?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
+        let mut seen: HashMap<i64, (bool, bool)> = HashMap::new();
+        for row in rows {
+            let (doc, line, kind, qty) = row?;
+            let qty = dec_from_sql(Some(qty));
+            if kind != "Item" || qty.is_zero() {
+                continue;
+            }
+            let f = done.get(&line).copied().unwrap_or_default();
+            let e = seen.entry(doc).or_insert((false, true));
+            e.0 |= f > Decimal::ZERO;
+            e.1 &= f >= qty;
+        }
+        for (doc, (any, all)) in seen {
+            let list = targets.remove(&doc).unwrap_or_default();
+            out.insert(doc, OrderProgress { any, all: any && all, targets: list.into_iter().collect() });
         }
         Ok(out)
     }
@@ -229,6 +313,9 @@ impl Store {
         )?;
         if paid > 0 {
             return Ok(Some("ci sono pagamenti registrati sulle scadenze: annullarli prima di modificare".into()));
+        }
+        if self.document_in_batch(id)? {
+            return Ok(Some("le scadenze sono in una distinta bancaria: annullare prima la distinta".into()));
         }
         Ok(None)
     }
@@ -340,13 +427,20 @@ impl Store {
                 }
             }
         }
+        if doc.lines.iter().any(|l| l.vat.split) {
+            doc.vat_liability = "S".into();
+        }
         let tx = self.begin()?;
         self.assign_line_ids(&mut doc)?;
+        self.number_draft(&mut doc)?;
         let totals = calc::compute(&doc).ok();
         let issued = doc.status == DocStatus::Issued;
         self.write_document_row(&mut doc, totals.as_ref())?;
         if issued {
             self.apply_effects(&mut doc, totals.as_ref())?;
+        } else if doc.status == DocStatus::Draft {
+            // anche in bozza il documento ha numero e scadenze: servono per le Ri.Ba.
+            self.write_dues(&doc, totals.as_ref())?;
         }
         self.audit("document", doc.id, "save", &doc.title())?;
         tx.commit()?;
@@ -354,9 +448,84 @@ impl Store {
         Ok(doc)
     }
 
+    /// Numera il documento già al primo salvataggio, anche in bozza (se data o serie
+    /// cambiano si riprende il primo numero libero del nuovo registro).
+    fn number_draft(&self, doc: &mut Document) -> Result<()> {
+        if doc.status != DocStatus::Draft || doc.kind == DocKind::RetailSale {
+            return Ok(());
+        }
+        // il modello di un documento ricorrente non è un documento vero: niente numero
+        if doc.id != 0 && self.is_recurring_template(doc.id)? {
+            doc.number = None;
+            return Ok(());
+        }
+        let year = doc.date.year();
+        if doc.id != 0 {
+            let old: Option<(i32, String, Option<i64>)> = self.conn().query_row("SELECT year, series, number FROM documents WHERE id = ?1", [doc.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            if let Some((y, s, n)) = old {
+                if (y != year || s != doc.series.trim()) && doc.number == n {
+                    doc.number = None;
+                }
+            }
+        }
+        if doc.number.is_none() {
+            doc.number = Some(self.next_number(doc.kind, &doc.series, year)?);
+        }
+        Ok(())
+    }
+
+    fn is_recurring_template(&self, doc_id: i64) -> Result<bool> {
+        let n: i64 = self.conn().query_row("SELECT COUNT(*) FROM recurring WHERE template_id = ?1", [doc_id], |r| r.get(0))?;
+        Ok(n > 0)
+    }
+
+    /// Scadenze già pagate o presentate in banca: non si possono rigenerare.
+    fn dues_frozen(&self, doc_id: i64) -> Result<bool> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM due_dates s WHERE s.document_id = ?1 AND (s.paid <> '0' OR s.writeoff <> '0' OR EXISTS (
+                SELECT 1 FROM bank_batch_items bi JOIN bank_batches b ON b.id = bi.batch_id WHERE bi.due_id = s.id AND b.status <> 'ANNULLATA'))",
+            [doc_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Scadenze presentate in una distinta non annullata.
+    pub fn document_in_batch(&self, doc_id: i64) -> Result<bool> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM due_dates s JOIN bank_batch_items bi ON bi.due_id = s.id JOIN bank_batches b ON b.id = bi.batch_id WHERE s.document_id = ?1 AND b.status <> 'ANNULLATA'",
+            [doc_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Rigenera le scadenze del documento secondo il pagamento scelto.
+    fn write_dues(&self, doc: &Document, totals: Option<&calc::Totals>) -> Result<()> {
+        if self.dues_frozen(doc.id)? {
+            return Ok(());
+        }
+        self.conn().execute("DELETE FROM due_dates WHERE document_id = ?1", [doc.id])?;
+        if doc.party_id.is_none() || !doc.kind.has_due_dates() || self.is_recurring_template(doc.id)? {
+            return Ok(());
+        }
+        if let Some(totals) = totals.filter(|t| !t.net_to_pay.is_zero()) {
+            let payment = doc.payment.clone().unwrap_or_default();
+            for d in &calc::due_dates(doc.date, totals.net_to_pay, &payment) {
+                self.conn().execute(
+                    "INSERT INTO due_dates(document_id, date, amount, mp_code, paid) VALUES (?1, ?2, ?3, ?4, '0')",
+                    params![doc.id, date_to_sql(d.date), dec_to_sql(d.amount), d.mp_code],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn clear_effects(&self, doc_id: i64) -> Result<()> {
         self.conn().execute("DELETE FROM stock_moves WHERE document_id = ?1", [doc_id])?;
-        self.conn().execute("DELETE FROM due_dates WHERE document_id = ?1", [doc_id])?;
+        if !self.dues_frozen(doc_id)? {
+            self.conn().execute("DELETE FROM due_dates WHERE document_id = ?1", [doc_id])?;
+        }
         Ok(())
     }
 
@@ -378,13 +547,15 @@ impl Store {
         };
         // scadenze
         if let Some(totals) = totals.filter(|t| doc.kind.has_due_dates() && !t.net_to_pay.is_zero()) {
-            let payment = doc.payment.clone().unwrap_or_default();
-            let dues = calc::due_dates(doc.date, totals.net_to_pay, &payment);
-            for d in &dues {
-                self.conn().execute(
-                    "INSERT INTO due_dates(document_id, date, amount, mp_code, paid) VALUES (?1, ?2, ?3, ?4, '0')",
-                    params![doc.id, date_to_sql(d.date), dec_to_sql(d.amount), d.mp_code],
-                )?;
+            if !self.dues_frozen(doc.id)? {
+                let payment = doc.payment.clone().unwrap_or_default();
+                let dues = calc::due_dates(doc.date, totals.net_to_pay, &payment);
+                for d in &dues {
+                    self.conn().execute(
+                        "INSERT INTO due_dates(document_id, date, amount, mp_code, paid) VALUES (?1, ?2, ?3, ?4, '0')",
+                        params![doc.id, date_to_sql(d.date), dec_to_sql(d.amount), d.mp_code],
+                    )?;
+                }
             }
         }
         // magazzino
@@ -522,7 +693,7 @@ impl Store {
                 .conn()
                 .query_row(
                     "SELECT number, date FROM documents WHERE register = ?1 AND series = ?2 AND year = ?3 AND id <> ?4
-                     AND number IS NOT NULL AND number < ?5 ORDER BY number DESC LIMIT 1",
+                     AND status = 'EMESSO' AND number IS NOT NULL AND number < ?5 ORDER BY number DESC LIMIT 1",
                     params![reg, doc.series.trim(), year, doc.id, number],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -531,7 +702,7 @@ impl Store {
                 .conn()
                 .query_row(
                     "SELECT number, date FROM documents WHERE register = ?1 AND series = ?2 AND year = ?3 AND id <> ?4
-                     AND number IS NOT NULL AND number > ?5 ORDER BY number ASC LIMIT 1",
+                     AND status = 'EMESSO' AND number IS NOT NULL AND number > ?5 ORDER BY number ASC LIMIT 1",
                     params![reg, doc.series.trim(), year, doc.id, number],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -571,6 +742,7 @@ impl Store {
         // il numero resta riservato per evitare buchi nella numerazione
         let totals = calc::compute(&doc).ok();
         self.write_document_row(&mut doc, totals.as_ref())?;
+        self.write_dues(&doc, totals.as_ref())?;
         self.audit("document", id, "revert", &doc.title())?;
         tx.commit()?;
         self.document(id)
@@ -754,7 +926,64 @@ impl Store {
         if d.lines.iter().all(|l| l.kind == LineKind::Text) {
             return Err(StoreError::Invalid("Tutte le righe risultano già evase".into()));
         }
+        if target == DocKind::SelfInvoice {
+            self.prepare_self_invoice(&mut d, &sources)?;
+        }
         self.save_document(&d)
+    }
+
+    /// Autofattura o integrazione da fatture del fornitore: tipo proposto secondo il paese
+    /// del fornitore e la natura delle righe, estremi della fattura originale, IVA da integrare.
+    fn prepare_self_invoice(&self, d: &mut Document, sources: &[Document]) -> Result<()> {
+        let country = d.party.country.trim().to_uppercase();
+        let items: Vec<&DocLine> = d.lines.iter().filter(|l| l.kind == LineKind::Item).collect();
+        let mut goods = false;
+        for l in items {
+            if let Some(p) = l.product_id {
+                goods |= self.product(p)?.map(|x| !x.is_service).unwrap_or(false);
+            }
+        }
+        d.fe_type = match country.as_str() {
+            "" | "IT" => "TD16",
+            "SM" => "TD28",
+            c if openfatt_core::codes::PAESI_UE.contains(&c) => {
+                if goods {
+                    "TD18"
+                } else {
+                    "TD17"
+                }
+            }
+            _ => {
+                if goods {
+                    "TD19"
+                } else {
+                    "TD17"
+                }
+            }
+        }
+        .into();
+        d.payment_id = None;
+        d.payment = None;
+        d.withholdings.clear();
+        d.pension_fund = None;
+        d.stamp = Stamp::default();
+        d.vat_liability = "I".into();
+        d.related = sources
+            .iter()
+            .map(|s| RelatedDoc { kind: "FATTURA".into(), number: if s.external_number.trim().is_empty() { s.number_label() } else { s.external_number.trim().to_string() }, date: Some(s.date), ..Default::default() })
+            .collect();
+        d.causale = sources
+            .iter()
+            .map(|s| format!("Integrazione fattura n. {} del {} di {}", if s.external_number.trim().is_empty() { s.number_label() } else { s.external_number.trim().to_string() }, s.date.format("%d/%m/%Y"), s.party.display_name()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        // le righe arrivano senza IVA (reverse charge): si propone l'aliquota ordinaria
+        let vats = self.vat_codes()?;
+        let ordinary = vats.iter().find(|v| v.code == "22" && v.active).map(VatRef::from_code).unwrap_or(VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false });
+        for l in d.lines.iter_mut().filter(|l| l.kind == LineKind::Item && l.vat.rate.is_zero()) {
+            l.vat = ordinary.clone();
+        }
+        Ok(())
     }
 
     /// DDT d'origine delle righe (per i DatiDDT della fattura elettronica differita).
@@ -784,6 +1013,9 @@ impl Store {
         let mut doc = doc.clone();
         doc.id = 0;
         doc.version = 0;
+        if doc.lines.iter().any(|l| l.vat.split) {
+            doc.vat_liability = "S".into();
+        }
         if doc.number.is_some() && doc.status == DocStatus::Draft {
             doc.status = DocStatus::Issued;
         }

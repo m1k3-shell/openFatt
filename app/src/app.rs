@@ -18,7 +18,46 @@ enum PendingPec {
     Fetch,
 }
 
+/// Clic simulati per il collaudo automatico dell'interfaccia.
+#[derive(Default)]
+struct ScriptedClicks {
+    points: Vec<egui::Pos2>,
+    step: usize,
+    at: Option<std::time::Instant>,
+}
+
+impl ScriptedClicks {
+    fn from_env() -> Self {
+        let points = std::env::var("OPENFATT_CLICKS").unwrap_or_default().split(';').filter_map(|p| p.split_once(',')).filter_map(|(x, y)| Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))).collect();
+        ScriptedClicks { points, step: 0, at: Some(std::time::Instant::now() + std::time::Duration::from_millis(2500)) }
+    }
+    fn pending(&self) -> bool {
+        self.step / 3 < self.points.len()
+    }
+    fn ready(&self) -> bool {
+        self.pending() && self.at.map(|t| std::time::Instant::now() >= t).unwrap_or(false)
+    }
+    fn next_events(&mut self) -> Option<Vec<egui::Event>> {
+        let pos = *self.points.get(self.step / 3)?;
+        let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let ev = match self.step % 3 {
+            0 => egui::Event::PointerMoved(pos),
+            1 => button(true),
+            _ => button(false),
+        };
+        let same = self.points.get(self.step / 3 + 1) == Some(&pos);
+        self.at = Some(std::time::Instant::now() + std::time::Duration::from_millis(if self.step % 3 == 2 && !same { 900 } else if self.step % 3 == 2 { 30 } else { 40 }));
+        self.step += 1;
+        Some(vec![ev])
+    }
+}
+
 pub struct OpenFattApp {
+    backups: crate::backups::Manager,
+    backup_ui: ui::backup::State,
+    closing: bool,
+    force_quit: bool,
+    scripted: ScriptedClicks,
     cfg: AppConfig,
     store: Option<Store>,
     screen: Screen,
@@ -92,6 +131,11 @@ impl OpenFattApp {
             login: Default::default(),
             needs_login: false,
             heartbeat: std::time::Instant::now(),
+            scripted: ScriptedClicks::from_env(),
+            backups: crate::backups::Manager::load(),
+            backup_ui: Default::default(),
+            closing: false,
+            force_quit: false,
             pec_tx,
             pec_rx,
             pec_busy: None,
@@ -128,6 +172,9 @@ impl OpenFattApp {
                         Some(Screen::PriceLists)
                     }
                     "fatture" => Some(Screen::Documents(DocGroup::Invoices)),
+                    "ordini-fornitori" => Some(Screen::Documents(DocGroup::SupplierOrders)),
+                    "preventivi-fornitori" => Some(Screen::Documents(DocGroup::SupplierQuotes)),
+                    "autofatture" => Some(Screen::Documents(DocGroup::SelfInvoices)),
                     "preventivi" => Some(Screen::Documents(DocGroup::Quotes)),
                     "ddt" => Some(Screen::Documents(DocGroup::DeliveryNotes)),
                     "fe-inviate" => Some(Screen::EInvoicesOut),
@@ -177,6 +224,7 @@ impl OpenFattApp {
                     "carte" => Some(Screen::Extra(ui::business::Extra::Cards)),
                     "negozio" => Some(Screen::Extra(ui::business::Extra::Shop)),
                     "fineanno" => Some(Screen::Extra(ui::business::Extra::YearEnd)),
+                    "copie" => Some(Screen::Backup),
                     "conservazione" => Some(Screen::Extra(ui::business::Extra::Conservation)),
                     "produzione" => Some(Screen::Documents(DocGroup::Production)),
                     "utenti" => {
@@ -221,6 +269,82 @@ impl OpenFattApp {
         app
     }
 
+    /// Alla chiusura della finestra: si fa la copia e, se qualcosa è fermo da troppo, si avvisa.
+    fn closing_flow(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.force_quit && self.store.is_some() && !self.needs_login && self.backups.cfg.enabled && !self.backups.active().is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !self.closing {
+                self.closing = true;
+                // sempre, anche subito dopo un'altra copia: gli ultimi minuti di lavoro contano
+                if !self.backups.running() {
+                    self.backups.start();
+                }
+            }
+        }
+        if !self.closing {
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        self.backups.poll(&mut self.msgs);
+        let running = self.backups.running();
+        let problems = if running { Vec::new() } else { self.backups.overdue() };
+        let fatal = self.backups.fatal.clone();
+        if !running && problems.is_empty() && fatal.is_none() {
+            self.force_quit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let mut quit = false;
+        let mut retry = false;
+        let mut stay = false;
+        egui::Window::new("Copia di sicurezza").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.set_width(460.0);
+            if running {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(self.backups.progress_text());
+                });
+                ui.label(theme::muted("Il programma si chiude da solo appena la copia è verificata."));
+                ui.add_space(6.0);
+                if ui.button("Chiudi senza attendere").clicked() {
+                    quit = true;
+                }
+            } else {
+                ui.label(egui::RichText::new("Alcune copie non sono aggiornate:").color(theme::NEGATIVE));
+                if let Some(f) = &fatal {
+                    ui.label(f);
+                }
+                for (n, why) in &problems {
+                    ui.label(format!("{}: {}", n, why));
+                }
+                ui.label(theme::muted("Collega il disco o controlla la connessione e riprova."));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if theme::primary(ui, theme::icon::ARROWS_CLOCKWISE, "Riprova").clicked() {
+                        retry = true;
+                    }
+                    if theme::button(ui, "", "Torna al programma").clicked() {
+                        stay = true;
+                    }
+                    if theme::button(ui, "", "Chiudi comunque").clicked() {
+                        quit = true;
+                    }
+                });
+            }
+        });
+        if quit {
+            self.force_quit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if stay {
+            self.closing = false;
+        }
+        if retry {
+            self.backups.fatal = None;
+            self.backups.start();
+        }
+    }
+
     /// Chiude l'archivio aperto: copia di sicurezza del giorno e fine della sessione.
     fn close_store(&mut self) {
         if let Some(s) = self.store.take() {
@@ -242,6 +366,7 @@ impl OpenFattApp {
                 if !self.needs_login {
                     let _ = s.start_session(&host);
                 }
+                self.backups.on_archive_open(&s);
                 self.store = Some(s);
                 self.cfg.touch(&path);
                 self.screen = Screen::Home;
@@ -286,7 +411,7 @@ impl OpenFattApp {
         }
         let cfg = services::pec_config(store);
         if let Err(e) = cfg.validate() {
-            self.msgs.err(format!("{} (Impostazioni > PEC)", e));
+            self.msgs.err(format!("{} (Opzioni > PEC)", e));
             return;
         }
         let Some(pw) = self.password(store) else {
@@ -515,6 +640,10 @@ impl OpenFattApp {
                     self.ledger.show_reminders();
                     self.nav.push(Nav::Go(Screen::Dues));
                 }
+                Nav::Payments(v) => {
+                    self.ledger.show_view(v);
+                    self.nav.push(Nav::Go(Screen::Dues));
+                }
             }
         }
     }
@@ -600,6 +729,16 @@ impl OpenFattApp {
 }
 
 impl eframe::App for OpenFattApp {
+    /// Collaudo dell'interfaccia: clic simulati letti da OPENFATT_CLICKS ("x,y;x,y", in punti).
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if !self.scripted.ready() {
+            return;
+        }
+        if let Some(ev) = self.scripted.next_events() {
+            raw.events.extend(ev);
+        }
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let (Some(store), Some(e)) = (&self.store, &self.editor) {
             let _ = store.release_lock("document", e.doc.id);
@@ -608,6 +747,14 @@ impl eframe::App for OpenFattApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.scripted.pending() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        self.closing_flow(ctx);
+        if self.store.is_some() && !self.needs_login {
+            self.backups.tick(&mut self.msgs);
+            ctx.request_repaint_after(std::time::Duration::from_secs(if self.backups.running() { 1 } else { 30 }));
+        }
         self.poll_pec(ctx);
         while let Ok(r) = self.mail_rx.try_recv() {
             if let Some(store) = &self.store {
@@ -624,7 +771,8 @@ impl eframe::App for OpenFattApp {
         let pec_ok = self.store.as_ref().map(|s| services::pec_config(s).validate().is_ok()).unwrap_or(false);
         egui::TopBottomPanel::bottom("status").exact_height(30.0).frame(bar(theme::SURFACE)).show(ctx, |ui| {
             let busy = self.pec_busy.clone().or_else(|| self.composer.busy_text());
-            ui::shell::status_bar(ui, self.store.as_ref(), busy.as_deref(), pec_ok);
+            let summary = self.store.as_ref().map(|_| self.backups.summary());
+            ui::shell::status_bar(ui, self.store.as_ref(), busy.as_deref(), pec_ok, summary, &mut self.nav);
         });
 
         // segnale di presenza della postazione
@@ -653,14 +801,30 @@ impl eframe::App for OpenFattApp {
         } else {
             let store = self.store.as_ref().unwrap();
             self.badges.refresh(store);
-            egui::TopBottomPanel::top("bar1").exact_height(54.0).frame(bar(theme::SURFACE)).show(ctx, |ui| {
-                ui::shell::top_bar(ui, store, &self.cfg.recent, &mut self.search, self.pec_busy.is_some(), self.screen, &mut self.nav);
-            });
             let editor = self.editor.as_ref().map(|e| (format!("{} {}", e.doc.kind.label(), e.doc.number_label()), e.dirty));
-            egui::TopBottomPanel::top("bar2").exact_height(48.0).frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(egui::Margin::symmetric(12, 0))).show(ctx, |ui| {
-                ui::shell::menu_bar(ui, self.screen, editor, &self.badges, &mut self.nav);
+            egui::TopBottomPanel::top("toolbar").exact_height(62.0).frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(egui::Margin::symmetric(6, 0))).show(ctx, |ui| {
+                ui::shell::tool_bar(ui, store, &self.cfg.recent, &mut self.search, self.pec_busy.is_some(), self.screen, editor, &self.badges, &mut self.nav);
             });
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::GROUND).inner_margin(egui::Margin { left: 24, right: 24, top: 20, bottom: 12 })).show(ctx, |ui| {
+            if let Some(msg) = self.backups.banner() {
+                let mut hide = false;
+                egui::TopBottomPanel::top("backup_banner").frame(egui::Frame::new().fill(egui::Color32::from_rgb(0xff, 0xf1, 0xd6)).inner_margin(egui::Margin::symmetric(12, 5))).show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{}  {}", theme::icon::WARNING, msg)).color(theme::WARNING));
+                        if theme::ghost(ui, true, theme::icon::ARROW_RIGHT, "Copie di sicurezza").clicked() {
+                            self.nav.push(Nav::Go(Screen::Backup));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Più tardi").clicked() {
+                                hide = true;
+                            }
+                        });
+                    });
+                });
+                if hide {
+                    self.backups.banner_hidden = true;
+                }
+            }
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::GROUND).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 6 })).show(ctx, |ui| {
                 let store = self.store.as_ref().unwrap();
                 let mut cx = Ctx { store, msgs: &mut self.msgs, nav: &mut self.nav };
                 match self.screen {
@@ -686,6 +850,7 @@ impl eframe::App for OpenFattApp {
                     Screen::Inventory => ui::inventory::show(ui, &mut cx, &mut self.inventory),
                     Screen::Settings => ui::settings::show(ui, &mut cx, &mut self.settings),
                     Screen::Tools => ui::tools::show(ui, &mut cx, &mut self.tools),
+                    Screen::Backup => ui::backup::show(ui, &mut cx, &mut self.backup_ui, &mut self.backups),
                     Screen::Extra(x) => ui::business::show(ui, &mut cx, &mut self.biz, x),
                 }
             });

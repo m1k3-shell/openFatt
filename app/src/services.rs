@@ -127,7 +127,7 @@ pub fn create_einvoice(store: &Store, doc_id: i64) -> Result<(EInvoice, Vec<open
                 severity: Severity::Warning,
                 code: "GA-FIRMA".into(),
                 path: "Firma".into(),
-                message: format!("firma automatica non riuscita: {} (firmare da 'Fattura elettronica > Inviate')", err),
+                message: format!("firma automatica non riuscita: {} (firmare da 'Fatture elettr. > Fatture inviate')", err),
             }),
         }
     } else if e.is_pa() {

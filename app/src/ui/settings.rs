@@ -328,6 +328,9 @@ fn vat(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                 ui.label("");
                 ui.checkbox(&mut v.active, "Attiva");
                 ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut v.split_payment, "Scissione dei pagamenti (fatture alla Pubblica Amministrazione)");
+                ui.end_row();
             });
             ui.horizontal(|ui| {
                 if ui.button("Salva").clicked() && cx.msgs.check(cx.store.save_vat_code(v), "Aliquota salvata").is_some() {
@@ -353,7 +356,7 @@ fn vat(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         for v in list {
             ui.label(&v.code);
             ui.label(&v.description);
-            ui.label(format!("{}%", openfatt_core::money::fmt_it_trim(v.rate, 0, 2)));
+            ui.label(format!("{}%{}", openfatt_core::money::fmt_it_trim(v.rate, 0, 2), if v.split_payment { " sp" } else { "" }));
             ui.label(v.natura.clone().unwrap_or_default());
             ui.label(widgets::truncate(&v.legal_ref, 60));
             if ui.small_button("Modifica").clicked() {

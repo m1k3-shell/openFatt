@@ -1,0 +1,18 @@
+[package]
+name = "openfatt-backup"
+description = "Copie di sicurezza verificate su disco esterno, cartella cloud e WebDAV"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openfatt-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+base64.workspace = true
+ureq = "2"
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+getrandom = "0.2"

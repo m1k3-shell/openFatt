@@ -51,7 +51,7 @@ pub fn settings_tab(ui: &mut egui::Ui, cx: &mut Ctx, t: SignTab) {
     ui.add_space(6.0);
     match &mut c.source {
         SignSource::None => {
-            ui.label("Dalla schermata 'Fattura elettronica > Inviate': salvare l'XML, firmarlo con il proprio programma (es. Dike, ArubaSign, GoSign) e ricaricare il file .p7m con 'Carica file firmato'. Il programma verifica che il contenuto firmato coincida con la fattura.");
+            ui.label("Dalla schermata 'Fatture elettr. > Fatture inviate': salvare l'XML, firmarlo con il proprio programma (es. Dike, ArubaSign, GoSign) e ricaricare il file .p7m con 'Carica file firmato'. Il programma verifica che il contenuto firmato coincida con la fattura.");
         }
         SignSource::Store { thumbprint, label } => {
             if t.certs.is_none() {

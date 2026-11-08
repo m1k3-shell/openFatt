@@ -30,7 +30,7 @@ pub struct EditorState {
     confirm_delete: Option<usize>,
 }
 
-const KINDS: [DocKind; 12] = [
+const KINDS: [DocKind; 13] = [
     DocKind::Invoice,
     DocKind::AccompanyingInvoice,
     DocKind::CreditNote,
@@ -40,6 +40,7 @@ const KINDS: [DocKind; 12] = [
     DocKind::CustomerOrder,
     DocKind::DeliveryNote,
     DocKind::Proforma,
+    DocKind::SupplierQuote,
     DocKind::SupplierOrder,
     DocKind::GoodsReceipt,
     DocKind::StockTransfer,

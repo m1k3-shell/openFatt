@@ -58,7 +58,7 @@ pub fn kind_from_code(code: &str) -> (Option<DocKind>, &'static str) {
         "B" => (Some(DocKind::RetailSale), "Vendita al banco importata senza estremi del documento commerciale"),
         "R" => (None, "Ricevuta fiscale: non importata"),
         "G" => (Some(DocKind::Quote), "Rapporto d'intervento importato come preventivo"),
-        "S" => (Some(DocKind::SupplierOrder), "Preventivo fornitore importato come ordine fornitore"),
+        "S" => (Some(DocKind::SupplierQuote), ""),
         _ => (None, "Tipo documento sconosciuto"),
     }
 }
@@ -76,6 +76,7 @@ pub fn kind_to_code(k: DocKind) -> &'static str {
         DocKind::Fee => "P",
         DocKind::Proforma => "L",
         DocKind::SelfInvoice => "M",
+        DocKind::SupplierQuote => "S",
         DocKind::SupplierOrder => "E",
         DocKind::GoodsReceipt | DocKind::PurchaseInvoice | DocKind::PurchaseCreditNote => "H",
         DocKind::RetailSale => "B",
@@ -104,7 +105,7 @@ fn vat_from(node: Option<roxmltree::Node>, vat_codes: &[VatCode], warnings: &mut
             if let Some(v) = vat_codes.iter().find(|v| v.rate == r && v.natura.is_none()) {
                 VatRef::from_code(v)
             } else {
-                VatRef { vat_id: None, rate: r, natura: None, legal_ref: String::new() }
+                VatRef { vat_id: None, rate: r, natura: None, legal_ref: String::new(), split: false }
             }
         }
         _ => {
@@ -112,10 +113,10 @@ fn vat_from(node: Option<roxmltree::Node>, vat_codes: &[VatCode], warnings: &mut
                 if let Some(v) = vat_codes.iter().find(|v| v.natura.as_deref() == Some(nat.as_str())) {
                     return VatRef::from_code(v);
                 }
-                return VatRef { vat_id: None, rate: Decimal::ZERO, natura: Some(nat), legal_ref: descr };
+                return VatRef { vat_id: None, rate: Decimal::ZERO, natura: Some(nat), legal_ref: descr, split: false };
             }
             warnings.push(format!("Riga {}: codice IVA '{}' a zero senza natura: indicare la natura prima di emettere", line_no, code));
-            VatRef { vat_id: None, rate: Decimal::ZERO, natura: None, legal_ref: descr }
+            VatRef { vat_id: None, rate: Decimal::ZERO, natura: None, legal_ref: descr, split: false }
         }
     }
 }
@@ -240,7 +241,7 @@ pub fn parse_documents(xml: &str, vat_codes: &[VatCode]) -> Result<Vec<ImportedD
                     }
                 }
                 if line.vat.rate.is_zero() && line.vat.natura.is_none() && line.unit_price.is_zero() {
-                    line.vat = VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new() };
+                    line.vat = VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false };
                 }
                 doc.lines.push(line);
             }

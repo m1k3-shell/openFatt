@@ -2,7 +2,7 @@
 # Uso: tools\screenshot.ps1 -Archive <file.gadb> -Screen <nome> -Out <file.png> [-Click "x,y"]
 # -Click invia un clic alla sola finestra dell'app (coordinate dell'area client in pixel fisici);
 # -Type precompila la ricerca generale (variabile OPENFATT_SEARCH).
-param([string]$Archive, [string]$Screen = "", [string]$Out, [int]$Wait = 4, [string]$Click = "", [string]$Type = "")
+param([string]$Archive, [string]$Screen = "", [string]$Out, [int]$Wait = 4, [string]$Click = "", [string]$Type = "", [string]$Clicks = "")
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -21,9 +21,11 @@ public class W32 {
 [void][W32]::SetProcessDPIAware()
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root 'target\release\openfatt.exe'
+if ($env:OPENFATT_EXE) { $exe = $env:OPENFATT_EXE }
 $env:OPENFATT_ARCHIVE = $Archive
 $env:OPENFATT_SCREEN = $Screen
 $env:OPENFATT_SEARCH = $Type
+$env:OPENFATT_CLICKS = $Clicks
 $p = Start-Process -FilePath $exe -PassThru
 try {
   $h = [IntPtr]::Zero

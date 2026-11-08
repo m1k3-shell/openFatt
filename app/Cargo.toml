@@ -19,6 +19,7 @@ openfatt-interop.workspace = true
 openfatt-sign.workspace = true
 openfatt-pos.workspace = true
 openfatt-bank.workspace = true
+openfatt-backup.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 serde.workspace = true

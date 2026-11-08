@@ -404,21 +404,29 @@ impl Grid {
             .and_then(|g| vis.iter().position(|i| cols[*i].id == g))
             .or_else(|| vis.iter().position(|i| !cols[*i].total && !cols[*i].right && cols[*i].width >= 150.0))
             .unwrap_or(0);
+        // riga selezionata ben visibile: fondo blu, testo bianco
+        let saved_selection = ui.visuals().selection;
+        ui.visuals_mut().selection.bg_fill = theme::ROW_SELECTED;
+        ui.visuals_mut().selection.stroke.color = egui::Color32::WHITE;
         let mut tb = TableBuilder::new(ui)
             .id_salt(("grid", self.name))
             .striped(false)
             .resizable(true)
             .sense(egui::Sense::click())
             .max_scroll_height((height - totals_h).max(80.0))
+            .auto_shrink([false, false])
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         if checkboxes {
             tb = tb.column(Column::exact(34.0));
         }
         for (n, i) in vis.iter().enumerate() {
             let c = &cols[*i];
-            tb = tb.column(if n + 1 == vis.len() { Column::remainder().at_least(c.width.min(120.0)) } else { Column::initial(c.width).at_least(40.0).clip(true) });
+            let _ = n;
+            tb = tb.column(Column::initial(c.width).at_least(40.0).clip(true));
         }
-        tb.header(30.0, |mut h| {
+        // colonna vuota finale: le altre restano della loro larghezza
+        tb = tb.column(Column::remainder().at_least(0.0));
+        tb.header(24.0, |mut h| {
             if checkboxes {
                 h.col(|ui| {
                     let mut a = !rows.is_empty() && self.selected.len() == rows.len();
@@ -439,12 +447,13 @@ impl Grid {
                         if c.right {
                             ui.add_space(8.0);
                         }
-                        if ui.add(egui::Label::new(theme::medium(format!("{}{}", c.title, arrow)).size(13.0).color(theme::MUTED)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ordina").clicked() {
+                        if ui.add(egui::Label::new(theme::medium(format!("{}{}", c.title, arrow)).size(12.5).color(theme::INK_SOFT)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ordina").clicked() {
                             sort_click = Some(c.id);
                         }
                     });
                 });
             }
+            h.col(|_| {});
         })
         .body(|body| {
             body.rows(row_h, lines.len(), |mut row| {
@@ -466,6 +475,7 @@ impl Grid {
                                 }
                             });
                         }
+                        row.col(|_| {});
                         if row.response().clicked() {
                             toggle_group = Some(label.clone());
                         }
@@ -501,6 +511,7 @@ impl Grid {
                                 }
                             });
                         }
+                        row.col(|_| {});
                         let resp = row.response();
                         if resp.double_clicked() {
                             ev.opened = Some(k);
@@ -511,6 +522,7 @@ impl Grid {
                 }
             });
         });
+        ui.visuals_mut().selection = saved_selection;
         // totali sotto l'elenco
         let total_cols: Vec<&Col<T>> = vis.iter().map(|i| &cols[*i]).filter(|c| c.total).collect();
         if !total_cols.is_empty() {

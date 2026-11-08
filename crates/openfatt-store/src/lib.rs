@@ -40,7 +40,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use serde::{de::DeserializeOwned, Serialize};
 
-pub use documents::{DocSummary, DocFilter, DdtSource};
+pub use documents::{DocSummary, DocFilter, DdtSource, OrderProgress};
 pub use extras::{add_months, copy_line, intent_amount, period_text, Attachment, IntentUsage, LastPrice, ProductImport, Recurrence};
 pub use annual::{region_of, AnnualVat, Quadro, Rigo, REGIONS};
 pub use agenda::{AgendaItem, AgendaKind, Card, CardKind, CardMove, LoyaltySettings};
@@ -396,6 +396,7 @@ impl Store {
                 natura: natura.map(|s| s.to_string()),
                 legal_ref: rif.into(),
                 active: true,
+                split_payment: false,
             };
             let list = vec![
                 d("22", "IVA 22%", 22, None, ""),
@@ -415,6 +416,17 @@ impl Store {
                 d("N6.9", "Reverse charge altri casi", 0, Some("N6.9"), "Inversione contabile art. 17 DPR 633/72"),
                 d("N7", "IVA assolta in altro Stato UE", 0, Some("N7"), "IVA assolta in altro Stato UE"),
             ];
+            let split = |code: &str, rate: i64| model::VatCode {
+                id: 0,
+                code: code.into(),
+                description: format!("Imponibile {}% con scissione dei pagamenti", rate),
+                rate: Decimal::from(rate),
+                natura: None,
+                legal_ref: "Scissione dei pagamenti art. 17-ter DPR 633/72".into(),
+                active: true,
+                split_payment: true,
+            };
+            let list: Vec<model::VatCode> = list.into_iter().chain([split("22sp", 22), split("10sp", 10), split("5sp", 5), split("4sp", 4)]).collect();
             for v in list {
                 self.save_vat_code(&v)?;
             }
@@ -531,6 +543,41 @@ impl Store {
         self.conn.execute("DELETE FROM payment_methods WHERE id = ?1", [id])?;
         Ok(())
     }
+}
+
+/// Tabelle contate nelle copie di sicurezza.
+const SNAPSHOT_TABLES: [&str; 5] = ["documents", "parties", "products", "due_dates", "attachments"];
+
+/// Controlla che un file sia un archivio integro e ne restituisce i conteggi principali.
+pub fn check_archive(path: &Path) -> Result<std::collections::BTreeMap<String, i64>> {
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI)?;
+    let check: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if check != "ok" {
+        return Err(StoreError::Invalid(format!("integrità: {}", check)));
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for t in SNAPSHOT_TABLES {
+        let n: i64 = c.query_row(&format!("SELECT COUNT(*) FROM {}", t), [], |r| r.get(0))?;
+        out.insert(t.to_string(), n);
+    }
+    Ok(out)
+}
+
+/// Istantanea coerente di un archivio, anche in uso: con una connessione propria, quindi
+/// si può fare da un'altra attività. La copia viene controllata prima di restituirla.
+pub fn snapshot_archive(source: &Path, dest: &Path) -> Result<std::collections::BTreeMap<String, i64>> {
+    if dest.exists() {
+        std::fs::remove_file(dest).map_err(|e| StoreError::Invalid(e.to_string()))?;
+    }
+    let c = Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_URI)?;
+    c.busy_timeout(std::time::Duration::from_secs(60))?;
+    c.execute("VACUUM INTO ?1", [dest.to_string_lossy().to_string()])?;
+    drop(c);
+    let counts = check_archive(dest);
+    if counts.is_err() {
+        let _ = std::fs::remove_file(dest);
+    }
+    counts
 }
 
 #[cfg(test)]

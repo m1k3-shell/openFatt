@@ -168,7 +168,7 @@ fn text_line_vat(doc: &Document) -> VatRef {
         .iter()
         .find(|l| l.kind == LineKind::Item)
         .map(|l| l.vat.clone())
-        .unwrap_or(VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new() })
+        .unwrap_or(VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false })
 }
 
 /// Calcola tutti i totali di un documento.
@@ -372,6 +372,7 @@ pub fn compute(doc: &Document) -> Result<Totals, CalcError> {
             rate: Decimal::ZERO,
             natura: Some("N1".into()),
             legal_ref: "Escluso art. 15 DPR 633/72".into(),
+            split: false,
         };
         lines.push(LineCalc {
             index: None,
@@ -410,7 +411,14 @@ pub fn compute(doc: &Document) -> Result<Totals, CalcError> {
         }
     }
 
-    let liability = if doc.vat_liability.trim().is_empty() { "I".to_string() } else { doc.vat_liability.trim().to_string() };
+    // un'aliquota "sp" (scissione dei pagamenti) vale per tutto il documento
+    let liability = if doc.lines.iter().any(|l| l.vat.split) {
+        "S".to_string()
+    } else if doc.vat_liability.trim().is_empty() {
+        "I".to_string()
+    } else {
+        doc.vat_liability.trim().to_string()
+    };
 
     let mut vat_rows = Vec::new();
     for (key, mut row) in rows {
@@ -646,7 +654,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn vat(rate: Decimal, natura: Option<&str>) -> VatRef {
-        VatRef { vat_id: None, rate, natura: natura.map(|s| s.to_string()), legal_ref: String::new() }
+        VatRef { vat_id: None, rate, natura: natura.map(|s| s.to_string()), legal_ref: String::new(), split: false }
     }
 
     fn line(qty: Decimal, price: Decimal, disc: &str, v: VatRef) -> DocLine {

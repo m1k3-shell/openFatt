@@ -175,6 +175,9 @@ impl Store {
                 params![r.template_id, date_to_sql(r.next_date), r.active as i64, data, r.id],
             )?;
         }
+        // il modello resta fuori da numerazione e scadenze
+        self.conn().execute("UPDATE documents SET number = NULL, data = json_set(data, '$.number', json('null')) WHERE id = ?1", [r.template_id])?;
+        self.conn().execute("DELETE FROM due_dates WHERE document_id = ?1", [r.template_id])?;
         self.audit("recurring", r.id, "save", &r.description)?;
         Ok(r)
     }

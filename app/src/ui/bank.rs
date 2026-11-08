@@ -56,6 +56,16 @@ pub struct State {
     settle: Option<(i64, NaiveDate, String)>,
     confirm_cancel: Option<i64>,
     confirm_unpaid: Option<(i64, String)>,
+    /// Voce corrente dell'elenco (l'ultima cliccata).
+    current: Option<i64>,
+    /// Operazione in attesa della scelta delle voci.
+    ask: Option<BankOp>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BankOp {
+    Export,
+    Print,
 }
 
 impl Default for State {
@@ -72,6 +82,8 @@ impl Default for State {
             settle: None,
             confirm_cancel: None,
             confirm_unpaid: None,
+            current: None,
+            ask: None,
         }
     }
 }
@@ -122,7 +134,7 @@ fn bank_text(kind: BankKind, p: &Party) -> String {
 
 fn company_problem(kind: BankKind, s: &BankSettings, iban: &str) -> Option<&'static str> {
     if openfatt_bank::it_bank_codes(iban).is_none() {
-        return Some("Manca l'IBAN italiano dell'azienda (Impostazioni > Azienda).");
+        return Some("Manca l'IBAN italiano dell'azienda (Opzioni > Azienda).");
     }
     match kind {
         BankKind::Riba if s.sia.trim().len() != 5 => Some("Per le Ri.Ba. serve il codice SIA dell'azienda."),
@@ -142,22 +154,19 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         (" · ", false),
         (&format!("€ {} di bonifici da disporre", eur(sum(BankKind::Sct))), false),
     ]);
-    theme::title_row(ui, &["Contabilità"], "Distinte bancarie", Some(sub), |ui| {
+    let title = match st.tab {
+        Tab::Riba => "RIBA da emettere",
+        Tab::Sdd => "Addebiti SDD da emettere",
+        Tab::Sct => "Bonifici da pagare",
+        Tab::Batches => "Distinte emesse",
+    };
+    let _ = sub;
+    theme::title_row(ui, &[], title, None, |ui| {
         if theme::ghost(ui, true, icon::GEAR, "Codici della banca").clicked() {
             cx.nav.push(Nav::BankSettings);
         }
     });
-    ui.horizontal(|ui| {
-        for (t, label, n) in [
-            (Tab::Riba, "Ri.Ba. da presentare", count(BankKind::Riba)),
-            (Tab::Sdd, "Addebiti SDD da presentare", count(BankKind::Sdd)),
-            (Tab::Sct, "Bonifici da disporre", count(BankKind::Sct)),
-            (Tab::Batches, "Distinte emesse", batches.iter().filter(|b| b.status == BatchStatus::Issued).count()),
-        ] {
-            ui.selectable_value(&mut st.tab, t, format!("{} ({})", label, n));
-        }
-    });
-    ui.add_space(8.0);
+    let _ = (&count, &batches);
     dialogs(ui, cx, st);
     match st.tab.kind() {
         Some(kind) => pending_view(ui, cx, st, kind, pending.into_iter().find(|p| p.0 == kind).map(|p| p.1).unwrap_or_default()),
@@ -279,16 +288,17 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
     }
     let selected: Vec<&DueRow> = list.iter().filter(|d| st.sel.contains(&d.id)).collect();
     let sel_total: Decimal = selected.iter().map(|d| d.residual()).sum();
+    // voci che la banca può accettare
+    let visible: Vec<DueRow> = list.iter().zip(&problems).filter(|(d, p)| p.is_none() && !past(d)).map(|(d, _)| d.clone()).collect();
     ui.horizontal(|ui| {
-        let n = selected.len();
-        let label = match kind {
-            BankKind::Sct => format!("Crea distinta bonifici ({} · € {})", n, eur(sel_total)),
-            _ => format!("Crea distinta ({} · € {})", n, eur(sel_total)),
-        };
-        if theme::primary_enabled(ui, n > 0, icon::FILE_ARROW_DOWN, &label).on_hover_text("Crea il file da caricare nell'home banking e registra la distinta").clicked() {
-            let dues: Vec<DueRow> = selected.iter().map(|d| (*d).clone()).collect();
-            create(cx, st, kind, &dues);
+        let has = !visible.is_empty();
+        if theme::primary_enabled(ui, has, icon::FILE_ARROW_DOWN, "Esporta file per home banking").on_hover_text("File CBI da caricare nel portale della banca (InBank e altri): la distinta viene registrata").clicked() {
+            st.ask = Some(BankOp::Export);
         }
+        if theme::button_enabled(ui, has, icon::PRINTER, "Stampa distinta").on_hover_text("Solo stampa: non registra la distinta").clicked() {
+            st.ask = Some(BankOp::Print);
+        }
+        ui.label(theme::muted(format!("{} spuntate · € {}", selected.len(), eur(sel_total))));
         if kind == BankKind::Sct {
             ui.label(theme::muted("Esecuzione il"));
             widgets::date_field(ui, "sct_exec", &mut st.execution);
@@ -309,7 +319,47 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
         });
         return;
     }
+    // scelta delle voci su cui eseguire l'operazione
+    if let Some(op) = st.ask {
+        let mut chosen: Option<Vec<DueRow>> = None;
+        let mut close = false;
+        let cur: Option<DueRow> = st.current.and_then(|id| visible.iter().find(|d| d.id == id)).cloned();
+        let sel_ok: Vec<DueRow> = visible.iter().filter(|d| st.sel.contains(&d.id)).cloned().collect();
+        egui::Window::new("Conferma").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+            ui.label(RichText::new("Su che voci vuoi eseguire l'operazione?").size(14.0));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if theme::button_enabled(ui, cur.is_some(), "", "Voce corrente").clicked() {
+                    chosen = cur.clone().map(|d| vec![d]);
+                }
+                if !sel_ok.is_empty() && sel_ok.len() != visible.len() && theme::button(ui, "", &format!("Voci spuntate ({})", sel_ok.len())).clicked() {
+                    chosen = Some(sel_ok.clone());
+                }
+                if theme::button(ui, "", &format!("Voci visibili ({})", visible.len())).clicked() {
+                    chosen = Some(visible.clone());
+                }
+                if theme::button(ui, "", "Annulla").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if let Some(dues) = chosen {
+            st.ask = None;
+            match op {
+                BankOp::Export => create(cx, st, kind, &dues),
+                BankOp::Print => {
+                    let pdf = bankfiles::preview_pdf(cx.store, kind, &dues);
+                    if let Err(e) = services::open_bytes("Distinta.pdf", &pdf) {
+                        cx.msgs.err(e);
+                    }
+                }
+            }
+        } else if close {
+            st.ask = None;
+        }
+    }
     let mut toggle = None;
+    let mut current = None;
     let mut fix = None;
     let avail = ui.available_height();
     theme::card_frame().show(ui, |ui| {
@@ -334,11 +384,11 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
                 }
             })
             .body(|body| {
-                body.rows(42.0, list.len(), |mut row| {
+                body.rows(26.0, list.len(), |mut row| {
                     let i = row.index();
                     let d = &list[i];
                     let mut on = st.sel.contains(&d.id);
-                    row.set_selected(on);
+                    row.set_selected(st.current == Some(d.id));
                     row.col(|ui| {
                         if ui.checkbox(&mut on, "").changed() {
                             toggle = Some(d.id);
@@ -348,11 +398,14 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
                         ui.label(RichText::new(d.date.format("%d/%m/%Y").to_string()).color(if d.date < today { theme::NEGATIVE } else { theme::INK }));
                     });
                     row.col(|ui| {
-                        ui.label(theme::medium(&d.party_name));
+                        ui.label(&d.party_name);
                     });
                     row.col(|ui| {
                         if ui.link(&d.doc_label).clicked() {
                             cx.nav.push(Nav::OpenDocument(d.document_id));
+                        }
+                        if d.draft {
+                            theme::pill(ui, "bozza", Tone::Warning);
                         }
                     });
                     row.col(|ui| {
@@ -377,7 +430,7 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
                         _ => {}
                     });
                     if row.response().clicked() {
-                        toggle = Some(d.id);
+                        current = Some(d.id);
                     }
                 });
             });
@@ -386,6 +439,9 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
         if !st.sel.remove(&id) {
             st.sel.insert(id);
         }
+    }
+    if current.is_some() {
+        st.current = current;
     }
     if let Some((role, id, name)) = fix {
         cx.nav.push(Nav::FindParty(if role == PartyRole::Supplier { PartyRole::Supplier } else { PartyRole::Customer }, id, name));
@@ -588,7 +644,7 @@ pub fn settings_tab(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut Option<BankSetting
         ui.label(theme::medium(if c.iban.is_empty() { "IBAN non indicato".to_string() } else { format!("{}  {}", c.iban, c.bank_name) }));
         ui.label(match &ok {
             Some((abi, cab, _)) => RichText::new(format!("ABI {} · CAB {} (si modifica in Azienda)", abi, cab)).color(theme::MUTED),
-            None => RichText::new("serve un IBAN italiano valido in Impostazioni > Azienda").color(theme::NEGATIVE),
+            None => RichText::new("serve un IBAN italiano valido in Opzioni > Azienda").color(theme::NEGATIVE),
         });
         ui.end_row();
         ui.label("Codice SIA");

@@ -91,7 +91,7 @@ pub fn sign(data: &[u8], source: &SignSource, pfx_password: &str) -> Result<Vec<
     #[cfg(windows)]
     {
         match source {
-            SignSource::None => Err(SignError("Nessun certificato di firma configurato (Impostazioni > Firma digitale)".into())),
+            SignSource::None => Err(SignError("Nessun certificato di firma configurato (Opzioni > Firma digitale)".into())),
             SignSource::Store { thumbprint, .. } => win::sign_with_store_cert(data, thumbprint),
             SignSource::Pfx { path } => {
                 let pfx = std::fs::read(path).map_err(|e| SignError(format!("Impossibile leggere {}: {}", path, e)))?;

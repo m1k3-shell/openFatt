@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use chrono::NaiveDate;
+use rusqlite::params;
 use openfatt_fbread::{Dump, TableDump};
 use rust_decimal::Decimal;
 
@@ -212,11 +213,11 @@ impl Store {
             }
             let natura = if acq_rc { Some("N6.9") } else if rate.is_zero() { natura_of_class(class).or(Some("N2.2")) } else { None };
             let rate = if acq_rc { Decimal::ZERO } else { rate };
-            let found = vats.iter().find(|v| v.rate == rate && v.natura.as_deref() == natura).cloned();
+            let found = vats.iter().find(|v| v.rate == rate && v.natura.as_deref() == natura && v.split_payment == split).cloned();
             let v = match found {
                 Some(v) => v,
                 None => {
-                    let nv = VatCode { id: 0, code: code.clone(), description: desc.to_string(), rate, natura: natura.map(|n| n.to_string()), legal_ref: if rate.is_zero() { desc.to_string() } else { String::new() }, active: true };
+                    let nv = VatCode { id: 0, code: code.clone(), description: desc.to_string(), rate, natura: natura.map(|n| n.to_string()), legal_ref: if rate.is_zero() { desc.to_string() } else { String::new() }, active: true, split_payment: split };
                     let id = match self.save_vat_code(&nv) {
                         Ok(id) => id,
                         Err(_) => self.save_vat_code(&VatCode { code: format!("EF-{}", code), ..nv.clone() })?,
@@ -272,6 +273,29 @@ impl Store {
             rep.warnings.push("Agenti importati senza percentuale di provvigione: indicarla in Analisi > Agenti".into());
         }
         let agent_id = |name: &str| agents.iter().find(|a| a.name.eq_ignore_ascii_case(name.trim())).map(|a| a.id);
+
+        // ---- listini: il primo è il prezzo base dell'articolo, gli altri listini veri
+        let mut list_map: HashMap<i64, i64> = HashMap::new();
+        let (ls_rows, ls) = rows(dump, "TListini");
+        let existing_lists = self.price_lists()?;
+        for r in ls_rows {
+            let Some(n) = int(ls, r, "IDListino") else { continue };
+            let name = s(ls, r, "NomeListino");
+            if n == 1 {
+                if !name.is_empty() {
+                    self.set_setting("base_list_name", &name)?;
+                }
+                continue;
+            }
+            if !flag(ls, r, "Visibile") || name.is_empty() {
+                continue;
+            }
+            let l = match existing_lists.iter().find(|x| x.name.eq_ignore_ascii_case(name)) {
+                Some(x) => x.clone(),
+                None => self.save_price_list(&openfatt_core::pricing::PriceList { name: name.to_string(), kind: openfatt_core::pricing::PriceListKind::Manual, ..Default::default() })?,
+            };
+            list_map.insert(n, l.id);
+        }
 
         // ---- clienti e fornitori
         let mut party_map: HashMap<i64, Party> = HashMap::new();
@@ -336,6 +360,7 @@ impl Store {
             if p.name.trim().is_empty() {
                 p.name = format!("Soggetto {}", old);
             }
+            p.price_list_id = int(an, r, "IDListinoDefault").and_then(|n| list_map.get(&n).copied());
             let saved = match self.save_party(&p) {
                 Ok(x) => x,
                 Err(StoreError::Invalid(e)) if e.contains("codice") || e.contains("Codice") => self.save_party(&Party { code: String::new(), ..p.clone() })?,
@@ -376,6 +401,18 @@ impl Store {
                 manage_stock: !service && flag(ar, r, "GestMagazzino"),
                 supplier_id: int(ar, r, "IDFornitore").and_then(|f| party_map.get(&f)).map(|p| p.id),
                 supplier_code: s(ar, r, "CodArticoloForn").into(),
+                supplier_price: dec(ar, r, "PrezzoNettoForn"),
+                supplier_notes: s(ar, r, "NoteForn").into(),
+                producer: s(ar, r, "Produttore").into(),
+                url: s(ar, r, "Url").into(),
+                dim_unit: s(ar, r, "UdmDim").into(),
+                dim_net: [dec(ar, r, "DimNettaX"), dec(ar, r, "DimNettaY"), dec(ar, r, "DimNettaZ")],
+                dim_pack: [dec(ar, r, "DimImballoX"), dec(ar, r, "DimImballoY"), dec(ar, r, "DimImballoZ")],
+                weight_unit: s(ar, r, "UdmPeso").into(),
+                weight_net: dec(ar, r, "PesoNetto"),
+                weight_gross: dec(ar, r, "PesoLordo"),
+                order_days: s(ar, r, "GgOrdine").parse().unwrap_or(0),
+                order_multiple: dec(ar, r, "OrdinaAMultipliDi"),
                 notes: s(ar, r, "Note").into(),
                 eco_fee: dec(ar, r, "EcoContribNetto"),
                 online: flag(ar, r, "PubblicaSuWeb"),
@@ -385,8 +422,27 @@ impl Store {
                 Ok(x) => x,
                 Err(_) => self.save_product(&Product { barcode: String::new(), ..p.clone() })?,
             };
+            for (n, l) in &list_map {
+                let v = dec(ar, r, &format!("PrezzoNetto{}", n));
+                if !v.is_zero() {
+                    self.set_price_list_item(*l, saved.id, Decimal::ZERO, Some(v))?;
+                }
+            }
             prod_map.insert(old, saved);
             rep.products += 1;
+        }
+        // fornitori aggiuntivi di ogni articolo, col loro codice e prezzo
+        let (af_rows, af) = rows(dump, "TArticoliForn");
+        for r in af_rows {
+            let (Some(a), Some(f)) = (int(af, r, "IDArticolo"), int(af, r, "IDFornitore")) else { continue };
+            let (Some(p), Some(sup)) = (prod_map.get(&a).cloned(), party_map.get(&f)) else { continue };
+            if p.supplier_id == Some(sup.id) || p.other_suppliers.iter().any(|x| x.supplier_id == sup.id) {
+                continue;
+            }
+            let mut p = p;
+            p.other_suppliers.push(ProductSupplier { supplier_id: sup.id, code: s(af, r, "CodArticoloForn").into(), price: dec(af, r, "PrezzoNettoForn"), notes: s(af, r, "NoteForn").into() });
+            let p = self.save_product(&p)?;
+            prod_map.insert(a, p);
         }
         // distinte base
         let (db_rows, dbt) = rows(dump, "TDiba");
@@ -442,6 +498,7 @@ impl Store {
         let mut docs: Vec<&Row> = dt_rows.iter().collect();
         docs.sort_by_key(|r| (date(dt, r, "Data"), int(dt, r, "Num")));
         let mut doc_map: HashMap<i64, i64> = HashMap::new();
+        let mut line_map: HashMap<i64, (i64, i64)> = HashMap::new();
         let mut mismatch = 0usize;
         for r in docs {
             let Some(old) = int(dt, r, "IDDoc") else { continue };
@@ -519,6 +576,15 @@ impl Store {
             d.causale = s(dt, r, "FE_Causale").into();
             d.stamp.mode = StampMode::No;
             d.legacy_fe = kind.is_fiscal();
+            if kind.has_order_state() {
+                d.order_status = match s(dt, r, "StatoOrdine") {
+                    "Conf" => OrderStatus::Confirmed,
+                    "ParzConcl" => OrderStatus::Partial,
+                    "Concl" => OrderStatus::Concluded,
+                    _ => OrderStatus::ToConfirm,
+                };
+                d.expected_date = date(dt, r, "DataPrevistaConclOrdine");
+            }
             if kind.has_transport() {
                 d.transport = Some(Transport {
                     reason: s(dt, r, "CausaleTrasporto").into(),
@@ -555,16 +621,20 @@ impl Store {
             }
             let mut any_split = false;
             let mut rc_purchase = false;
+            let mut old_lines: Vec<Option<i64>> = Vec::new();
             for l in lines_by_doc.get(&old).cloned().unwrap_or_default() {
                 let code_iva = s(dr, l, "CodIva");
                 let desc = s(dr, l, "Desc").to_string();
+                // righe vuote e descrittive saltate restano allineate grazie a questo elenco
+                old_lines.resize(d.lines.len(), None);
+                old_lines.push(int(dr, l, "IDDocRiga"));
                 if code_iva.is_empty() && dec(dr, l, "PrezzoNetto").is_zero() && dec(dr, l, "Qta").is_zero() {
                     if !desc.is_empty() {
                         d.lines.push(DocLine { kind: LineKind::Text, description: desc, ..Default::default() });
                     }
                     continue;
                 }
-                let (vat, split, rc) = vat_map.get(code_iva).cloned().unwrap_or((VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new() }, false, false));
+                let (vat, split, rc) = vat_map.get(code_iva).cloned().unwrap_or((VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false }, false, false));
                 any_split |= split;
                 rc_purchase |= rc;
                 let product = int(dr, l, "IDArticoloScaricato").and_then(|a| prod_map.get(&a));
@@ -591,7 +661,7 @@ impl Store {
             // spese del documento (trasporto, incasso...)
             let spese = if d.prices_include_vat { dec(dt, r, "Spese_ImportoIvato") } else { dec(dt, r, "Spese_ImportoNetto") };
             if !spese.is_zero() {
-                let (vat, _, _) = vat_map.get(s(dt, r, "Spese_CodIva")).cloned().unwrap_or((VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new() }, false, false));
+                let (vat, _, _) = vat_map.get(s(dt, r, "Spese_CodIva")).cloned().unwrap_or((VatRef { vat_id: None, rate: Decimal::from(22), natura: None, legal_ref: String::new(), split: false }, false, false));
                 d.lines.push(DocLine { description: if s(dt, r, "Spese_Nome").is_empty() { "Spese".into() } else { s(dt, r, "Spese_Nome").into() }, unit_price: spese, vat, ..Default::default() });
             }
             if any_split {
@@ -683,11 +753,24 @@ impl Store {
                     }
                 }
             }
+            for (i, ol) in old_lines.iter().enumerate() {
+                if let (Some(ol), Some(sl)) = (ol, saved.lines.get(i)) {
+                    line_map.insert(*ol, (sl.id, saved.id));
+                }
+            }
             doc_map.insert(old, saved.id);
             rep.documents += 1;
         }
         if mismatch > 20 {
             rep.warnings.push(format!("... e altri {} documenti con totale diverso", mismatch - 20));
+        }
+        // collegamenti riga per riga con i documenti d'origine (ordine -> arrivo, DDT -> fattura)
+        for r in dr_rows {
+            if let (Some(this), Some(src)) = (int(dr, r, "IDDocRiga"), int(dr, r, "IDDocRigaIncluso")) {
+                if let (Some((tl, _)), Some((sl, sd))) = (line_map.get(&this), line_map.get(&src)) {
+                    self.conn().execute("UPDATE doc_lines SET source_line_id = ?1, source_doc_id = ?2 WHERE id = ?3", params![sl, sd, tl])?;
+                }
+            }
         }
         // movimenti di magazzino non legati a documenti (carichi iniziali, rettifiche)
         for m in free_moves {

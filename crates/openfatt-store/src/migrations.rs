@@ -368,6 +368,13 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX ix_products_code_nocase ON products(code COLLATE NOCASE);
     CREATE INDEX ix_parties_role ON parties(role, active);
     "#,
+    r#"
+    INSERT OR IGNORE INTO vat_codes(code, data) SELECT '22sp', '{"id":0,"code":"22sp","description":"Imponibile 22% con scissione dei pagamenti","rate":"22","natura":null,"legal_ref":"Scissione dei pagamenti art. 17-ter DPR 633/72","active":true,"split_payment":true}' WHERE EXISTS (SELECT 1 FROM vat_codes);
+    INSERT OR IGNORE INTO vat_codes(code, data) SELECT '10sp', '{"id":0,"code":"10sp","description":"Imponibile 10% con scissione dei pagamenti","rate":"10","natura":null,"legal_ref":"Scissione dei pagamenti art. 17-ter DPR 633/72","active":true,"split_payment":true}' WHERE EXISTS (SELECT 1 FROM vat_codes);
+    INSERT OR IGNORE INTO vat_codes(code, data) SELECT '5sp', '{"id":0,"code":"5sp","description":"Imponibile 5% con scissione dei pagamenti","rate":"5","natura":null,"legal_ref":"Scissione dei pagamenti art. 17-ter DPR 633/72","active":true,"split_payment":true}' WHERE EXISTS (SELECT 1 FROM vat_codes);
+    INSERT OR IGNORE INTO vat_codes(code, data) SELECT '4sp', '{"id":0,"code":"4sp","description":"Imponibile 4% con scissione dei pagamenti","rate":"4","natura":null,"legal_ref":"Scissione dei pagamenti art. 17-ter DPR 633/72","active":true,"split_payment":true}' WHERE EXISTS (SELECT 1 FROM vat_codes);
+    CREATE INDEX IF NOT EXISTS ix_doc_lines_source ON doc_lines(source_doc_id);
+    "#,
 ];
 
 pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

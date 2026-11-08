@@ -28,6 +28,13 @@ pub const NEGATIVE: Color32 = Color32::from_rgb(0xc4, 0x24, 0x2a);
 pub const WARNING: Color32 = Color32::from_rgb(0x92, 0x40, 0x0e);
 pub const TRACK: Color32 = Color32::from_rgb(0xdf, 0xe3, 0xe8);
 pub const CHART_MUTED: Color32 = Color32::from_rgb(0xc3, 0xc8, 0xcf);
+/// Barra del titolo di ogni sezione.
+pub const BAR: Color32 = Color32::from_rgb(0xe6, 0xec, 0xf5);
+/// Sfondo del pulsante della barra sotto il puntatore e di quello corrente.
+pub const HOVER: Color32 = Color32::from_rgb(0xee, 0xf3, 0xfa);
+pub const CURRENT: Color32 = Color32::from_rgb(0xd6, 0xe6, 0xfa);
+/// Riga selezionata negli elenchi.
+pub const ROW_SELECTED: Color32 = Color32::from_rgb(0x1f, 0x74, 0xdb);
 
 const GEIST_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Geist-Regular.ttf");
 const GEIST_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Geist-Medium.ttf");
@@ -74,18 +81,18 @@ pub fn install(ctx: &egui::Context) {
 
     let mut style = (*ctx.style()).clone();
     style.text_styles = [
-        (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
-        (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(14.0, medium_family())),
-        (TextStyle::Heading, FontId::new(24.0, bold_family())),
+        (TextStyle::Small, FontId::new(11.5, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(13.0, medium_family())),
+        (TextStyle::Heading, FontId::new(20.0, bold_family())),
         (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
     ]
     .into();
     let sp = &mut style.spacing;
-    sp.item_spacing = Vec2::new(8.0, 8.0);
-    sp.button_padding = Vec2::new(12.0, 6.0);
-    sp.interact_size = Vec2::new(40.0, 32.0);
-    sp.window_margin = Margin::same(16);
+    sp.item_spacing = Vec2::new(6.0, 5.0);
+    sp.button_padding = Vec2::new(9.0, 3.0);
+    sp.interact_size = Vec2::new(40.0, 24.0);
+    sp.window_margin = Margin::same(12);
     sp.menu_margin = Margin::same(6);
     sp.combo_height = 320.0;
     sp.icon_width = 16.0;
@@ -112,7 +119,7 @@ pub fn install(ctx: &egui::Context) {
     v.text_cursor.stroke = Stroke::new(2.0_f32, INK);
     v.striped = false;
     v.interact_cursor = Some(egui::CursorIcon::PointingHand);
-    let r = CornerRadius::same(6);
+    let r = CornerRadius::same(3);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = SURFACE;
     w.noninteractive.weak_bg_fill = SURFACE;
@@ -185,14 +192,14 @@ pub fn primary_enabled(ui: &mut Ui, enabled: bool, icon: &str, text: &str) -> Re
     }
     ui.scope(|ui| {
         flat_visuals(ui, PRIMARY, Color32::from_rgb(0x2e, 0x2e, 0x2e), Color32::BLACK);
-        ui.add(egui::Button::new(RichText::new(label(icon, text)).family(medium_family()).color(Color32::WHITE)).min_size(Vec2::new(0.0, 36.0)))
+        ui.add(egui::Button::new(RichText::new(label(icon, text)).family(medium_family()).color(Color32::WHITE)).min_size(Vec2::new(0.0, 27.0)))
     })
     .inner
 }
 
 /// Pulsante normale (bianco con bordo), alto 36.
 pub fn button_widget(icon: &str, text: &str) -> egui::Button<'static> {
-    egui::Button::new(medium(label(icon, text))).min_size(Vec2::new(0.0, 36.0))
+    egui::Button::new(medium(label(icon, text))).min_size(Vec2::new(0.0, 27.0))
 }
 pub fn button(ui: &mut Ui, icon: &str, text: &str) -> Response {
     ui.add(button_widget(icon, text))
@@ -225,33 +232,22 @@ pub fn icon_button(ui: &mut Ui, icon: &str, tip: &str) -> Response {
     .on_hover_text(tip)
 }
 
-/// Riga del titolo: percorso, titolo, sottotitolo a sinistra; azioni a destra.
-pub fn title_row(ui: &mut Ui, crumbs: &[&str], title: &str, sub: Option<egui::text::LayoutJob>, actions: impl FnOnce(&mut Ui)) {
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            if !crumbs.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for (i, c) in crumbs.iter().enumerate() {
-                        if i > 0 {
-                            ui.label(RichText::new(icon::CARET_RIGHT).size(11.0).color(MUTED));
-                        }
-                        ui.label(RichText::new(*c).size(13.0).color(MUTED));
-                    }
-                });
-            }
-            ui.label(bold(title).size(24.0));
+/// Barra del titolo della sezione: nome e dati a sinistra, azioni a destra.
+pub fn title_row(ui: &mut Ui, _crumbs: &[&str], title: &str, sub: Option<egui::text::LayoutJob>, actions: impl FnOnce(&mut Ui)) {
+    egui::Frame::new().fill(BAR).inner_margin(Margin { left: 10, right: 6, top: 3, bottom: 3 }).outer_margin(Margin { left: -8, right: -8, top: -8, bottom: 6 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.set_min_height(27.0);
+            ui.label(bold(title).size(15.0));
             if let Some(j) = sub {
+                ui.add_space(8.0);
                 ui.label(j);
             }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
-            actions(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                actions(ui);
+            });
         });
     });
-    ui.add_space(14.0);
 }
 
 /// Sottotitolo composto: parti normali in grigio e parti evidenziate in nero.
@@ -259,9 +255,9 @@ pub fn subline(parts: &[(&str, bool)]) -> egui::text::LayoutJob {
     let mut j = egui::text::LayoutJob::default();
     for (t, strong) in parts {
         let fmt = if *strong {
-            egui::TextFormat { font_id: FontId::new(15.0, medium_family()), color: INK, ..Default::default() }
+            egui::TextFormat { font_id: FontId::new(13.0, medium_family()), color: INK, ..Default::default() }
         } else {
-            egui::TextFormat { font_id: FontId::new(15.0, FontFamily::Proportional), color: MUTED, ..Default::default() }
+            egui::TextFormat { font_id: FontId::new(13.0, FontFamily::Proportional), color: MUTED, ..Default::default() }
         };
         j.append(t, 0.0, fmt);
     }
@@ -270,7 +266,7 @@ pub fn subline(parts: &[(&str, bool)]) -> egui::text::LayoutJob {
 
 /// Scheda bianca con bordo sottile.
 pub fn card_frame() -> egui::Frame {
-    egui::Frame::new().fill(SURFACE).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(8).inner_margin(Margin { left: 20, right: 20, top: 16, bottom: 16 })
+    egui::Frame::new().fill(SURFACE).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(3).inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 10 })
 }
 
 /// Scheda con intestazione (titolo a sinistra, elemento opzionale a destra).

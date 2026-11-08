@@ -20,19 +20,6 @@ pub enum Extra {
     Conservation,
 }
 
-impl Extra {
-    pub fn group(self) -> &'static str {
-        match self {
-            Extra::Recurring => "vendite",
-            Extra::Agents | Extra::Stats | Extra::Agenda => "analisi",
-            Extra::Cards => "vendite",
-            Extra::Shop => "vendite",
-            Extra::YearEnd => "sistema",
-            Extra::Conservation => "fe",
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct State {
     pub agents: super::agents::State,

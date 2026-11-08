@@ -8,8 +8,11 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Sense, Stroke, U
 use openfatt_core::model::{DocKind, DocStatus, PartyRole};
 use openfatt_store::{Direction, EInvoiceStatus, Store};
 
-use super::theme::{self, icon, ACCENT, ACTIVE, INK, INK_SOFT, MUTED, NEGATIVE, RAISED};
+use super::theme::{self, icon, ACCENT, INK, MUTED, NEGATIVE, RAISED};
+#[allow(unused_imports)]
+use super::theme::INK_SOFT;
 use super::business::Extra;
+use super::ledger::PayView;
 use super::{DocGroup, Nav, Screen};
 
 /// Conteggi mostrati nei menu (ricalcolati ogni pochi secondi).
@@ -69,319 +72,295 @@ pub struct Search {
     pub focus_request: bool,
 }
 
-/// Voce di un menu a tendina: icona, titolo, descrizione e scorciatoia.
-fn menu_item(ui: &mut Ui, ic: &str, title: &str, desc: &str, shortcut: &str) -> bool {
-    let h = if desc.is_empty() { 36.0 } else { 50.0 };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(360.0, h), Sense::click());
+/// Voce di un menu a tendina.
+fn menu_item(ui: &mut Ui, ic: &str, title: &str, note: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.min_rect().width().max(270.0), 30.0), Sense::click());
     let p = ui.painter();
     if resp.hovered() {
-        p.rect_filled(rect, 6, RAISED);
+        p.rect_filled(rect, 3, theme::HOVER);
     }
-    let top = if desc.is_empty() { rect.center().y - 9.0 } else { rect.top() + 9.0 };
-    p.text(egui::pos2(rect.left() + 12.0, top), egui::Align2::LEFT_TOP, ic, FontId::new(18.0, FontFamily::Proportional), Color32::from_rgb(0x4a, 0x4f, 0x57));
-    p.text(egui::pos2(rect.left() + 42.0, top), egui::Align2::LEFT_TOP, title, FontId::new(14.0, theme::medium_family()), INK);
-    if !desc.is_empty() {
-        p.text(egui::pos2(rect.left() + 42.0, top + 19.0), egui::Align2::LEFT_TOP, desc, FontId::new(12.0, FontFamily::Proportional), MUTED);
-    }
-    if !shortcut.is_empty() {
-        p.text(egui::pos2(rect.right() - 12.0, top + 1.0), egui::Align2::RIGHT_TOP, shortcut, FontId::new(12.0, FontFamily::Proportional), MUTED);
-    }
-    if resp.clicked() {
-        ui.close_menu();
+    p.text(egui::pos2(rect.left() + 12.0, rect.center().y), egui::Align2::LEFT_CENTER, ic, FontId::new(17.0, FontFamily::Proportional), ACCENT);
+    p.text(egui::pos2(rect.left() + 40.0, rect.center().y), egui::Align2::LEFT_CENTER, title, FontId::new(13.5, FontFamily::Proportional), INK);
+    if !note.is_empty() {
+        p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, note, FontId::new(12.0, FontFamily::Proportional), MUTED);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 fn menu_sep(ui: &mut Ui) {
-    ui.add_space(2.0);
-    let (r, _) = ui.allocate_exact_size(Vec2::new(360.0, 1.0), Sense::hover());
+    ui.add_space(3.0);
+    let w = ui.min_rect().width().max(270.0);
+    let (r, _) = ui.allocate_exact_size(Vec2::new(w, 1.0), Sense::hover());
     ui.painter().hline(r.x_range().shrink(4.0), r.center().y, Stroke::new(1.0_f32, theme::RULE));
-    ui.add_space(2.0);
+    ui.add_space(3.0);
 }
 
-/// Pulsante di primo livello della barra dei menu.
-fn top_button(ui: &mut Ui, ic: &str, text: &str, current: bool, badge: usize, dropdown: bool, add: impl FnOnce(&mut Ui)) -> egui::Response {
-    let mut job = egui::text::LayoutJob::default();
-    let fmt = |size: f32, fam: FontFamily, c: Color32| egui::TextFormat { font_id: FontId::new(size, fam), color: c, valign: egui::Align::Center, ..Default::default() };
-    job.append(ic, 0.0, fmt(18.0, FontFamily::Proportional, INK_SOFT));
-    job.append(text, 8.0, fmt(14.0, theme::medium_family(), if current { INK } else { INK_SOFT }));
-    if badge > 0 {
-        // spazio per il numero disegnato sopra
-        job.append("", 28.0, fmt(14.0, FontFamily::Proportional, INK));
+/// Pulsante della barra: icona grande sopra, nome sotto.
+fn tool_button(ui: &mut Ui, ic: &str, text: &str, current: bool, badge: usize, dropdown: bool) -> egui::Response {
+    let font = FontId::new(12.0, theme::medium_family());
+    let label = if dropdown { format!("{} {}", text, icon::CARET_DOWN) } else { text.to_string() };
+    let tw = ui.fonts(|f| f.layout_no_wrap(label.clone(), font.clone(), INK).size().x);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new((tw + 14.0).max(52.0), 56.0), Sense::click());
+    let p = ui.painter();
+    if current {
+        p.rect_filled(rect, 3, theme::CURRENT);
+    } else if resp.hovered() {
+        p.rect_filled(rect, 3, theme::HOVER);
     }
-    if dropdown {
-        job.append(icon::CARET_DOWN, 6.0, fmt(12.0, FontFamily::Proportional, MUTED));
-    }
-    let resp = ui
-        .scope(|ui| {
-            theme::flat_visuals(ui, if current { ACTIVE } else { Color32::TRANSPARENT }, if current { ACTIVE } else { RAISED }, ACTIVE);
-            ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
-            let b = egui::Button::new(job).min_size(Vec2::new(0.0, 36.0));
-            if dropdown {
-                egui::menu::menu_custom_button(ui, b, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    add(ui);
-                })
-                .response
-            } else {
-                ui.add(b)
-            }
-        })
-        .inner;
+    p.text(egui::pos2(rect.center().x, rect.top() + 21.0), egui::Align2::CENTER_CENTER, ic, FontId::new(25.0, FontFamily::Proportional), ACCENT);
+    p.text(egui::pos2(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, label, font, INK);
     if badge > 0 {
-        let c = egui::pos2(resp.rect.right() - if dropdown { 40.0 } else { 22.0 }, resp.rect.center().y);
+        let c = egui::pos2(rect.center().x + 15.0, rect.top() + 10.0);
         let t = badge.to_string();
-        let w = (t.len() as f32 * 7.0 + 10.0).max(18.0);
-        ui.painter().rect_filled(egui::Rect::from_center_size(c, Vec2::new(w, 18.0)), 9, NEGATIVE);
-        ui.painter().text(c, egui::Align2::CENTER_CENTER, t, FontId::new(11.0, theme::medium_family()), Color32::WHITE);
+        let w = (t.len() as f32 * 6.0 + 8.0).max(15.0);
+        p.rect_filled(egui::Rect::from_center_size(c, Vec2::new(w, 15.0)), 8, NEGATIVE);
+        p.text(c, egui::Align2::CENTER_CENTER, t, FontId::new(10.0, theme::medium_family()), Color32::WHITE);
     }
-    resp
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn group_of(s: Screen) -> &'static str {
-    match s {
-        Screen::Home => "home",
-        Screen::Parties(_) | Screen::Products | Screen::PriceLists => "anagrafiche",
-        Screen::Counter => "vendite",
-        Screen::Documents(DocGroup::Production) => "magazzino",
-        Screen::Documents(g) if DocGroup::SALES.contains(&g) => "vendite",
-        Screen::Documents(_) => "acquisti",
-        Screen::EInvoicesOut | Screen::EInvoicesIn => "fe",
-        Screen::Stock | Screen::Inventory => "magazzino",
-        Screen::Dues | Screen::Cash | Screen::Bank | Screen::Vat => "contabilita",
-        Screen::Editor => "editor",
-        Screen::Settings | Screen::Tools => "sistema",
-        Screen::Extra(x) => x.group(),
+/// Pulsante della barra che apre un menu a tendina.
+fn tool_menu(ui: &mut Ui, ic: &str, text: &str, current: bool, badge: usize, add: impl FnOnce(&mut Ui)) {
+    let resp = tool_button(ui, ic, text, current, badge, true);
+    let id = ui.make_persistent_id(("tool_menu", text));
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(id));
     }
-}
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("1 {}", one)
-    } else {
-        format!("{} {}", n, many)
-    }
-}
-
-/// Barra dei menu a tendina.
-pub fn menu_bar(ui: &mut Ui, screen: Screen, editor: Option<(String, bool)>, b: &Badges, nav: &mut Vec<Nav>) {
-    let cur = group_of(screen);
-    ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        if top_button(ui, icon::HOUSE, "Scrivania", cur == "home", 0, false, |_| {}).clicked() {
-            nav.push(Nav::Go(Screen::Home));
-        }
-        top_button(ui, icon::ADDRESS_BOOK, "Anagrafiche", cur == "anagrafiche", 0, true, |ui| {
-            if menu_item(ui, icon::USERS, "Clienti", "Anagrafiche, condizioni e listino", "") {
-                nav.push(Nav::Go(Screen::Parties(PartyRole::Customer)));
-            }
-            if menu_item(ui, icon::TRUCK, "Fornitori", "Anagrafiche e documenti di acquisto", "") {
-                nav.push(Nav::Go(Screen::Parties(PartyRole::Supplier)));
-            }
-            menu_sep(ui);
-            if menu_item(ui, icon::PACKAGE, "Articoli", "Prezzi, varianti, lotti e codici a barre", "") {
-                nav.push(Nav::Go(Screen::Products));
-            }
-            if menu_item(ui, icon::TAG, "Listini prezzi", "Listini e condizioni per cliente", "") {
-                nav.push(Nav::Go(Screen::PriceLists));
-            }
-        });
-        top_button(ui, icon::RECEIPT, "Vendite", cur == "vendite", 0, true, |ui| {
-            if menu_item(ui, icon::CASH_REGISTER, "Vendita al banco", "Scontrino tramite registratore telematico", "F9") {
-                nav.push(Nav::Go(Screen::Counter));
-            }
-            menu_sep(ui);
-            let quotes = if b.draft_quotes > 0 { plural(b.draft_quotes, "in bozza", "in bozza") } else { "Offerte ai clienti".into() };
-            let items: [(&str, DocGroup, String); 6] = [
-                (icon::NOTE_PENCIL, DocGroup::Quotes, quotes),
-                (icon::CLIPBOARD_TEXT, DocGroup::Orders, "Impegnano la merce a magazzino".into()),
-                (icon::TRUCK_TRAILER, DocGroup::DeliveryNotes, "Documenti di trasporto".into()),
-                (icon::FILE_TEXT, DocGroup::Invoices, "Fatture, note di credito e di debito, parcelle".into()),
-                (icon::FILE_DASHED, DocGroup::Proforma, "Senza valore fiscale".into()),
-                (icon::ARROWS_COUNTER_CLOCKWISE, DocGroup::SelfInvoices, "TD16-TD29: reverse charge e integrazioni".into()),
-            ];
-            for (ic, g, d) in items {
-                if menu_item(ui, ic, g.label(), &d, "") {
-                    nav.push(Nav::Go(Screen::Documents(g)));
-                }
-            }
-            menu_sep(ui);
-            let rec = if b.recurring_due > 0 { plural(b.recurring_due, "da generare", "da generare") } else { "Canoni, abbonamenti, affitti".into() };
-            if menu_item(ui, icon::REPEAT, "Documenti ricorrenti", &rec, "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Recurring)));
-            }
-            if menu_item(ui, icon::GIFT, "Carte fedeltà e buoni", "Raccolta punti e gift card", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Cards)));
-            }
-            if menu_item(ui, icon::STOREFRONT, "Negozio online", "Ordini e articoli WooCommerce o Shopify", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Shop)));
-            }
-        });
-        top_button(ui, icon::SHOPPING_CART, "Acquisti", cur == "acquisti", 0, true, |ui| {
-            let items: [(&str, DocGroup, &str); 3] = [
-                (icon::CLIPBOARD_TEXT, DocGroup::SupplierOrders, "Merce ordinata in arrivo"),
-                (icon::PACKAGE, DocGroup::GoodsReceipts, "Carico a magazzino"),
-                (icon::FILE_TEXT, DocGroup::PurchaseInvoices, "Registrazione e scadenze dei pagamenti"),
-            ];
-            for (ic, g, d) in items {
-                if menu_item(ui, ic, g.label(), d, "") {
-                    nav.push(Nav::Go(Screen::Documents(g)));
-                }
-            }
-        });
-        top_button(ui, icon::PAPER_PLANE_TILT, "Fattura elettronica", cur == "fe", b.rejected, true, |ui| {
-            let mut out = Vec::new();
-            if b.rejected > 0 {
-                out.push(plural(b.rejected, "scartata", "scartate"));
-            }
-            if b.waiting > 0 {
-                out.push(format!("{} in attesa di esito", b.waiting));
-            }
-            if b.to_send > 0 {
-                out.push(format!("{} da inviare", b.to_send));
-            }
-            let out = if out.is_empty() { "Stato delle fatture trasmesse".to_string() } else { out.join(", ") };
-            if menu_item(ui, icon::PAPER_PLANE_TILT, "Inviate allo SdI", &out, "") {
-                nav.push(Nav::Go(Screen::EInvoicesOut));
-            }
-            let inc = if b.received > 0 { format!("{} da registrare", b.received) } else { "Fatture dei fornitori".into() };
-            if menu_item(ui, icon::TRAY_ARROW_DOWN, "Ricevute dai fornitori", &inc, "") {
-                nav.push(Nav::Go(Screen::EInvoicesIn));
-            }
-            menu_sep(ui);
-            if menu_item(ui, icon::ENVELOPE_SIMPLE, "Ricevi dalla PEC", "Fatture e notifiche dello SdI", "F5") {
-                nav.push(Nav::PecFetch);
-            }
-            if menu_item(ui, icon::ARCHIVE, "Conservazione e ordini NSO", "Pacchetto per il conservatore, ordini della PA", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Conservation)));
-            }
-        });
-        top_button(ui, icon::WAREHOUSE, "Magazzino", cur == "magazzino", 0, true, |ui| {
-            if menu_item(ui, icon::STACK, "Giacenze e movimenti", "Per magazzino, variante e lotto; trasferimenti", "") {
-                nav.push(Nav::Go(Screen::Stock));
-            }
-            let inv = b.open_inventory.clone().unwrap_or_else(|| "Conta e rettifica delle giacenze".into());
-            if menu_item(ui, icon::LIST_CHECKS, "Inventario", &inv, "") {
-                nav.push(Nav::Go(Screen::Inventory));
-            }
-            if menu_item(ui, icon::FACTORY, "Produzione", "Distinte base: carico dei prodotti finiti", "") {
-                nav.push(Nav::Go(Screen::Documents(DocGroup::Production)));
-            }
-        });
-        top_button(ui, icon::BANK, "Contabilità", cur == "contabilita", 0, true, |ui| {
-            if menu_item(ui, icon::CALENDAR_CHECK, "Scadenzario", "Incassi e pagamenti", "") {
-                nav.push(Nav::Go(Screen::Dues));
-            }
-            if menu_item(ui, icon::PERCENT, "Registri e liquidazione IVA", "Registri vendite e acquisti, liquidazione, Comunicazione LIPE", "") {
-                nav.push(Nav::Go(Screen::Vat));
-            }
-            if menu_item(ui, icon::BANK, "Distinte bancarie", "Ri.Ba., addebiti SDD e bonifici per l'home banking", "") {
-                nav.push(Nav::Go(Screen::Bank));
-            }
-            if menu_item(ui, icon::WALLET, "Prima nota", "Cassa e banca", "") {
-                nav.push(Nav::Go(Screen::Cash));
-            }
-            if menu_item(ui, icon::CHART_BAR, "Corrispettivi", "Riepilogo giornaliero del banco", "") {
-                nav.push(Nav::CounterTab("corrispettivi"));
-            }
-            menu_sep(ui);
-            if menu_item(ui, icon::CALENDAR_X, "Operazioni di fine anno", "Controlli, inventario al 31/12, chiusura", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::YearEnd)));
-            }
-        });
-        top_button(ui, icon::CHART_LINE_UP, "Analisi", cur == "analisi", 0, true, |ui| {
-            if menu_item(ui, icon::CHART_LINE_UP, "Statistiche e flussi", "Venduto, margini, confronto anni, cassa prevista", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Stats)));
-            }
-            if menu_item(ui, icon::HANDSHAKE, "Agenti e provvigioni", "Maturato, insoluti, liquidazioni", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Agents)));
-            }
-            let ag = if b.agenda_today > 0 { plural(b.agenda_today, "impegno oggi", "impegni oggi") } else { "Appuntamenti, attività, scadenze".into() };
-            if menu_item(ui, icon::CALENDAR_BLANK, "Agenda", &ag, "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Agenda)));
-            }
-        });
-        if let Some((label, dirty)) = editor {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let t = if dirty { format!("{}  (non salvato)", label) } else { label };
-                if top_button(ui, icon::PENCIL_SIMPLE, &t, cur == "editor", 0, false, |_| {}).on_hover_text("Torna al documento aperto").clicked() {
-                    nav.push(Nav::Go(Screen::Editor));
-                }
-            });
-        }
+    egui::popup_below_widget(ui, id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        ui.set_min_width(270.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        add(ui);
     });
 }
 
-/// Barra superiore: azienda e archivio, ricerca generale, strumenti.
-pub fn top_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Search, pec_busy: bool, screen: Screen, nav: &mut Vec<Nav>) {
-    let company = store.company().unwrap_or_default();
-    let name = if company.display_name().is_empty() { "Azienda da configurare".to_string() } else { company.display_name() };
-    let full = ui.available_width();
+fn tool_sep(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(Vec2::new(9.0, 44.0), Sense::hover());
+    ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0_f32, theme::BORDER));
+}
+
+fn section_of(s: Screen) -> &'static str {
+    match s {
+        Screen::Home => "start",
+        Screen::Parties(PartyRole::Supplier) => "fornitori",
+        Screen::Parties(_) => "clienti",
+        Screen::Products | Screen::PriceLists => "prodotti",
+        Screen::Counter => "banco",
+        Screen::Documents(DocGroup::Production) => "magazzino",
+        Screen::Documents(DocGroup::SelfInvoices) => "fe",
+        Screen::Documents(_) => "documenti",
+        Screen::EInvoicesOut | Screen::EInvoicesIn => "fe",
+        Screen::Stock | Screen::Inventory => "magazzino",
+        Screen::Dues | Screen::Bank => "pagamenti",
+        Screen::Cash | Screen::Vat => "strumenti",
+        Screen::Editor => "editor",
+        Screen::Settings => "opzioni",
+        Screen::Tools | Screen::Backup => "archivi",
+        Screen::Extra(x) => match x {
+            Extra::Agenda => "agenda",
+            Extra::Agents | Extra::Stats => "analisi",
+            Extra::Recurring => "documenti",
+            Extra::Conservation => "fe",
+            _ => "strumenti",
+        },
+    }
+}
+
+/// Unica barra in alto: le sezioni del programma come pulsanti con icona, sempre visibili.
+#[allow(clippy::too_many_arguments)]
+pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Search, pec_busy: bool, screen: Screen, editor: Option<(String, bool)>, b: &Badges, nav: &mut Vec<Nav>) {
+    let cur = section_of(screen);
     ui.horizontal_centered(|ui| {
-        ui.set_width(full);
-        theme::mark(ui, 28.0);
-        ui.add_space(2.0);
-        let file = store.path().file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-        let comp = ui
-            .scope(|ui| {
-                theme::flat_visuals(ui, Color32::TRANSPARENT, RAISED, ACTIVE);
-                let mut job = egui::text::LayoutJob::default();
-                job.append(&name, 0.0, egui::TextFormat { font_id: FontId::new(15.0, theme::bold_family()), color: INK, valign: egui::Align::Center, ..Default::default() });
-                job.append(icon::CARET_UP_DOWN, 6.0, egui::TextFormat { font_id: FontId::new(14.0, FontFamily::Proportional), color: MUTED, valign: egui::Align::Center, ..Default::default() });
-                egui::menu::menu_custom_button(ui, egui::Button::new(job).min_size(Vec2::new(0.0, 36.0)), |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(format!("   Archivio: {}", file)).size(12.0).color(MUTED));
-                    ui.add_space(4.0);
-                    if menu_item(ui, icon::GEAR_SIX, "Dati dell'azienda", "Ragione sociale, partita IVA, regime fiscale", "") {
-                        nav.push(Nav::Go(Screen::Settings));
-                    }
-                    if menu_item(ui, icon::FOLDER_OPEN, "Apri un altro archivio...", "Ogni azienda ha il proprio file", "") {
-                        if let Some(p) = rfd::FileDialog::new().add_filter("Archivio openFatt", &["gadb"]).pick_file() {
-                            nav.push(Nav::OpenArchive(p));
-                        }
-                    }
-                    let others: Vec<&PathBuf> = recent.iter().filter(|r| r.as_path() != store.path() && r.exists()).take(4).collect();
-                    if !others.is_empty() {
-                        menu_sep(ui);
-                        for r in others {
-                            let n = r.file_stem().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                            if menu_item(ui, icon::DATABASE, &n, &r.parent().map(|p| p.display().to_string()).unwrap_or_default(), "") {
-                                nav.push(Nav::OpenArchive(r.clone()));
-                            }
-                        }
-                    }
-                    menu_sep(ui);
-                    if menu_item(ui, icon::SIGN_OUT, "Chiudi archivio", "", "") {
-                        nav.push(Nav::CloseArchive);
-                    }
-                })
-                .response
-            })
-            .inner;
-        comp.on_hover_text(store.path().display().to_string());
-
-        // ricerca generale al centro
-        let right_w = 300.0;
-        let left_used = ui.min_rect().width();
-        let field_w = (full * 0.34).clamp(260.0, 480.0);
-        let gap = ((full - field_w) / 2.0 - left_used).max(12.0);
-        ui.add_space(gap);
-        global_search(ui, store, search, field_w, nav);
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.set_max_width(right_w);
-            if theme::icon_button(ui, icon::DATABASE, "Archivio, copie di sicurezza, importazioni ed esportazioni").clicked() {
-                nav.push(Nav::Go(Screen::Tools));
+        ui.spacing_mut().item_spacing.x = 1.0;
+        tool_menu(ui, icon::PLUS_CIRCLE, "Nuovo", false, 0, |ui| {
+            for (ic, k) in [
+                (icon::NOTE_PENCIL, DocKind::Quote),
+                (icon::CLIPBOARD_TEXT, DocKind::CustomerOrder),
+                (icon::TRUCK_TRAILER, DocKind::DeliveryNote),
+                (icon::FILE_TEXT, DocKind::Invoice),
+                (icon::FILE_TEXT, DocKind::AccompanyingInvoice),
+                (icon::FILE_MINUS, DocKind::CreditNote),
+                (icon::FILE_DASHED, DocKind::Proforma),
+            ] {
+                if menu_item(ui, ic, k.label(), "") {
+                    nav.push(Nav::NewDocument(k));
+                }
             }
-            if theme::icon_button(ui, icon::GEAR_SIX, "Impostazioni").clicked() {
-                nav.push(Nav::Go(Screen::Settings));
+            menu_sep(ui);
+            for (ic, k) in [(icon::NOTE_PENCIL, DocKind::SupplierQuote), (icon::CLIPBOARD_TEXT, DocKind::SupplierOrder), (icon::PACKAGE, DocKind::GoodsReceipt), (icon::FILE_TEXT, DocKind::PurchaseInvoice)] {
+                if menu_item(ui, ic, k.label(), "") {
+                    nav.push(Nav::NewDocument(k));
+                }
             }
-            let _ = screen;
-            let txt = if pec_busy { "Ricezione..." } else { "Ricevi PEC" };
-            if theme::ghost(ui, !pec_busy, icon::ENVELOPE_SIMPLE, txt).on_hover_text("Scarica fatture e notifiche dello SdI dalla casella PEC (F5)").clicked() {
+            menu_sep(ui);
+            if menu_item(ui, icon::ARROWS_COUNTER_CLOCKWISE, DocKind::SelfInvoice.label(), "") {
+                nav.push(Nav::Go(Screen::Documents(DocGroup::SelfInvoices)));
+            }
+        });
+        if tool_button(ui, icon::CASH_REGISTER, "Banco", cur == "banco", 0, false).on_hover_text("Vendita al banco (F9)").clicked() {
+            nav.push(Nav::Go(Screen::Counter));
+        }
+        tool_sep(ui);
+        if tool_button(ui, icon::HOUSE, "Start", cur == "start", 0, false).clicked() {
+            nav.push(Nav::Go(Screen::Home));
+        }
+        if tool_button(ui, icon::USERS, "Clienti", cur == "clienti", 0, false).clicked() {
+            nav.push(Nav::Go(Screen::Parties(PartyRole::Customer)));
+        }
+        if tool_button(ui, icon::TRUCK, "Fornitori", cur == "fornitori", 0, false).clicked() {
+            nav.push(Nav::Go(Screen::Parties(PartyRole::Supplier)));
+        }
+        if tool_button(ui, icon::PACKAGE, "Prodotti", cur == "prodotti", 0, false).clicked() {
+            nav.push(Nav::Go(Screen::Products));
+        }
+        tool_menu(ui, icon::FILES, "Documenti", cur == "documenti", 0, |ui| {
+            for g in DocGroup::SALES.iter().filter(|g| **g != DocGroup::SelfInvoices) {
+                if menu_item(ui, icon::FILE_TEXT, g.label(), "") {
+                    nav.push(Nav::Go(Screen::Documents(*g)));
+                }
+            }
+            menu_sep(ui);
+            for g in DocGroup::PURCHASES {
+                if menu_item(ui, icon::SHOPPING_CART, g.label(), "") {
+                    nav.push(Nav::Go(Screen::Documents(g)));
+                }
+            }
+            menu_sep(ui);
+            let n = if b.recurring_due > 0 { b.recurring_due.to_string() } else { String::new() };
+            if menu_item(ui, icon::REPEAT, "Documenti ricorrenti", &n) {
+                nav.push(Nav::Go(Screen::Extra(Extra::Recurring)));
+            }
+        });
+        tool_menu(ui, icon::PAPER_PLANE_TILT, "Fatture elettr.", cur == "fe", b.rejected, |ui| {
+            if menu_item(ui, icon::PAPER_PLANE_TILT, "Fatture inviate", &if b.to_send > 0 { format!("{} da inviare", b.to_send) } else { String::new() }) {
+                nav.push(Nav::Go(Screen::EInvoicesOut));
+            }
+            if menu_item(ui, icon::TRAY_ARROW_DOWN, "Fatture ricevute", &if b.received > 0 { format!("{} da registrare", b.received) } else { String::new() }) {
+                nav.push(Nav::Go(Screen::EInvoicesIn));
+            }
+            if menu_item(ui, icon::ARROWS_COUNTER_CLOCKWISE, "Autofatture e integrazioni", "") {
+                nav.push(Nav::Go(Screen::Documents(DocGroup::SelfInvoices)));
+            }
+            menu_sep(ui);
+            if menu_item(ui, icon::ENVELOPE_SIMPLE, if pec_busy { "Ricezione in corso..." } else { "Ricevi dalla PEC" }, "F5") {
                 nav.push(Nav::PecFetch);
             }
+            if menu_item(ui, icon::ARCHIVE, "Conservazione e ordini NSO", "") {
+                nav.push(Nav::Go(Screen::Extra(Extra::Conservation)));
+            }
+        });
+        tool_menu(ui, icon::CURRENCY_CIRCLE_DOLLAR, "Pagamenti", cur == "pagamenti", 0, |ui| {
+            for (ic, t, v) in [(icon::ARROWS_DOWN_UP, "Tutti", PayView::All), (icon::ARROW_UP, "Entrate", PayView::In), (icon::ARROW_DOWN, "Uscite", PayView::Out)] {
+                if menu_item(ui, ic, t, "") {
+                    nav.push(Nav::Payments(v));
+                }
+            }
+            menu_sep(ui);
+            if menu_item(ui, icon::CALENDAR_CHECK, "Da saldare al...", "") {
+                nav.push(Nav::Payments(PayView::Until));
+            }
+            if menu_item(ui, icon::ENVELOPE_SIMPLE, "Invio solleciti", "") {
+                nav.push(Nav::Reminders);
+            }
+            if menu_item(ui, icon::BANK, "RIBA da emettere", "") {
+                nav.push(Nav::BankTab(super::bank::Tab::Riba));
+            }
+            if menu_item(ui, icon::BANK, "Addebiti SDD da emettere", "") {
+                nav.push(Nav::BankTab(super::bank::Tab::Sdd));
+            }
+            if menu_item(ui, icon::BANK, "Bonifici da pagare", "") {
+                nav.push(Nav::BankTab(super::bank::Tab::Sct));
+            }
+            if menu_item(ui, icon::LIST_CHECKS, "Distinte emesse", "") {
+                nav.push(Nav::BankTab(super::bank::Tab::Batches));
+            }
+            menu_sep(ui);
+            if menu_item(ui, icon::GEAR_SIX, "Impostazioni banche e risorse...", "") {
+                nav.push(Nav::BankSettings);
+            }
+        });
+        tool_menu(ui, icon::WAREHOUSE, "Magazzino", cur == "magazzino", 0, |ui| {
+            if menu_item(ui, icon::STACK, "Giacenze e movimenti", "") {
+                nav.push(Nav::Go(Screen::Stock));
+            }
+            if menu_item(ui, icon::LIST_CHECKS, "Inventario", "") {
+                nav.push(Nav::Go(Screen::Inventory));
+            }
+            if menu_item(ui, icon::FACTORY, "Produzione", "") {
+                nav.push(Nav::Go(Screen::Documents(DocGroup::Production)));
+            }
+        });
+        if tool_button(ui, icon::CALENDAR_BLANK, "Agenda", cur == "agenda", b.agenda_today, false).clicked() {
+            nav.push(Nav::Go(Screen::Extra(Extra::Agenda)));
+        }
+        tool_menu(ui, icon::CHART_LINE_UP, "Analisi", cur == "analisi", 0, |ui| {
+            if menu_item(ui, icon::CHART_LINE_UP, "Statistiche e flussi", "") {
+                nav.push(Nav::Go(Screen::Extra(Extra::Stats)));
+            }
+            if menu_item(ui, icon::HANDSHAKE, "Agenti e provvigioni", "") {
+                nav.push(Nav::Go(Screen::Extra(Extra::Agents)));
+            }
+        });
+        tool_sep(ui);
+        tool_menu(ui, icon::WRENCH, "Strumenti", cur == "strumenti", 0, |ui| {
+            if menu_item(ui, icon::PERCENT, "Registri e liquidazione IVA", "") {
+                nav.push(Nav::Go(Screen::Vat));
+            }
+            if menu_item(ui, icon::WALLET, "Prima nota", "") {
+                nav.push(Nav::Go(Screen::Cash));
+            }
+            if menu_item(ui, icon::CHART_BAR, "Corrispettivi", "") {
+                nav.push(Nav::CounterTab("corrispettivi"));
+            }
+            if menu_item(ui, icon::TAG, "Listini prezzi", "") {
+                nav.push(Nav::Go(Screen::PriceLists));
+            }
+            menu_sep(ui);
+            if menu_item(ui, icon::GIFT, "Carte fedeltà e buoni", "") {
+                nav.push(Nav::Go(Screen::Extra(Extra::Cards)));
+            }
+            if menu_item(ui, icon::STOREFRONT, "Negozio online", "") {
+                nav.push(Nav::Go(Screen::Extra(Extra::Shop)));
+            }
+            if menu_item(ui, icon::CALENDAR_X, "Operazioni di fine anno", "") {
+                nav.push(Nav::Go(Screen::Extra(Extra::YearEnd)));
+            }
+        });
+        if tool_button(ui, icon::GEAR_SIX, "Opzioni", cur == "opzioni", 0, false).clicked() {
+            nav.push(Nav::Go(Screen::Settings));
+        }
+        tool_menu(ui, icon::FOLDER_OPEN, "Archivi", cur == "archivi", 0, |ui| {
+            if menu_item(ui, icon::FOLDER_OPEN, "Apri un altro archivio...", "") {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Archivio openFatt", &["gadb"]).pick_file() {
+                    nav.push(Nav::OpenArchive(p));
+                }
+            }
+            let others: Vec<&PathBuf> = recent.iter().filter(|r| r.as_path() != store.path() && r.exists()).take(4).collect();
+            for r in others {
+                let n = r.file_stem().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                if menu_item(ui, icon::DATABASE, &n, "") {
+                    nav.push(Nav::OpenArchive(r.clone()));
+                }
+            }
+            menu_sep(ui);
+            if menu_item(ui, icon::SHIELD_CHECK, "Copie di sicurezza", "") {
+                nav.push(Nav::Go(Screen::Backup));
+            }
+            if menu_item(ui, icon::DATABASE, "Importazioni ed esportazioni", "") {
+                nav.push(Nav::Go(Screen::Tools));
+            }
+            if menu_item(ui, icon::SIGN_OUT, "Chiudi archivio", "") {
+                nav.push(Nav::CloseArchive);
+            }
+        });
+        if let Some((label, dirty)) = editor.filter(|_| cur != "editor") {
+            tool_sep(ui);
+            let t = if dirty { "Doc. aperto *" } else { "Doc. aperto" };
+            if tool_button(ui, icon::PENCIL_SIMPLE, t, false, 0, false).on_hover_text(label).clicked() {
+                nav.push(Nav::Go(Screen::Editor));
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            global_search(ui, store, search, 230.0, nav);
         });
     });
 }
@@ -392,10 +371,10 @@ fn global_search(ui: &mut Ui, store: &Store, st: &mut Search, width: f32, nav: &
     let resp = frame
         .show(ui, |ui| {
             ui.set_width(width - 20.0);
-            ui.set_height(34.0);
+            ui.set_height(26.0);
             ui.horizontal_centered(|ui| {
                 ui.label(RichText::new(icon::MAGNIFYING_GLASS).size(16.0).color(MUTED));
-                let te = egui::TextEdit::singleline(&mut st.text).id(id).frame(false).hint_text("Cerca clienti, articoli, documenti").desired_width(width - 100.0);
+                let te = egui::TextEdit::singleline(&mut st.text).id(id).frame(false).hint_text("Cerca ovunque").desired_width(width - 86.0);
                 let r = ui.add(te);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new("Ctrl K").size(12.0).color(MUTED));
@@ -491,11 +470,13 @@ fn result_row(ui: &mut Ui, ic: &str, title: &str, desc: &str, w: f32) -> bool {
 }
 
 /// Barra di stato in fondo alla finestra.
-pub fn status_bar(ui: &mut Ui, store: Option<&Store>, pec_busy: Option<&str>, pec_ok: bool) {
+pub fn status_bar(ui: &mut Ui, store: Option<&Store>, pec_busy: Option<&str>, pec_ok: bool, backup: Option<(crate::backups::Health, String)>, nav: &mut Vec<Nav>) {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 18.0;
         let small = |t: &str| RichText::new(t).size(12.0).color(MUTED);
         if let Some(s) = store {
+            let name = s.company().map(|c| c.display_name()).unwrap_or_default();
+            ui.label(RichText::new(if name.is_empty() { "Azienda da configurare".to_string() } else { name }).size(12.0).color(INK));
             ui.label(small(&s.path().display().to_string()));
         } else {
             ui.label(small("Nessun archivio aperto"));
@@ -504,12 +485,33 @@ pub fn status_bar(ui: &mut Ui, store: Option<&Store>, pec_busy: Option<&str>, pe
             ui.spinner();
             ui.label(small(b));
         } else if store.is_some() {
-            let (dot, t) = if pec_ok { (theme::POSITIVE, "PEC configurata") } else { (MUTED, "PEC da configurare in Impostazioni") };
+            let (dot, t) = if pec_ok { (theme::POSITIVE, "PEC configurata") } else { (MUTED, "PEC da configurare in Opzioni") };
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 3.5, dot);
                 ui.label(small(t));
+            });
+        }
+        if let Some((h, t)) = backup {
+            use crate::backups::Health;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if h == Health::Running {
+                    ui.add(egui::Spinner::new().size(12.0));
+                } else {
+                    let c = match h {
+                        Health::Good => theme::POSITIVE,
+                        Health::Warn => Color32::from_rgb(0xd9, 0x8a, 0x00),
+                        _ => NEGATIVE,
+                    };
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.5, c);
+                }
+                let color = if h == Health::Bad { NEGATIVE } else { MUTED };
+                if ui.add(egui::Label::new(RichText::new(t).size(12.0).color(color)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    nav.push(Nav::Go(Screen::Backup));
+                }
             });
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

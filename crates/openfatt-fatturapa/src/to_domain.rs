@@ -60,7 +60,7 @@ pub fn purchase_document(f: &FatturaElettronica, body: usize) -> Option<Document
             qty: if qty.is_zero() { Decimal::ONE } else { qty },
             unit: l.unita_misura.clone().unwrap_or_default(),
             unit_price,
-            vat: VatRef { vat_id: None, rate: l.aliquota_iva, natura: l.natura.clone(), legal_ref: String::new() },
+            vat: VatRef { vat_id: None, rate: l.aliquota_iva, natura: l.natura.clone(), legal_ref: String::new(), split: false },
             withholding: l.ritenuta,
             period_start: l.data_inizio_periodo,
             period_end: l.data_fine_periodo,
@@ -79,7 +79,7 @@ pub fn purchase_document(f: &FatturaElettronica, body: usize) -> Option<Document
         doc.pension_fund = Some(PensionFund {
             kind: c.tipo_cassa.clone(),
             rate: c.al_cassa,
-            vat: VatRef { vat_id: None, rate: c.aliquota_iva, natura: c.natura.clone(), legal_ref: String::new() },
+            vat: VatRef { vat_id: None, rate: c.aliquota_iva, natura: c.natura.clone(), legal_ref: String::new(), split: false },
             subject_to_withholding: c.ritenuta,
         });
         for l in doc.lines.iter_mut() {

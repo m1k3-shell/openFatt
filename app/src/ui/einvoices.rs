@@ -219,10 +219,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, dir: Direction) {
             if dir == Direction::Out {
                 if e.status == EInvoiceStatus::ToSend {
                     if !e.is_signed() {
-                        if ui.button("\u{EBAC} Firma").on_hover_text("Firma digitale CAdES con il certificato scelto in Impostazioni > Firma digitale").clicked() {
+                        if ui.button("\u{EBAC} Firma").on_hover_text("Firma digitale CAdES con il certificato scelto in Opzioni > Firma digitale").clicked() {
                             match services::sign_config(cx.store).source {
                                 openfatt_sign::SignSource::None => {
-                                    cx.msgs.warn("Scegliere il certificato in Impostazioni > Firma digitale, oppure firmare con un programma esterno e usare 'Carica file firmato'")
+                                    cx.msgs.warn("Scegliere il certificato in Opzioni > Firma digitale, oppure firmare con un programma esterno e usare 'Carica file firmato'")
                                 }
                                 openfatt_sign::SignSource::Pfx { .. } => st.pfx_prompt = Some((e.id, String::new())),
                                 openfatt_sign::SignSource::Store { .. } => super::signature::sign_now(cx, e.id, ""),

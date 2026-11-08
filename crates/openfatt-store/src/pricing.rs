@@ -184,6 +184,46 @@ impl Store {
         Ok(pricing::list_price(&ListData { list: &l, items: &items }, product, qty, self.vat_rate_of(product), &lookup, 0))
     }
 
+    /// Prezzi specifici di un articolo, per listino (senza gli scaglioni di quantità).
+    pub fn product_list_overrides(&self, product_id: i64) -> Result<std::collections::HashMap<i64, Decimal>> {
+        let mut st = self.conn().prepare("SELECT list_id, price FROM price_list_items WHERE product_id = ?1 AND CAST(min_qty AS REAL) <= 1")?;
+        let rows = st.query_map([product_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = std::collections::HashMap::new();
+        for r in rows {
+            let (l, p) = r?;
+            out.insert(l, Decimal::from_str(&p).unwrap_or_default());
+        }
+        Ok(out)
+    }
+
+    /// Prezzi netti di un listino per un elenco di articoli, in una sola lettura.
+    pub fn list_prices_for(&self, list_id: i64, products: &[Product]) -> Result<std::collections::HashMap<i64, Decimal>> {
+        let mut out = std::collections::HashMap::new();
+        let Some((l, items)) = self.list_with_items(list_id) else { return Ok(out) };
+        let mut by_product: std::collections::HashMap<i64, Vec<PriceListItem>> = std::collections::HashMap::new();
+        for i in items {
+            by_product.entry(i.product_id).or_default().push(i);
+        }
+        let lookup = |id: i64| self.list_with_items(id);
+        for p in products {
+            let its = by_product.get(&p.id).map(|v| v.as_slice()).unwrap_or(&[]);
+            if let Some((v, _)) = pricing::list_price(&ListData { list: &l, items: its }, p, Decimal::ONE, self.vat_rate_of(p), &lookup, 0) {
+                out.insert(p.id, v);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Nome del prezzo base (il primo listino): vuoto = "Prezzo base".
+    pub fn base_list_name(&self) -> String {
+        let n: String = self.get_setting("base_list_name").unwrap_or_default();
+        if n.trim().is_empty() {
+            "Prezzo base".into()
+        } else {
+            n
+        }
+    }
+
     /// Categorie di articoli in uso (per le condizioni per categoria).
     pub fn product_categories(&self) -> Result<Vec<String>> {
         let mut st = self.conn().prepare("SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category <> '' ORDER BY category COLLATE NOCASE")?;

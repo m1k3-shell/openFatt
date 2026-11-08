@@ -7,7 +7,8 @@ use openfatt_core::model::{DocKind, Party, PartyRole};
 use openfatt_store::PartyFilter;
 
 use super::grid::{Col, Grid, Val};
-use super::widgets::{self, GRAY, RED};
+use super::theme::{self, icon};
+use super::widgets::{self, eur, GRAY, RED};
 use super::{Ctx, Nav};
 
 pub struct State {
@@ -21,11 +22,29 @@ pub struct State {
     data: super::Cache<(PartyRole, String, bool), Vec<Party>>,
     bulk: Option<Bulk>,
     attachments: Option<super::linetools::Attachments>,
+    /// Scheda laterale: copia in modifica del soggetto selezionato.
+    panel: Option<Party>,
+    panel_dirty: bool,
+    panel_gen: u64,
+    panel_tab: u8,
+    related: Option<Related>,
+}
+
+/// Finestra dei documenti e dei pagamenti collegati a un cliente o fornitore.
+struct Related {
+    id: i64,
+    name: String,
+    tab: u8,
+    kind: Option<DocKind>,
+    grid: Grid,
+    due_grid: Grid,
+    docs: super::Cache<i64, Vec<openfatt_store::DocSummary>>,
+    dues: super::Cache<i64, Vec<openfatt_store::DueRow>>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { new_rule: None, search: String::new(), selected: None, editing: None, confirm_delete: None, show_inactive: false, grid: Grid::new("soggetti"), data: Default::default(), bulk: None, attachments: None }
+        State { new_rule: None, search: String::new(), selected: None, editing: None, confirm_delete: None, show_inactive: false, grid: Grid::new("soggetti"), data: Default::default(), bulk: None, attachments: None, panel: None, panel_dirty: false, panel_gen: 0, panel_tab: 0, related: None }
     }
 }
 
@@ -45,6 +64,8 @@ impl State {
         self.search = search.to_string();
         self.selected = Some(id);
         self.editing = None;
+        self.panel = None;
+        self.panel_dirty = false;
     }
 }
 
@@ -189,7 +210,6 @@ pub fn edit_form(ui: &mut egui::Ui, p: &mut Party) {
 
 pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
     let title = if role == PartyRole::Supplier { "Fornitori" } else { "Clienti" };
-    super::title(ui, title);
 
     // finestra di modifica
     if let Some(p) = &mut st.editing {
@@ -220,6 +240,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
         if save {
             if let Some(saved) = cx.msgs.check(cx.store.save_party(p), "Soggetto salvato") {
                 st.selected = Some(saved.id);
+                st.panel = None;
+                st.panel_dirty = false;
                 close = true;
             }
         }
@@ -248,56 +270,6 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
     let key = (role, st.search.clone(), st.show_inactive);
     let list_rc = st.data.get(cx.store.generation(), &key, || cx.store.parties(&PartyFilter { role: Some(role), search: key.1.clone(), include_inactive: key.2 }).unwrap_or_default());
     let list: &Vec<Party> = &list_rc;
-    ui.horizontal(|ui| {
-        if ui.button("\u{E3D4} Nuovo").clicked() {
-            st.editing = Some(Party { role, ..Default::default() });
-        }
-        ui.add(egui::TextEdit::singleline(&mut st.search).hint_text("\u{E30C} cerca nome, codice, P.IVA, città, email").desired_width(320.0));
-        ui.checkbox(&mut st.show_inactive, "mostra non attivi");
-        if let Some(id) = st.selected {
-            if ui.button("\u{E3B4} Modifica").clicked() {
-                st.editing = cx.store.party(id).ok().flatten();
-            }
-            let new_kind = if role == PartyRole::Supplier { DocKind::SupplierOrder } else { DocKind::Invoice };
-            if ui.button(format!("\u{E23A} Nuovo/a {}", new_kind.label().to_lowercase())).clicked() {
-                if let Ok(Some(p)) = cx.store.party(id) {
-                    let mut d = openfatt_core::model::Document::new(new_kind);
-                    d.party_id = Some(p.id);
-                    d.payment_id = p.default_payment_id;
-                    d.party = p;
-                    cx.nav.push(Nav::EditDocument(d));
-                }
-            }
-            if ui.button("\u{E4A6} Elimina").clicked() {
-                st.confirm_delete = Some(id);
-            }
-        }
-        let addr: Vec<&Party> = if st.grid.selected.is_empty() { list.iter().filter(|p| !p.city.trim().is_empty()).collect() } else { list.iter().filter(|p| st.grid.selected.contains(&p.id)).collect() };
-        if ui.button(format!("{} Etichette indirizzi ({})", super::theme::icon::TAG, addr.len())).on_hover_text("Del soggetto selezionato, oppure di tutti quelli dell'elenco con un indirizzo").clicked() {
-            cx.nav.push(Nav::Labels(addr.iter().map(|p| crate::printing::address_item(p)).collect()));
-        }
-        let with_mail: Vec<&Party> = list.iter().filter(|p| !p.email.trim().is_empty() || !p.pec.trim().is_empty()).collect();
-        egui::menu::menu_custom_button(ui, super::theme::button_widget(super::theme::icon::ENVELOPE_SIMPLE, "Comunicazione"), |ui| {
-            let tpl = crate::mailer::templates(cx.store).communication;
-            if !st.grid.selected.is_empty() {
-                let sel: Vec<&Party> = list.iter().filter(|p| st.grid.selected.contains(&p.id)).collect();
-                if ui.button(format!("Ai {} selezionati...", sel.len())).clicked() {
-                    ui.close_menu();
-                    cx.nav.push(Nav::Mail(sel.iter().map(|p| crate::mailer::for_communication(cx.store, p, &tpl.subject, &tpl.body)).collect()));
-                }
-            }
-            let n = with_mail.len();
-            if ui
-                .add_enabled(n > 0, egui::Button::new(format!("A tutti quelli dell'elenco con un indirizzo ({})...", n)))
-                .on_hover_text("Un messaggio separato per ciascuno: nessuno vede gli indirizzi degli altri. Per scegliere i destinatari, filtrare prima l'elenco con la ricerca.")
-                .clicked()
-            {
-                ui.close_menu();
-                cx.nav.push(Nav::Mail(with_mail.iter().map(|p| crate::mailer::for_communication(cx.store, p, &tpl.subject, &tpl.body)).collect()));
-            }
-        });
-    });
-    ui.add_space(4.0);
     // elenco con colonne, ordinamento, gruppi ed esportazione
     let pays = cx.store.payment_methods().unwrap_or_default();
     let lists = cx.store.price_lists().unwrap_or_default();
@@ -331,25 +303,57 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
         Col::new("pa", "PA", 45.0, |p: &Party| Val::Bool(p.is_pa)).hidden().group(),
         Col::new("active", "Attivo", 60.0, |p: &Party| Val::Bool(p.active)).hidden().group(),
     ];
-    let title = if role == PartyRole::Supplier { "Fornitori" } else { "Clienti" };
-    ui.horizontal(|ui| {
-        let n = st.grid.selected.len();
-        ui.label(RichText::new(if n > 1 { format!("{} soggetti, {} selezionati (Ctrl o Maiusc + clic)", list.len(), n) } else { format!("{} soggetti", list.len()) }).color(GRAY));
-        if n > 1 && ui.button(format!("{} Modifica i {} selezionati", super::theme::icon::PENCIL_SIMPLE_LINE, n)).clicked() {
-            st.bulk = Some(Bulk { active: (false, true), ..Default::default() });
+    theme::title_row(ui, &[], title, Some(theme::subline(&[(&format!("{} voci", list.len()), false)])), |ui| {
+        st.grid.toolbar(ui, cx.store, cx.msgs, &cols, list, title);
+        ui.add(egui::TextEdit::singleline(&mut st.search).hint_text(format!("{}  Cerca denominazione", icon::MAGNIFYING_GLASS)).desired_width(230.0));
+        ui.checkbox(&mut st.show_inactive, "non attivi");
+        if theme::primary(ui, icon::PLUS, if role == PartyRole::Supplier { "Nuovo fornitore" } else { "Nuovo cliente" }).clicked() {
+            st.grid.selected.clear();
+            st.selected = None;
+            st.panel = Some(Party { role, ..Default::default() });
+            st.panel_dirty = true;
+            st.panel_tab = 0;
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            st.grid.toolbar(ui, cx.store, cx.msgs, &cols, list, title);
+        let with_mail: Vec<&Party> = list.iter().filter(|p| !p.email.trim().is_empty() || !p.pec.trim().is_empty()).collect();
+        egui::menu::menu_custom_button(ui, theme::button_widget(icon::DOTS_THREE, "Altro"), |ui| {
+            let addr: Vec<&Party> = if st.grid.selected.is_empty() { list.iter().filter(|p| !p.city.trim().is_empty()).collect() } else { list.iter().filter(|p| st.grid.selected.contains(&p.id)).collect() };
+            if ui.button(format!("{}  Etichette indirizzi ({})", icon::TAG, addr.len())).clicked() {
+                ui.close_menu();
+                cx.nav.push(Nav::Labels(addr.iter().map(|p| crate::printing::address_item(p)).collect()));
+            }
+            let tpl = crate::mailer::templates(cx.store).communication;
+            if !st.grid.selected.is_empty() {
+                let sel: Vec<&Party> = list.iter().filter(|p| st.grid.selected.contains(&p.id)).collect();
+                if ui.button(format!("{}  Comunicazione ai {} selezionati...", icon::ENVELOPE_SIMPLE, sel.len())).clicked() {
+                    ui.close_menu();
+                    cx.nav.push(Nav::Mail(sel.iter().map(|p| crate::mailer::for_communication(cx.store, p, &tpl.subject, &tpl.body)).collect()));
+                }
+            }
+            if ui.add_enabled(!with_mail.is_empty(), egui::Button::new(format!("{}  Comunicazione a tutti ({})...", icon::ENVELOPE_SIMPLE, with_mail.len()))).clicked() {
+                ui.close_menu();
+                cx.nav.push(Nav::Mail(with_mail.iter().map(|p| crate::mailer::for_communication(cx.store, p, &tpl.subject, &tpl.body)).collect()));
+            }
+            if st.grid.selected.len() > 1 && ui.button(format!("{}  Modifica i {} selezionati...", icon::PENCIL_SIMPLE_LINE, st.grid.selected.len())).clicked() {
+                ui.close_menu();
+                st.bulk = Some(Bulk { active: (false, true), ..Default::default() });
+            }
         });
     });
-    ui.add_space(4.0);
-    let avail = ui.available_height();
-    st.grid.version = st.data.version;
-    let ev = st.grid.show(ui, cx.store, &cols, list, |p| p.id, avail, false, 26.0);
-    st.selected = st.grid.single();
-    if let Some(id) = ev.opened {
-        st.editing = list.iter().find(|p| p.id == id).cloned();
+    egui::SidePanel::right(if role == PartyRole::Supplier { "party_panel_s" } else { "party_panel_c" }).resizable(false).exact_width(390.0).frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(8)).show_inside(ui, |ui| side_panel(ui, cx, st, role));
+    if let Some(r) = &mut st.related {
+        if !related_window(ui.ctx(), cx, r) {
+            st.related = None;
+        }
     }
+    egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::SURFACE)).show_inside(ui, |ui| {
+        let avail = ui.available_height();
+        st.grid.version = st.data.version;
+        let ev = st.grid.show(ui, cx.store, &cols, list, |p| p.id, avail, false, 22.0);
+        st.selected = st.grid.single().or(if st.panel.as_ref().map(|p| p.id == 0).unwrap_or(false) { None } else { st.selected.filter(|id| st.grid.selected.contains(id)) });
+        if let Some(id) = ev.opened {
+            st.editing = list.iter().find(|p| p.id == id).cloned();
+        }
+    });
 
     // modifica multipla
     let mut close = false;
@@ -426,6 +430,381 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
     if close {
         st.bulk = None;
     }
+}
+
+/// Riga etichetta + campo della scheda laterale.
+fn lab(ui: &mut egui::Ui, t: &str) {
+    ui.label(RichText::new(t).size(12.5));
+}
+
+fn field(ui: &mut egui::Ui, v: &mut String, changed: &mut bool) {
+    if ui.add(egui::TextEdit::singleline(v).desired_width(246.0)).changed() {
+        *changed = true;
+    }
+}
+
+/// Scheda a destra dell'elenco: si modifica direttamente e si salva da sola
+/// quando si passa a un altro soggetto.
+fn side_panel(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
+    let gen = cx.store.generation();
+    let wanted = st.selected;
+    let current = st.panel.as_ref().map(|p| p.id);
+    let new_unsaved = current == Some(0);
+    if !new_unsaved && (current != wanted || (st.panel_gen != gen && !st.panel_dirty)) {
+        if st.panel_dirty {
+            if let Some(p) = &st.panel {
+                cx.msgs.check(cx.store.save_party(p), "Scheda salvata");
+            }
+        }
+        st.panel = wanted.and_then(|id| cx.store.party(id).ok().flatten());
+        st.panel_dirty = false;
+    }
+    st.panel_gen = gen;
+    let Some(mut p) = st.panel.take() else {
+        ui.centered_and_justified(|ui| {
+            ui.label(theme::muted(if role == PartyRole::Supplier { "Seleziona un fornitore dall'elenco" } else { "Seleziona un cliente dall'elenco" }));
+        });
+        return;
+    };
+    let mut changed = false;
+    let mut save = false;
+    let mut remove = false;
+    egui::TopBottomPanel::bottom("party_actions").frame(egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 6, bottom: 0 })).show_inside(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if p.id != 0 {
+                let n = cx.store.attachments("party", p.id).map(|a| a.len()).unwrap_or(0);
+                if theme::button(ui, icon::PAPERCLIP, &if n > 0 { format!("Allegati ({})", n) } else { "Allegati...".to_string() }).clicked() {
+                    st.attachments = Some(super::linetools::Attachments::new("party", p.id, p.display_name()));
+                }
+                egui::menu::menu_custom_button(ui, theme::button_widget(icon::PLUS, "Nuovo Doc."), |ui| {
+                    let kinds: &[DocKind] = if role == PartyRole::Supplier {
+                        &[DocKind::SupplierQuote, DocKind::SupplierOrder, DocKind::GoodsReceipt, DocKind::PurchaseInvoice]
+                    } else {
+                        &[DocKind::Quote, DocKind::CustomerOrder, DocKind::DeliveryNote, DocKind::Invoice, DocKind::AccompanyingInvoice, DocKind::CreditNote, DocKind::Proforma]
+                    };
+                    for k in kinds {
+                        if ui.button(k.label()).clicked() {
+                            ui.close_menu();
+                            if let Ok(Some(full)) = cx.store.party(p.id) {
+                                let mut d = openfatt_core::model::Document::new(*k);
+                                d.party_id = Some(full.id);
+                                d.payment_id = full.default_payment_id;
+                                d.party = full;
+                                cx.nav.push(Nav::EditDocument(d));
+                            }
+                        }
+                    }
+                });
+                let mut open = |tab: u8| {
+                    st.related = Some(Related { id: p.id, name: p.display_name(), tab, kind: None, grid: Grid::new("soggetto-documenti"), due_grid: Grid::new("soggetto-pagamenti"), docs: Default::default(), dues: Default::default() });
+                };
+                if theme::button(ui, icon::FILES, "Documenti").clicked() {
+                    open(0);
+                }
+                if theme::button(ui, icon::CURRENCY_CIRCLE_DOLLAR, "Pagamenti").clicked() {
+                    open(1);
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            if st.panel_dirty && theme::primary(ui, icon::FLOPPY_DISK, "Salva").clicked() {
+                save = true;
+            }
+            if p.id != 0 {
+                if theme::button(ui, icon::PENCIL_SIMPLE, "Scheda completa...").on_hover_text("Referenti, dichiarazioni d'intento, mandato SDD, prezzi particolari").clicked() {
+                    st.editing = Some(p.clone());
+                }
+                if theme::ghost_colored(ui, true, icon::TRASH, "Elimina", theme::NEGATIVE).clicked() {
+                    remove = true;
+                }
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        for (i, t) in ["Anagrafica", "Rapporti commerciali", "Varie"].iter().enumerate() {
+            ui.selectable_value(&mut st.panel_tab, i as u8, *t);
+        }
+    });
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.set_width(ui.available_width() - 8.0);
+        let w = 270.0_f32;
+        match st.panel_tab {
+            0 => {
+                egui::Grid::new("pp_ana").num_columns(2).spacing([6.0, 4.0]).min_col_width(80.0).max_col_width(w.max(100.0)).show(ui, |ui| {
+                    lab(ui, "Codice");
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::TextEdit::singleline(&mut p.code).hint_text("automatico").desired_width(90.0)).changed() {
+                            changed = true;
+                        }
+                        let mut c = p.role.is_customer();
+                        let mut f = p.role.is_supplier();
+                        let a = ui.checkbox(&mut c, "Cliente").changed();
+                        let b = ui.checkbox(&mut f, "Fornitore").changed();
+                        if a || b {
+                            p.role = match (c, f) {
+                                (true, true) => PartyRole::Both,
+                                (false, true) => PartyRole::Supplier,
+                                _ => PartyRole::Customer,
+                            };
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+                    lab(ui, "Cod. fiscale");
+                    field(ui, &mut p.tax_code, &mut changed);
+                    ui.end_row();
+                    lab(ui, "Part. Iva");
+                    field(ui, &mut p.vat_number, &mut changed);
+                    ui.end_row();
+                    ui.label(theme::bold("Sede operativa").size(12.5));
+                    ui.label("");
+                    ui.end_row();
+                    lab(ui, "Denominaz.");
+                    field(ui, &mut p.name, &mut changed);
+                    ui.end_row();
+                    lab(ui, "Nome");
+                    field(ui, &mut p.first_name, &mut changed);
+                    ui.end_row();
+                    lab(ui, "Cognome");
+                    field(ui, &mut p.last_name, &mut changed);
+                    ui.end_row();
+                    lab(ui, "Indirizzo");
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::TextEdit::singleline(&mut p.address).desired_width(192.0)).changed() {
+                            changed = true;
+                        }
+                        if ui.add(egui::TextEdit::singleline(&mut p.civic).desired_width(46.0).hint_text("n.")).changed() {
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+                    lab(ui, "CAP / Città");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.zip).desired_width(50.0)).changed();
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.city).desired_width(138.0)).changed();
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.province).desired_width(30.0).char_limit(2)).changed();
+                    });
+                    ui.end_row();
+                    lab(ui, "Nazione");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.country).desired_width(40.0).char_limit(2)).changed();
+                        changed |= ui.checkbox(&mut p.is_pa, "Pubblica Amministrazione").changed();
+                    });
+                    ui.end_row();
+                    ui.label(theme::bold("Fattura elettronica").size(12.5));
+                    ui.label("");
+                    ui.end_row();
+                    lab(ui, "Recapito");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.sdi_code).desired_width(100.0).char_limit(7).hint_text("Cod. destinatario")).changed();
+                    });
+                    ui.end_row();
+                    lab(ui, "Pec");
+                    field(ui, &mut p.pec, &mut changed);
+                    ui.end_row();
+                    ui.label(theme::bold("Contatti").size(12.5));
+                    ui.label("");
+                    ui.end_row();
+                    lab(ui, "Referente");
+                    let mut r = p.contacts.first().map(|c| c.name.clone()).unwrap_or_default();
+                    if ui.add(egui::TextEdit::singleline(&mut r).desired_width(246.0)).changed() {
+                        if p.contacts.is_empty() {
+                            p.contacts.push(Default::default());
+                        }
+                        p.contacts[0].name = r;
+                        changed = true;
+                    }
+                    ui.end_row();
+                    lab(ui, "Telefono");
+                    field(ui, &mut p.phone, &mut changed);
+                    ui.end_row();
+                    lab(ui, "Cell.");
+                    field(ui, &mut p.mobile, &mut changed);
+                    ui.end_row();
+                    lab(ui, "e-mail");
+                    field(ui, &mut p.email, &mut changed);
+                    ui.end_row();
+                });
+                ui.add_space(4.0);
+                lab(ui, "Note");
+                changed |= ui.add(egui::TextEdit::multiline(&mut p.notes).desired_rows(4).desired_width(336.0)).changed();
+            }
+            1 => {
+                let pays = cx.store.payment_methods().unwrap_or_default();
+                let vats = cx.store.vat_codes().unwrap_or_default();
+                let lists = cx.store.price_lists().unwrap_or_default();
+                let agents = cx.store.agents(false).unwrap_or_default();
+                egui::Grid::new("pp_com").num_columns(2).spacing([6.0, 4.0]).min_col_width(80.0).show(ui, |ui| {
+                    lab(ui, "Pagamento");
+                    changed |= widgets::payment_combo(ui, "pp_pay", &mut p.default_payment_id, &pays, 230.0);
+                    ui.end_row();
+                    lab(ui, "IVA");
+                    let before = p.default_vat_id;
+                    let text = p.default_vat_id.and_then(|id| vats.iter().find(|v| v.id == id)).map(|v| format!("{} {}", v.code, v.description)).unwrap_or_else(|| "-".into());
+                    egui::ComboBox::from_id_salt("pp_vat").width(230.0).selected_text(text).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut p.default_vat_id, None, "-");
+                        for v in &vats {
+                            ui.selectable_value(&mut p.default_vat_id, Some(v.id), format!("{} {}", v.code, v.description));
+                        }
+                    });
+                    changed |= before != p.default_vat_id;
+                    ui.end_row();
+                    lab(ui, "Listino");
+                    let before = p.price_list_id;
+                    let text = p.price_list_id.and_then(|id| lists.iter().find(|l| l.id == id)).map(|l| l.name.clone()).unwrap_or_else(|| "prezzo base".into());
+                    egui::ComboBox::from_id_salt("pp_list").width(230.0).selected_text(text).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut p.price_list_id, None, "prezzo base");
+                        for l in lists.iter().filter(|l| l.active) {
+                            ui.selectable_value(&mut p.price_list_id, Some(l.id), &l.name);
+                        }
+                    });
+                    changed |= before != p.price_list_id;
+                    ui.end_row();
+                    if p.role.is_customer() {
+                        lab(ui, "Agente");
+                        let before = p.agent_id;
+                        let name = p.agent_id.and_then(|id| agents.iter().find(|a| a.id == id)).map(|a| a.name.clone()).unwrap_or_else(|| "nessuno".into());
+                        egui::ComboBox::from_id_salt("pp_agent").width(230.0).selected_text(name).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut p.agent_id, None, "nessuno");
+                            for a in &agents {
+                                ui.selectable_value(&mut p.agent_id, Some(a.id), &a.name);
+                            }
+                        });
+                        changed |= before != p.agent_id;
+                        ui.end_row();
+                    }
+                    lab(ui, "Sconto");
+                    changed |= ui.add(egui::TextEdit::singleline(&mut p.default_discount).desired_width(90.0).hint_text("es. 10+5")).changed();
+                    ui.end_row();
+                    lab(ui, "Banca");
+                    field(ui, &mut p.bank_name, &mut changed);
+                    ui.end_row();
+                    lab(ui, "IBAN");
+                    field(ui, &mut p.iban, &mut changed);
+                    ui.end_row();
+                    lab(ui, "ABI / CAB");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.bank_abi).desired_width(60.0).char_limit(5)).changed();
+                        changed |= ui.add(egui::TextEdit::singleline(&mut p.bank_cab).desired_width(60.0).char_limit(5)).changed();
+                    });
+                    ui.end_row();
+                });
+            }
+            _ => {
+                egui::Grid::new("pp_var").num_columns(2).spacing([6.0, 4.0]).min_col_width(80.0).show(ui, |ui| {
+                    lab(ui, "Stato");
+                    changed |= ui.checkbox(&mut p.active, "Attivo").changed();
+                    ui.end_row();
+                    lab(ui, "Cod. EORI");
+                    field(ui, &mut p.eori, &mut changed);
+                    ui.end_row();
+                    if p.role.is_customer() {
+                        lab(ui, "Carta fedeltà");
+                        field(ui, &mut p.loyalty_card, &mut changed);
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(theme::muted(format!("{} referenti, {} dichiarazioni d'intento: da \"Scheda completa\".", p.contacts.len(), p.intents.len())));
+            }
+        }
+        for i in checks(&p) {
+            ui.label(RichText::new(format!("{} {}", icon::WARNING, i)).size(12.0).color(RED));
+        }
+    });
+    if changed {
+        st.panel_dirty = true;
+    }
+    if remove {
+        st.confirm_delete = Some(p.id);
+    }
+    if save {
+        if let Some(saved) = cx.msgs.check(cx.store.save_party(&p), "Salvato") {
+            st.selected = Some(saved.id);
+            st.grid.select_only(saved.id);
+            st.panel_dirty = false;
+            p = saved;
+        }
+    }
+    st.panel = Some(p);
+}
+
+/// Documenti e pagamenti collegati al soggetto.
+fn related_window(ctx: &egui::Context, cx: &mut Ctx, r: &mut Related) -> bool {
+    use openfatt_store::{DocFilter, DocSummary, DueRow};
+    let mut open = true;
+    let gen = cx.store.generation();
+    let id = r.id;
+    let screen = ctx.screen_rect();
+    egui::Window::new(format!("{} - documenti e pagamenti", r.name)).open(&mut open).collapsible(false).fixed_size([(screen.width() * 0.8).min(1150.0), (screen.height() * 0.76).min(720.0)]).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut r.tab, 0, "Documenti");
+            ui.selectable_value(&mut r.tab, 1, "Pagamenti");
+        });
+        if r.tab == 0 {
+            let all_rc = r.docs.get(gen, &id, || cx.store.documents(&DocFilter { party_id: Some(id), ..Default::default() }).unwrap_or_default());
+            let mut kinds: Vec<DocKind> = Vec::new();
+            for d in all_rc.iter() {
+                if !kinds.contains(&d.kind) {
+                    kinds.push(d.kind);
+                }
+            }
+            let list: Vec<&DocSummary> = all_rc.iter().filter(|d| r.kind.is_none_or(|k| k == d.kind)).collect();
+            let cols: Vec<Col<&DocSummary>> = vec![
+                Col::new("date", "Data", 90.0, |d: &&DocSummary| Val::Date(Some(d.date))),
+                Col::text("kind", "Tipo", 190.0, |d: &&DocSummary| d.kind.label().to_string()).group(),
+                Col::text("num", "N.", 70.0, |d: &&DocSummary| d.number_label.clone()),
+                Col::text("status", "Stato", 80.0, |d: &&DocSummary| d.status.label().to_string()).group(),
+                Col::money("total", "Tot. documento", 120.0, |d: &&DocSummary| d.total).total(),
+                Col::money("open", "Da saldare", 110.0, |d: &&DocSummary| d.open_amount).total(),
+            ];
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("rel_kind").width(220.0).selected_text(r.kind.map(|k| k.plural()).unwrap_or("Tutti i documenti")).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut r.kind, None, "Tutti i documenti");
+                    for k in &kinds {
+                        ui.selectable_value(&mut r.kind, Some(*k), k.plural());
+                    }
+                });
+                ui.label(theme::muted(format!("{} documenti · doppio clic per aprire", list.len())));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    r.grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Documenti");
+                });
+            });
+            let h = ui.available_height();
+            r.grid.version = r.docs.version.wrapping_mul(31).wrapping_add(r.kind.map(|k| k as u64 + 1).unwrap_or(0));
+            let ev = r.grid.show(ui, cx.store, &cols, &list, |d| d.id, h, false, 24.0);
+            if let Some(doc) = ev.opened {
+                cx.nav.push(Nav::OpenDocument(doc));
+            }
+        } else {
+            let list_rc = r.dues.get(gen, &id, || cx.store.due_list_with_drafts(false, None).unwrap_or_default().into_iter().filter(|d| d.party_id == Some(id)).collect());
+            let list: Vec<&DueRow> = list_rc.iter().collect();
+            let today = chrono::Local::now().date_naive();
+            let overdue: rust_decimal::Decimal = list.iter().filter(|d| d.date < today).map(|d| d.residual()).sum();
+            let open: rust_decimal::Decimal = list.iter().map(|d| d.residual()).sum();
+            let cols: Vec<Col<&DueRow>> = vec![
+                Col::new("date", "Scadenza", 90.0, |d: &&DueRow| Val::Date(Some(d.date))),
+                Col::text("doc", "Documento", 300.0, |d: &&DueRow| d.doc_label.clone()),
+                Col::text("mp", "Modalità", 170.0, |d: &&DueRow| codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code).to_string()),
+                Col::money("amount", "Importo", 110.0, |d: &&DueRow| d.amount).total(),
+                Col::money("res", "Da saldare", 110.0, |d: &&DueRow| d.residual()).total(),
+            ];
+            ui.label(theme::muted(format!("Da saldare € {}   ·   di cui scaduto € {}", eur(open), eur(overdue))));
+            let h = ui.available_height();
+            r.due_grid.version = r.dues.version;
+            let by_doc: Vec<i64> = list.iter().map(|d| d.document_id).collect();
+            let ev = r.due_grid.show(ui, cx.store, &cols, &list, |d| d.id, h, false, 24.0);
+            let _ = by_doc;
+            if let Some(due) = ev.opened {
+                if let Some(d) = list.iter().find(|d| d.id == due) {
+                    cx.nav.push(Nav::OpenDocument(d.document_id));
+                }
+            }
+        }
+    });
+    open
 }
 
 fn payment_and_vat(ui: &mut egui::Ui, cx: &mut Ctx, p: &mut Party) {

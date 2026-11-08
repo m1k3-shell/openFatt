@@ -29,7 +29,7 @@ impl Store {
     fn vat_for_rate(&self, rate: Option<Decimal>) -> Result<VatRef> {
         let vats = self.vat_codes()?;
         let r = rate.unwrap_or(Decimal::from(22));
-        Ok(vats.iter().find(|v| v.rate == r && v.natura.is_none()).or_else(|| vats.iter().find(|v| v.code == "22")).map(VatRef::from_code).unwrap_or(VatRef { vat_id: None, rate: r, natura: None, legal_ref: String::new() }))
+        Ok(vats.iter().find(|v| v.rate == r && v.natura.is_none()).or_else(|| vats.iter().find(|v| v.code == "22")).map(VatRef::from_code).unwrap_or(VatRef { vat_id: None, rate: r, natura: None, legal_ref: String::new(), split: false }))
     }
 
     /// Crea un ordine cliente in bozza da un ordine NSO, con la tripletta dell'ordine nei
