@@ -2467,7 +2467,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openfatt"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-backup"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-bank"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "chrono",
  "openfatt-core",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "chrono",
  "rust_decimal",
@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-fatturapa"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2548,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-fbread"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-interop"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "calamine",
  "chrono",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-pdf"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "miniz_oxide 0.8.9",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-pec"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "chrono",
  "imap",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-pos"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "chrono",
  "openfatt-core",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-sign"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2622,7 +2622,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-store"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",

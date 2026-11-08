@@ -96,6 +96,16 @@ fn kv(ui: &mut egui::Ui, k: &str, v: impl Into<String>) {
     ui.end_row();
 }
 
+/// Altezza di un elenco dentro una scheda. Alla prima misura la finestra non ha ancora un'altezza:
+/// usare lo spazio disponibile la farebbe nascere alta quanto lo schermo.
+fn list_height(ui: &egui::Ui) -> f32 {
+    if ui.is_sizing_pass() {
+        360.0
+    } else {
+        ui.available_height() - 40.0
+    }
+}
+
 fn qty(d: Decimal) -> String {
     fmt_it_trim(d, 0, 3)
 }
@@ -258,7 +268,7 @@ impl ProductCard {
             return false;
         };
         let mut full = false;
-        egui::Window::new(format!("{}  {}", p.code, widgets::truncate(&p.description, 60))).id(egui::Id::new("qc_product")).open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.screen_rect().center()).default_size([620.0, 560.0]).min_width(460.0).collapsible(false).show(ctx, |ui| {
+        egui::Window::new(format!("{}  {}", p.code, widgets::truncate(&p.description, 60))).id(egui::Id::new("qc_product_card")).open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.screen_rect().center()).default_size([620.0, 560.0]).min_width(460.0).collapsible(false).show(ctx, |ui| {
             egui::TopBottomPanel::bottom("qc_product_bar").show_inside(ui, |ui| {
                 ui.add_space(4.0);
                 if theme::button(ui, icon::ARROW_SQUARE_OUT, "Apri scheda completa").clicked() {
@@ -272,6 +282,12 @@ impl ProductCard {
                 }
             });
             ui.separator();
+            // l'elenco dei movimenti gestisce da sé lo scorrimento: sotto un'area che occupa
+            // tutta l'altezza farebbe crescere la finestra a ogni disegno
+            if self.tab == 5 {
+                self.tab_moves(ui, cx);
+                return;
+            }
             egui::ScrollArea::vertical().id_salt("qc_product_scroll").auto_shrink([false, false]).show(ui, |ui| match self.tab {
                 0 => self.tab_product(ui, cx, &p),
                 1 => {
@@ -332,10 +348,6 @@ impl ProductCard {
                 }
                 _ => {}
             });
-            if self.tab == 5 {
-                // l'elenco dei movimenti gestisce da sé lo scorrimento
-                self.tab_moves(ui, cx);
-            }
         });
         if full {
             cx.nav.push(Nav::FindProduct(p.id, p.code.clone()));
@@ -422,7 +434,7 @@ impl ProductCard {
         ui.horizontal(|ui| {
             self.grid.toolbar(ui, cx.store, cx.msgs, &cols, &self.moves, "Movimenti di magazzino");
         });
-        let h = ui.available_height() - 40.0;
+        let h = list_height(ui);
         self.grid.version = 0;
         self.grid.show(ui, cx.store, &cols, &self.moves, |m| m.id, h, false, 22.0);
         if let Some(d) = opened.get() {
@@ -473,7 +485,7 @@ impl PartyCard {
         };
         let mut open = true;
         let mut full = false;
-        egui::Window::new(widgets::truncate(&p.display_name(), 70)).id(egui::Id::new("qc_party")).open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.screen_rect().center() + egui::vec2(60.0, 40.0)).default_size([680.0, 540.0]).min_width(480.0).collapsible(false).show(ctx, |ui| {
+        egui::Window::new(widgets::truncate(&p.display_name(), 70)).id(egui::Id::new("qc_party_card")).open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.screen_rect().center() + egui::vec2(60.0, 40.0)).default_size([680.0, 540.0]).min_width(480.0).collapsible(false).show(ctx, |ui| {
             egui::TopBottomPanel::bottom("qc_party_bar").show_inside(ui, |ui| {
                 ui.add_space(4.0);
                 if theme::button(ui, icon::ARROW_SQUARE_OUT, "Apri scheda completa").clicked() {
@@ -562,7 +574,7 @@ impl PartyCard {
         ui.horizontal(|ui| {
             self.doc_grid.toolbar(ui, cx.store, cx.msgs, &cols, &self.docs, "Documenti");
         });
-        let h = ui.available_height() - 40.0;
+        let h = list_height(ui);
         self.doc_grid.version = 0;
         let ev = self.doc_grid.show(ui, cx.store, &cols, &self.docs, |d| d.id, h, false, 22.0);
         if let Some(id) = ev.opened {
@@ -581,7 +593,7 @@ impl PartyCard {
         ui.horizontal(|ui| {
             self.due_grid.toolbar(ui, cx.store, cx.msgs, &cols, &self.dues, "Pagamenti");
         });
-        let h = ui.available_height() - 40.0;
+        let h = list_height(ui);
         self.due_grid.version = 0;
         let ev = self.due_grid.show(ui, cx.store, &cols, &self.dues, |d| d.id, h, false, 22.0);
         if let Some(id) = ev.opened.and_then(|k| self.dues.iter().find(|d| d.id == k)).map(|d| d.document_id) {
