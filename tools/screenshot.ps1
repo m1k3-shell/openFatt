@@ -1,6 +1,6 @@
 # Avvia l'app su una schermata, cattura la finestra in PNG e chiude il processo.
 # Uso: tools\screenshot.ps1 -Archive <file.gadb> -Screen <nome> -Out <file.png> [-Click "x,y"]
-# -Click invia un clic alla sola finestra dell'app (coordinate dell'area client in pixel fisici);
+# -Click invia uno o più clic ("x,y;x,y") alla sola finestra dell'app (coordinate dell'area client in pixel fisici);
 # -Type precompila la ricerca generale (variabile OPENFATT_SEARCH).
 param([string]$Archive, [string]$Screen = "", [string]$Out, [int]$Wait = 4, [string]$Click = "", [string]$Type = "", [string]$Clicks = "")
 $ErrorActionPreference = 'Stop'
@@ -36,8 +36,8 @@ try {
   Start-Sleep -Seconds $Wait
   # con archivi grandi la prima finestra trovata può essere provvisoria: si rilegge
   $p.Refresh(); if ($p.MainWindowHandle -ne [IntPtr]::Zero) { $h = $p.MainWindowHandle }
-  if ($Click -ne "") {
-    $xy = $Click.Split(","); $lp = [IntPtr](([int]$xy[1] -shl 16) -bor ([int]$xy[0] -band 0xFFFF))
+  foreach ($pt in ($Click.Split(";") | Where-Object { $_ -ne "" })) {
+    $xy = $pt.Split(","); $lp = [IntPtr](([int]$xy[1] -shl 16) -bor ([int]$xy[0] -band 0xFFFF))
     [void][W32]::PostMessage($h, 0x200, [IntPtr]0, $lp)
     Start-Sleep -Milliseconds 300
     [void][W32]::PostMessage($h, 0x201, [IntPtr]1, $lp)

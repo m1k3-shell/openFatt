@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     // 1 - schema iniziale
     r#"
     CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -404,6 +404,42 @@ const MIGRATIONS: &[&str] = &[
         s_legacy_fe, s_order_status, s_expected_date, s_notes, s_city, s_province, s_vat, s_payment, s_liability, s_rev, version, created_at);
     CREATE INDEX ix_stock_product_date ON stock_moves(product_id, date, id);
     CREATE INDEX ix_stock_expiry ON stock_moves(expiry) WHERE lot <> '';
+    "#,
+    r#"
+    -- incassi e pagamenti: una registrazione (data, modalità, conto, riferimento) può
+    -- coprire più scadenze, anche solo in parte (acconti)
+    CREATE TABLE payments(
+        id INTEGER PRIMARY KEY,
+        date TEXT NOT NULL,
+        party_id INTEGER,
+        party_name TEXT NOT NULL DEFAULT '',
+        receivable INTEGER NOT NULL,
+        mp_code TEXT NOT NULL DEFAULT '',
+        account TEXT NOT NULL,
+        reference TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        amount TEXT NOT NULL
+    );
+    CREATE INDEX ix_payments_date ON payments(date);
+    CREATE TABLE payment_allocations(
+        id INTEGER PRIMARY KEY,
+        payment_id INTEGER NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+        due_id INTEGER NOT NULL REFERENCES due_dates(id),
+        amount TEXT NOT NULL,
+        writeoff TEXT NOT NULL DEFAULT '0'
+    );
+    CREATE INDEX ix_alloc_payment ON payment_allocations(payment_id);
+    CREATE INDEX ix_alloc_due ON payment_allocations(due_id);
+    ALTER TABLE cash_entries ADD COLUMN payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL;
+    CREATE INDEX ix_cash_payment ON cash_entries(payment_id);
+    CREATE INDEX ix_cash_due ON cash_entries(due_date_id);
+    -- i movimenti già registrati sulle scadenze diventano registrazioni (modalità non indicata)
+    INSERT INTO payments(id, date, party_id, party_name, receivable, mp_code, account, amount)
+        SELECT c.id, c.date, c.party_id, COALESCE(d.party_name, ''), CASE WHEN c.amount LIKE '-%' THEN 0 ELSE 1 END, '', c.account, LTRIM(c.amount, '-')
+        FROM cash_entries c JOIN due_dates s ON s.id = c.due_date_id JOIN documents d ON d.id = s.document_id;
+    INSERT INTO payment_allocations(payment_id, due_id, amount)
+        SELECT c.id, c.due_date_id, LTRIM(c.amount, '-') FROM cash_entries c WHERE c.id IN (SELECT id FROM payments);
+    UPDATE cash_entries SET payment_id = id WHERE id IN (SELECT id FROM payments);
     "#,
 ];
 

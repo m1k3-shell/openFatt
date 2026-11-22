@@ -745,6 +745,7 @@ impl Store {
                     due_date_id: None,
                     party_id: saved.party_id,
                     category: if incoming { "Incassi clienti".into() } else { "Pagamenti fornitori".into() },
+                    ..Default::default()
                 })?;
                 rep.cash_entries += 1;
             }

@@ -73,6 +73,7 @@ impl Store {
                 due_date_id: None,
                 party_id: saved.party_id,
                 category: "Corrispettivi".into(),
+                ..Default::default()
             })?;
         }
         self.audit("retail", saved.id, "sale", &format!("{} {}", saved.number_label(), totals.total))?;

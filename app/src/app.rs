@@ -65,6 +65,8 @@ pub struct OpenFattApp {
     cfg: AppConfig,
     store: Option<Store>,
     screen: Screen,
+    /// Schermata mostrata (e documento aperto) con l'istante in cui è comparsa: per la transizione.
+    shown: ((Screen, Option<i64>), f64),
     msgs: Msgs,
     nav: Vec<Nav>,
     home: ui::home::State,
@@ -116,6 +118,7 @@ impl OpenFattApp {
             cfg,
             store: None,
             screen: Screen::Home,
+            shown: ((Screen::Home, None), 0.0),
             msgs: Msgs::default(),
             nav: Vec::new(),
             home: Default::default(),
@@ -645,6 +648,10 @@ impl OpenFattApp {
                     self.msgs.ok(format!("Verifica di {} in corso...", acc.host));
                     mailer::spawn_test(acc, pw, self.mail_tx.clone());
                 }
+                Nav::Motion(on) => {
+                    self.cfg.still = !on;
+                    self.cfg.save();
+                }
                 Nav::BankSettings => {
                     self.settings = ui::settings::State::on_bank_tab();
                     self.nav.push(Nav::Go(Screen::Settings));
@@ -678,6 +685,12 @@ impl OpenFattApp {
                 }
                 Nav::Payments(v) => {
                     self.ledger.show_view(v);
+                    self.nav.push(Nav::Go(Screen::Dues));
+                }
+                Nav::PayDue(id) => {
+                    if let Some(store) = &self.store {
+                        self.ledger.pay_due(store, id);
+                    }
                     self.nav.push(Nav::Go(Screen::Dues));
                 }
             }
@@ -789,6 +802,7 @@ impl eframe::App for OpenFattApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let _profile = crate::profile::Frame::start(format!("{:?}", self.screen));
+        theme::set_motion(!self.cfg.still && !cfg!(feature = "strumenti-prova") && !crate::profile::active());
         if crate::profile::active() {
             ctx.request_repaint();
         }
@@ -880,7 +894,22 @@ impl eframe::App for OpenFattApp {
                     self.backups.banner_hidden = true;
                 }
             }
+            let shown = (self.screen, self.editor.as_ref().map(|e| e.doc.id));
+            let now = ctx.input(|i| i.time);
+            if self.shown.0 != shown {
+                self.shown = (shown, now);
+            }
             egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::ground()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 6 })).show(ctx, |ui| {
+                let dur = theme::anim(0.26) as f64;
+                let t = if dur > 0.0 { ((now - self.shown.1) / dur).min(1.0) as f32 } else { 1.0 };
+                let e = theme::ease_out(t);
+                let mut rect = ui.max_rect();
+                if t < 1.0 {
+                    ui.ctx().request_repaint();
+                    ui.multiply_opacity(0.15 + 0.85 * e);
+                    rect = rect.translate(egui::vec2(0.0, (1.0 - e) * 16.0));
+                }
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()), |ui| {
                 let store = self.store.as_ref().unwrap();
                 let mut cx = Ctx { store, msgs: &mut self.msgs, nav: &mut self.nav };
                 match self.screen {
@@ -912,6 +941,7 @@ impl eframe::App for OpenFattApp {
                 let can_view = self.user.as_ref().is_none_or(|u| u.can_read(openfatt_store::Area::Registry));
                 let can_edit_stock = self.user.as_ref().is_none_or(|u| u.can_write(openfatt_store::Area::Stock));
                 self.cards.show(ui.ctx(), &mut cx, can_view, can_edit_stock);
+                });
             });
         }
 

@@ -96,25 +96,37 @@ fn menu_sep(ui: &mut Ui) {
     ui.add_space(3.0);
 }
 
-/// Pulsante della barra: icona grande sopra, nome sotto.
+/// Chiave in memoria del pulsante della sezione corrente (per l'indicatore che scivola).
+fn here_id() -> egui::Id {
+    egui::Id::new("dock_here")
+}
+
+/// Pulsante della barra: icona grande sopra, nome sotto. Al passaggio del mouse il fondo si
+/// accende e l'icona sale appena; la sezione corrente è segnata dall'indicatore della barra.
 fn tool_button(ui: &mut Ui, sec: Section, ic: &str, text: &str, current: bool, badge: usize, dropdown: bool) -> egui::Response {
+    tool_button_open(ui, sec, ic, text, current, badge, dropdown, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tool_button_open(ui: &mut Ui, sec: Section, ic: &str, text: &str, current: bool, badge: usize, dropdown: bool, open: bool) -> egui::Response {
     let font = FontId::new(12.0, theme::medium_family());
     let label = if dropdown { format!("{} {}", text, icon::CARET_DOWN) } else { text.to_string() };
     let tw = ui.fonts(|f| f.layout_no_wrap(label.clone(), font.clone(), INK).size().x);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new((tw + 14.0).max(52.0), 56.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new((tw + 16.0).max(54.0), 56.0), Sense::click());
+    let h = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered() || open, theme::anim(0.14));
+    if current {
+        ui.ctx().data_mut(|d| d.insert_temp(here_id(), (rect, sec)));
+    }
     let p = ui.painter();
     let t = sec.tint();
-    // ogni pulsante ha il colore della sua sezione; quello corrente è pieno e sottolineato
-    if current {
-        p.rect_filled(rect, 4, t.soft);
-        p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 6.0, rect.bottom() - 3.0), egui::pos2(rect.right() - 6.0, rect.bottom())), 2, t.main);
-    } else if resp.hovered() {
-        p.rect_filled(rect, 4, t.tint);
+    if h > 0.0 && !current {
+        p.rect_filled(rect.shrink(1.0), 9, theme::mix(Color32::WHITE, t.tint, h));
     }
-    p.text(egui::pos2(rect.center().x, rect.top() + 21.0), egui::Align2::CENTER_CENTER, ic, FontId::new(25.0, FontFamily::Proportional), t.main);
-    p.text(egui::pos2(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, label, font, if current { t.dark } else { INK });
+    let lift = 2.5 * h;
+    p.text(egui::pos2(rect.center().x, rect.top() + 21.0 - lift), egui::Align2::CENTER_CENTER, ic, FontId::new(25.0, FontFamily::Proportional), t.main);
+    p.text(egui::pos2(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, label, font, if current || open { t.dark } else { INK });
     if badge > 0 {
-        let c = egui::pos2(rect.center().x + 15.0, rect.top() + 10.0);
+        let c = egui::pos2(rect.center().x + 15.0, rect.top() + 10.0 - lift);
         let t = badge.to_string();
         let w = (t.len() as f32 * 6.0 + 8.0).max(15.0);
         p.rect_filled(egui::Rect::from_center_size(c, Vec2::new(w, 15.0)), 8, NEGATIVE);
@@ -123,18 +135,51 @@ fn tool_button(ui: &mut Ui, sec: Section, ic: &str, text: &str, current: bool, b
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Pulsante della barra che apre un menu a tendina.
+/// Pulsante della barra che apre un menu a tendina. Il menu scende con una dissolvenza,
+/// centrato sotto il pulsante; con un menu aperto basta passare sugli altri pulsanti per
+/// aprire i loro. Si chiude con una voce, con un clic fuori o con Esc.
 fn tool_menu(ui: &mut Ui, sec: Section, ic: &str, text: &str, current: bool, badge: usize, add: impl FnOnce(&mut Ui)) {
-    let resp = tool_button(ui, sec, ic, text, current, badge, true);
-    let id = ui.make_persistent_id(("tool_menu", text));
+    let ctx = ui.ctx().clone();
+    let open_id = egui::Id::new("dock_menu_open");
+    let key = egui::Id::new(("tool_menu", text));
+    let mut opened: Option<egui::Id> = ctx.data(|d| d.get_temp(open_id)).flatten();
+    let resp = tool_button_open(ui, sec, ic, text, current, badge, true, opened == Some(key));
     if resp.clicked() {
-        ui.memory_mut(|m| m.toggle_popup(id));
+        opened = if opened == Some(key) { None } else { Some(key) };
+    } else if opened.is_some() && opened != Some(key) && resp.hovered() {
+        opened = Some(key);
     }
-    egui::popup_below_widget(ui, id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-        ui.set_min_width(270.0);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        theme::with_section(sec, || add(ui));
-    });
+    let is_open = opened == Some(key);
+    let a = ctx.animate_bool_with_time(key.with("anim"), is_open, theme::anim(0.18));
+    if a > 0.0 {
+        let e = theme::ease_out(a);
+        let w = 300.0;
+        let screen = ctx.screen_rect();
+        let x = (resp.rect.center().x - w / 2.0).clamp(screen.left() + 6.0, (screen.right() - w - 6.0).max(screen.left() + 6.0));
+        let pos = egui::pos2(x, resp.rect.bottom() + 8.0 - (1.0 - e) * 12.0);
+        let t = sec.tint();
+        let shown = egui::Area::new(key.with("area")).order(egui::Order::Foreground).fixed_pos(pos).interactable(is_open).show(&ctx, |ui| {
+            ui.multiply_opacity(e);
+            egui::Frame::popup(ui.style()).corner_radius(12).inner_margin(egui::Margin { left: 6, right: 6, top: 10, bottom: 6 }).show(ui, |ui| {
+                ui.set_width(w - 12.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                theme::with_section(sec, || add(ui));
+            });
+        });
+        // filo colorato in alto: il menu prende il colore della sua sezione
+        let r = shown.response.rect;
+        let stripe = egui::Rect::from_min_max(egui::pos2(r.left() + 14.0, r.top() + 3.0), egui::pos2(r.left() + 14.0 + (r.width() - 28.0) * e, r.top() + 6.0));
+        ctx.layer_painter(shown.response.layer_id).rect_filled(stripe, 2, t.main.gamma_multiply(e));
+        if is_open {
+            let (click, esc, pos) = ctx.input(|i| (i.pointer.any_click(), i.key_pressed(egui::Key::Escape), i.pointer.interact_pos()));
+            let on_button = pos.is_some_and(|p| resp.rect.contains(p));
+            if esc || (click && !on_button) {
+                // clic su una voce (dentro il menu) o fuori: il menu si chiude
+                opened = None;
+            }
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(open_id, opened));
 }
 
 fn tool_sep(ui: &mut Ui) {
@@ -183,7 +228,11 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
     // il documento aperto non accende nessun pulsante della barra
     let cur = if screen == Screen::Editor { None } else { Some(section_of(screen, None)) };
     let is = |s: Section| cur == Some(s);
-    ui.horizontal_centered(|ui| {
+    let full = ui.max_rect();
+    let ctx = ui.ctx().clone();
+    // a sinistra: nuovo documento
+    let left = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(full).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
         ui.spacing_mut().item_spacing.x = 1.0;
         tool_menu(ui, Section::Sales, icon::PLUS_CIRCLE, "Nuovo", false, 0, |ui| {
             for (ic, k) in [
@@ -212,12 +261,36 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 nav.push(Nav::Go(Screen::Documents(DocGroup::SelfInvoices)));
             }
         });
-        if tool_button(ui, Section::Counter, icon::CASH_REGISTER, "Banco", is(Section::Counter), 0, false).on_hover_text("Vendita al banco (F9)").clicked() {
-            nav.push(Nav::Go(Screen::Counter));
-        }
-        tool_sep(ui);
+        })
+        .response
+        .rect;
+    // a destra: la ricerca
+    // con la finestra stretta la ricerca si accorcia per lasciare spazio alle sezioni
+    let dock_w: f32 = ctx.data(|d| d.get_temp(egui::Id::new("dock").with("w"))).unwrap_or(1000.0);
+    let search_w = (full.width() - left.width() - dock_w - 60.0).clamp(150.0, 230.0);
+    let right = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(full).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+            let h = ui.available_height();
+            ui.allocate_ui_with_layout(Vec2::new(search_w + 6.0, h), egui::Layout::left_to_right(egui::Align::Center), |ui| global_search(ui, store, search, search_w, nav));
+        })
+        .response
+        .rect;
+    // al centro: le sezioni del programma, in una barra centrata con l'indicatore della
+    // sezione corrente che scivola da un pulsante all'altro
+    let dock_id = egui::Id::new("dock");
+    let width: f32 = ctx.data(|d| d.get_temp(dock_id.with("w"))).unwrap_or(1000.0);
+    let x0 = (full.center().x - width / 2.0).min(right.left() - 14.0 - width).max(left.right() + 14.0);
+    let area = egui::Rect::from_min_max(egui::pos2(x0, full.top()), egui::pos2((right.left() - 14.0).max(x0 + 10.0), full.bottom()));
+    ctx.data_mut(|d| d.remove::<(egui::Rect, Section)>(here_id()));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let back = ui.painter().add(egui::Shape::Noop);
+        let marker = ui.painter().add(egui::Shape::Noop);
         if tool_button(ui, Section::Start, icon::HOUSE, "Start", is(Section::Start), 0, false).clicked() {
             nav.push(Nav::Go(Screen::Home));
+        }
+        if tool_button(ui, Section::Counter, icon::CASH_REGISTER, "Banco", is(Section::Counter), 0, false).on_hover_text("Vendita al banco (F9)").clicked() {
+            nav.push(Nav::Go(Screen::Counter));
         }
         if tool_button(ui, Section::Customers, icon::USERS, "Clienti", is(Section::Customers), 0, false).clicked() {
             nav.push(Nav::Go(Screen::Parties(PartyRole::Customer)));
@@ -267,6 +340,13 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
             }
         });
         tool_menu(ui, Section::Payments, icon::CURRENCY_CIRCLE_DOLLAR, "Pagamenti", is(Section::Payments), 0, |ui| {
+            if menu_item(ui, icon::HAND_COINS, "Registra incasso o acconto...", "") {
+                nav.push(Nav::Payments(PayView::Register));
+            }
+            if menu_item(ui, icon::RECEIPT, "Incassi registrati", "") {
+                nav.push(Nav::Payments(PayView::Receipts));
+            }
+            menu_sep(ui);
             for (ic, t, v) in [(icon::ARROWS_DOWN_UP, "Tutti", PayView::All), (icon::ARROW_UP, "Entrate", PayView::In), (icon::ARROW_DOWN, "Uscite", PayView::Out)] {
                 if menu_item(ui, ic, t, "") {
                     nav.push(Nav::Payments(v));
@@ -377,9 +457,31 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 nav.push(Nav::Go(Screen::Editor));
             }
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            global_search(ui, store, search, 230.0, nav);
-        });
+        // fondo della barra centrale
+        let dock = ui.min_rect().expand2(egui::vec2(6.0, 0.0)).shrink2(egui::vec2(0.0, 1.0));
+        ui.painter().set(back, egui::Shape::Rect(egui::epaint::RectShape::new(dock, 14, theme::ground(), Stroke::new(1.0_f32, theme::BORDER), egui::StrokeKind::Inside)));
+        // indicatore della sezione corrente: scivola verso il nuovo pulsante e si accende
+        let here: Option<(egui::Rect, Section)> = ctx.data(|d| d.get_temp(here_id()));
+        if let Some(h) = here {
+            ctx.data_mut(|d| d.insert_temp(dock_id.with("last"), h));
+        }
+        let vis = ctx.animate_bool_with_time(dock_id.with("vis"), here.is_some(), theme::anim(0.2));
+        let last: Option<(egui::Rect, Section)> = here.or_else(|| ctx.data(|d| d.get_temp(dock_id.with("last"))));
+        if let (Some((r, sec)), true) = (last, vis > 0.0) {
+            let g = theme::glide(&ctx, dock_id.with("marker"), r, 0.32);
+            let t = sec.tint();
+            let pill = g.shrink2(egui::vec2(1.0, 3.0));
+            let bar = egui::Rect::from_min_max(egui::pos2(pill.left() + 10.0, pill.bottom() - 3.0), egui::pos2(pill.right() - 10.0, pill.bottom()));
+            ui.painter().set(
+                marker,
+                egui::Shape::Vec(vec![
+                    egui::Shape::Rect(egui::epaint::RectShape::filled(pill, 10, Color32::WHITE.gamma_multiply(vis))),
+                    egui::Shape::Rect(egui::epaint::RectShape::new(pill, 10, t.soft.gamma_multiply(vis * 0.75), Stroke::new(1.0_f32, t.soft.gamma_multiply(vis)), egui::StrokeKind::Inside)),
+                    egui::Shape::Rect(egui::epaint::RectShape::filled(bar, 2, t.main.gamma_multiply(vis))),
+                ]),
+            );
+        }
+        ctx.data_mut(|d| d.insert_temp(dock_id.with("w"), ui.min_rect().width()));
     });
 }
 

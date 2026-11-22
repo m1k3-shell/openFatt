@@ -158,6 +158,64 @@ pub fn set_section(ctx: &egui::Context, s: Section) {
     });
 }
 
+// ---------------------------------------------------------------------------- movimento
+
+static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Accende o spegne le animazioni (preferenza della postazione; sempre spente nelle build di
+/// prova e durante le misure dei tempi, così schermate e tempi restano ripetibili).
+pub fn set_motion(on: bool) {
+    MOTION.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn motion() -> bool {
+    MOTION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Durata di un'animazione in secondi (0 con le animazioni spente).
+pub fn anim(secs: f32) -> f32 {
+    if motion() {
+        secs
+    } else {
+        0.0
+    }
+}
+
+/// Andamento che rallenta alla fine (parte veloce, si posa dolcemente).
+pub fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+/// Rettangolo che scivola verso `target` quando questo cambia (indicatore della sezione
+/// corrente nella barra). Chiede di ridisegnare solo mentre si muove.
+pub fn glide(ctx: &egui::Context, id: egui::Id, target: egui::Rect, secs: f32) -> egui::Rect {
+    #[derive(Clone, Copy)]
+    struct Glide {
+        from: egui::Rect,
+        to: egui::Rect,
+        t0: f64,
+    }
+    let now = ctx.input(|i| i.time);
+    let dur = anim(secs) as f64;
+    let mut g = ctx.data(|d| d.get_temp::<Glide>(id)).unwrap_or(Glide { from: target, to: target, t0: now - 10.0 });
+    let at = |g: &Glide| {
+        if dur <= 0.0 {
+            return g.to;
+        }
+        let e = ease_out(((now - g.t0) / dur) as f32);
+        let l = |a: f32, b: f32| a + (b - a) * e;
+        egui::Rect::from_min_max(egui::pos2(l(g.from.left(), g.to.left()), l(g.from.top(), g.to.top())), egui::pos2(l(g.from.right(), g.to.right()), l(g.from.bottom(), g.to.bottom())))
+    };
+    if g.to != target {
+        g = Glide { from: at(&g), to: target, t0: now };
+    }
+    ctx.data_mut(|d| d.insert_temp(id, g));
+    if dur > 0.0 && now - g.t0 < dur {
+        ctx.request_repaint();
+    }
+    at(&g)
+}
+
 /// Fondo della finestra, appena tinto del colore della sezione.
 pub fn ground() -> Color32 {
     mix(GROUND, tint().main, 0.035)

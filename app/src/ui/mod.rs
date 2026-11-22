@@ -19,6 +19,7 @@ pub mod linetools;
 pub mod ledger;
 pub mod mail;
 pub mod parties;
+pub mod payments;
 pub mod pricelists;
 pub mod print;
 pub mod products;
@@ -259,6 +260,10 @@ pub enum Nav {
     Labels(Vec<crate::printing::LabelItem>),
     /// Impostazioni, scheda stampe.
     PrintSettings,
+    /// Scadenzario con la finestra di incasso aperta su questa scadenza.
+    PayDue(i64),
+    /// Animazioni dell'interfaccia accese o spente (preferenza della postazione).
+    Motion(bool),
 }
 
 pub struct Ctx<'a> {

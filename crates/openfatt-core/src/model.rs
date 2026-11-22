@@ -1515,6 +1515,11 @@ pub struct CashEntry {
     pub due_date_id: Option<Id>,
     pub party_id: Option<Id>,
     pub category: String,
+    /// Registrazione di incasso/pagamento di cui fa parte (può coprire più scadenze).
+    pub payment_id: Option<Id>,
+    /// Modalità (codice MPxx) e riferimento (n. assegno, CRO...) della registrazione: solo lettura.
+    pub method: String,
+    pub reference: String,
 }
 
 impl Default for CashEntry {
@@ -1529,6 +1534,9 @@ impl Default for CashEntry {
             due_date_id: None,
             party_id: None,
             category: String::new(),
+            payment_id: None,
+            method: String::new(),
+            reference: String::new(),
         }
     }
 }

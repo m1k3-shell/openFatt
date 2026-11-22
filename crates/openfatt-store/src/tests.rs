@@ -717,3 +717,163 @@ fn riepilogo_documenti_sempre_allineato() {
     s.conn().execute("UPDATE documents SET data = json_set(data, '$.legacy_fe', json('true')) WHERE id = ?1", [doc.id]).unwrap();
     assert_eq!(s.conn().query_row("SELECT s_legacy_fe FROM documents WHERE id = ?1", [doc.id], |r| r.get::<_, i64>(0)).unwrap(), 1);
 }
+
+/// Tre fatture da 122 €: un acconto di 300 € salda le prime due e lascia 66 € sulla terza.
+fn three_invoices(s: &Store, c: &Party, v: &VatRef) -> Vec<Document> {
+    (0..3)
+        .map(|i| {
+            let mut doc = Document::new(DocKind::Invoice);
+            doc.date = d(2026, 1, 10 + i);
+            doc.party_id = Some(c.id);
+            doc.lines.push(DocLine { description: format!("Servizio {}", i + 1), qty: dec!(1), unit_price: dec!(100), vat: v.clone(), ..Default::default() });
+            let doc = s.save_document(&doc).unwrap();
+            s.issue_document(doc.id).unwrap()
+        })
+        .collect()
+}
+
+fn payment(date: NaiveDate, mp: &str, account: &str, reference: &str, allocations: Vec<Allocation>) -> NewPayment {
+    NewPayment { date, mp_code: mp.into(), account: account.into(), reference: reference.into(), notes: String::new(), allocations }
+}
+
+fn alloc(due_id: i64, amount: Decimal, writeoff: bool) -> Allocation {
+    Allocation { due_id, amount, writeoff }
+}
+
+#[test]
+fn acconto_su_piu_fatture_con_residuo_sull_ultima() {
+    let (s, c, _p, v) = setup();
+    let docs = three_invoices(&s, &c, &v);
+    let open = s.open_dues_of_party(Some(c.id), "", true).unwrap();
+    assert_eq!(open.len(), 3);
+    assert!(open.windows(2).all(|w| w[0].date <= w[1].date), "dalla più vecchia");
+    // ripartizione automatica dalla più vecchia
+    let split = ledger::distribute(dec!(300), &open.iter().map(|d| d.residual()).collect::<Vec<_>>());
+    assert_eq!(split, vec![dec!(122), dec!(122), dec!(56)]);
+    // il cliente vuole lasciare 80 euro sulla terza: la quota diventa 42
+    let allocations = vec![alloc(open[0].id, dec!(122), false), alloc(open[1].id, dec!(122), false), alloc(open[2].id, open[2].residual() - dec!(80), false)];
+    let pid = s.register_payment(&payment(d(2026, 2, 5), "MP02", "Banca", "n. 0012345 Banca Uno", allocations)).unwrap();
+    let after = s.open_dues_of_party(Some(c.id), "", true).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].document_id, docs[2].id);
+    assert_eq!(after[0].residual(), dec!(80));
+    assert_eq!(after[0].paid_date, Some(d(2026, 2, 5)));
+    // un movimento di prima nota per fattura, con modalità e riferimento
+    let cash = s.cash_entries(None, None, Some("Banca")).unwrap();
+    assert_eq!(cash.len(), 3);
+    assert_eq!(cash.iter().map(|e| e.amount).sum::<Decimal>(), dec!(286));
+    assert!(cash.iter().all(|e| e.payment_id == Some(pid) && e.method == "MP02" && e.reference.contains("0012345")));
+    assert!(cash.iter().any(|e| e.description.contains("acconto")), "{:?}", cash);
+    assert_eq!(cash.iter().filter_map(|e| e.document_id).collect::<std::collections::BTreeSet<_>>().len(), 3);
+    // i movimenti non si cancellano dalla prima nota
+    assert!(s.delete_cash_entry(cash[0].id).is_err());
+    // la registrazione si vede da ogni fattura
+    let p = s.payments_of_document(docs[0].id).unwrap();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].total, dec!(286));
+    assert_eq!(p[0].lines.len(), 3);
+    assert_eq!(p[0].method_text(), "Assegno n. 0012345 Banca Uno");
+    // saldo degli 80 euro in contanti, poi si annulla solo l'acconto
+    let saldo = s.register_payment(&payment(d(2026, 3, 1), "MP01", "Cassa", "", vec![alloc(open[2].id, dec!(80), false)])).unwrap();
+    assert!(s.open_dues_of_party(Some(c.id), "", true).unwrap().is_empty());
+    s.cancel_payment(pid).unwrap();
+    let back = s.open_dues_of_party(Some(c.id), "", true).unwrap();
+    assert_eq!(back.iter().map(|d| d.residual()).collect::<Vec<_>>(), vec![dec!(122), dec!(122), dec!(42)]);
+    assert_eq!(back[2].paid_date, Some(d(2026, 3, 1)), "resta la data del saldo");
+    assert!(back[0].paid_date.is_none());
+    assert_eq!(s.cash_entries(None, None, None).unwrap().len(), 1);
+    assert_eq!(s.payments(None, None).unwrap().iter().map(|p| p.id).collect::<Vec<_>>(), vec![saldo]);
+}
+
+#[test]
+fn incassi_rifiutati_e_annullamento_di_una_scadenza() {
+    let (s, c, _p, v) = setup();
+    three_invoices(&s, &c, &v);
+    let open = s.open_dues_of_party(Some(c.id), "", true).unwrap();
+    let pay = |a: Vec<Allocation>| s.register_payment(&payment(d(2026, 2, 1), "MP05", "Banca", "", a));
+    // oltre il residuo, due volte la stessa scadenza, nessun importo
+    assert!(pay(vec![alloc(open[0].id, dec!(123), false)]).is_err());
+    assert!(pay(vec![alloc(open[0].id, dec!(1), false), alloc(open[0].id, dec!(1), false)]).is_err());
+    assert!(pay(vec![alloc(open[0].id, dec!(0), false)]).is_err());
+    // scadenze di clienti diversi
+    let other = s.save_party(&Party { name: "Altro cliente".into(), ..Default::default() }).unwrap();
+    let mut doc = Document::new(DocKind::Invoice);
+    doc.date = d(2026, 1, 20);
+    doc.party_id = Some(other.id);
+    doc.lines.push(DocLine { description: "X".into(), qty: dec!(1), unit_price: dec!(10), vat: v.clone(), ..Default::default() });
+    let doc = s.save_document(&doc).unwrap();
+    let doc = s.issue_document(doc.id).unwrap();
+    assert!(pay(vec![alloc(open[0].id, dec!(1), false), alloc(doc.due_dates[0].id, dec!(1), false)]).is_err());
+    // saldo della prima e acconto con abbuono sulla seconda: chiuse entrambe
+    let pid = pay(vec![alloc(open[0].id, dec!(122), false), alloc(open[1].id, dec!(120), true)]).unwrap();
+    let rows = s.dues_by_id(&[open[0].id, open[1].id]).unwrap();
+    assert!(rows.iter().all(|r| r.residual().is_zero()));
+    assert_eq!(rows[1].writeoff, dec!(2));
+    // si annullano i pagamenti della sola prima scadenza: la registrazione resta per la seconda
+    s.unpay_due(open[0].id).unwrap();
+    let p = s.payments(None, None).unwrap();
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0].id, pid);
+    assert_eq!(p[0].total, dec!(120));
+    assert_eq!(p[0].lines.len(), 1);
+    // annullando la registrazione torna via anche l'abbuono
+    s.cancel_payment(pid).unwrap();
+    assert_eq!(s.dues_by_id(&[open[1].id]).unwrap()[0].residual(), dec!(122));
+    assert!(s.cash_entries(None, None, None).unwrap().is_empty());
+}
+
+#[test]
+fn residuo_spostato_a_una_nuova_scadenza() {
+    let (s, c, _p, v) = setup();
+    let docs = three_invoices(&s, &c, &v);
+    let due = s.open_dues_of_party(Some(c.id), "", true).unwrap()[0].clone();
+    s.pay_due(due.id, d(2026, 2, 1), dec!(22), "Cassa", false).unwrap();
+    s.reschedule_residual(due.id, d(2026, 6, 30)).unwrap();
+    let doc = s.document(docs[0].id).unwrap();
+    assert_eq!(doc.due_dates.len(), 2);
+    assert_eq!(doc.due_dates[0].amount, dec!(22));
+    assert!(doc.due_dates[0].is_paid());
+    assert_eq!(doc.due_dates[1].date, d(2026, 6, 30));
+    assert_eq!(doc.due_dates[1].residual(), dec!(100));
+    // pay_due sulla cassa è registrato come contanti
+    assert_eq!(s.payments_of_document(doc.id).unwrap()[0].mp_code, "MP01");
+    // scadenza senza pagamenti: cambia solo la data
+    let second = s.open_dues_of_party(Some(c.id), "", true).unwrap().into_iter().find(|d| d.document_id == docs[1].id).unwrap();
+    s.reschedule_residual(second.id, d(2026, 7, 31)).unwrap();
+    let doc2 = s.document(docs[1].id).unwrap();
+    assert_eq!(doc2.due_dates.len(), 1);
+    assert_eq!(doc2.due_dates[0].date, d(2026, 7, 31));
+}
+
+#[test]
+fn pagamenti_registrati_prima_dell_aggiornamento_diventano_registrazioni() {
+    let path = std::env::temp_dir().join(format!("openfatt-pagamenti-{}.gadb", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let last = crate::migrations::MIGRATIONS.len();
+    {
+        // archivio fermo alla versione precedente, con un incasso registrato allora
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for sql in &crate::migrations::MIGRATIONS[..last - 1] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", (last - 1) as i64).unwrap();
+        conn.execute_batch(
+            "INSERT INTO documents(id, kind, status, register, series, year, number, date, party_id, party_name, total, net_to_pay, version, data)
+                 VALUES (1, 'FT', 'EMESSO', 'V', '', 2026, 1, '2026-01-10', NULL, 'Mario Rossi', '122', '122', 1, '{}');
+             INSERT INTO due_dates(id, document_id, date, amount, mp_code, paid, paid_date) VALUES (1, 1, '2026-02-10', '122', 'MP05', '50', '2026-02-01');
+             INSERT INTO cash_entries(id, date, description, account, amount, document_id, due_date_id, category) VALUES (7, '2026-02-01', 'Incasso', 'Banca', '50', 1, 1, 'Incassi clienti');",
+        )
+        .unwrap();
+    }
+    let s = Store::open(&path).unwrap();
+    let p = s.payments(None, None).unwrap();
+    assert_eq!(p.len(), 1);
+    assert!(p[0].receivable);
+    assert_eq!(p[0].total, dec!(50));
+    assert_eq!(p[0].lines[0].due_id, 1);
+    assert_eq!(s.cash_entries(None, None, None).unwrap()[0].payment_id, Some(7));
+    s.cancel_payment(7).unwrap();
+    assert_eq!(s.dues_by_id(&[1]).unwrap()[0].residual(), dec!(122));
+    drop(s);
+    let _ = std::fs::remove_file(&path);
+}

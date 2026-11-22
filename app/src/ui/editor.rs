@@ -1653,7 +1653,7 @@ impl Editor {
         }
     }
 
-    fn totals_panel(&self, ui: &mut egui::Ui, totals: &Result<calc::Totals, calc::CalcError>) {
+    fn totals_panel(&self, ui: &mut egui::Ui, cx: &mut Ctx, totals: &Result<calc::Totals, calc::CalcError>) {
         theme::card_frame().show(ui, |ui| ui.vertical(|ui| {
             ui.set_min_width(320.0);
             ui.label(theme::medium("Totali").size(16.0));
@@ -1724,13 +1724,30 @@ impl Editor {
                 ui.add_space(6.0);
                 ui.label(theme::medium("Scadenze"));
                 for d in &self.doc.due_dates {
-                    ui.label(format!(
-                        "{}  € {}  {}{}",
-                        d.date.format("%d/%m/%Y"),
-                        eur(d.amount),
-                        codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code),
-                        if d.is_paid() { "  \u{E182} pagata" } else if !d.paid.is_zero() { "  (parziale)" } else { "" }
-                    ));
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}  € {}  {}", d.date.format("%d/%m/%Y"), eur(d.amount), codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code)));
+                        if d.is_paid() {
+                            theme::pill(ui, "pagata", Tone::Positive);
+                        } else if !d.paid.is_zero() {
+                            theme::pill(ui, &format!("acconto € {} · resta € {}", eur(d.paid), eur(d.residual())), Tone::Warning);
+                        }
+                    });
+                }
+                // incassi e pagamenti registrati sul documento (anche cumulativi con altri)
+                if self.doc.id != 0 && self.doc.due_dates.iter().any(|d| !d.paid.is_zero()) {
+                    let doc_id = self.doc.id;
+                    let (payments, _) = super::memo(ui.ctx(), "editor_payments", cx.store.generation(), doc_id, || cx.store.payments_of_document(doc_id).unwrap_or_default());
+                    if !payments.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(theme::medium(if self.doc.kind.is_purchase() != self.doc.kind.is_credit() { "Pagamenti registrati" } else { "Incassi registrati" }));
+                        for p in payments.iter() {
+                            let here: Decimal = p.lines.iter().filter(|l| l.document_id == doc_id).map(|l| l.amount).sum();
+                            let r = ui.label(format!("{}  € {}  {}", p.date.format("%d/%m/%Y"), eur(here), p.method_text()));
+                            if p.lines.len() > 1 {
+                                r.on_hover_text(format!("Registrazione di € {} su {} documenti", eur(p.total), p.lines.len()));
+                            }
+                        }
+                    }
                 }
             } else if let (Some(pid), Ok(t)) = (self.doc.payment_id, totals) {
                 if self.doc.kind.has_due_dates() {
@@ -1885,7 +1902,7 @@ impl Editor {
                                         self.fiscal_section(ui);
                                     });
                                 });
-                                self.totals_panel(ui, &totals);
+                                self.totals_panel(ui, cx, &totals);
                             });
                         }
                         DocTab::Transport => {

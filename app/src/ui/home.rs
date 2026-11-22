@@ -218,7 +218,7 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
             amount: Some(d.residual()),
             action_icon: icon::HAND_COINS,
             action: "Registra incasso",
-            go: Go::Nav(Nav::Go(Screen::Dues)),
+            go: Go::Nav(Nav::PayDue(d.id)),
         });
     }
     if overdue.len() > 3 {

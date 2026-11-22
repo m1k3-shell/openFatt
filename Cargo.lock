@@ -1245,9 +1245,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2447,7 +2447,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openfatt"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-backup"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -2495,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-bank"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "openfatt-core",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "rust_decimal",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-fatturapa"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-fbread"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-interop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "calamine",
  "chrono",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-pdf"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "miniz_oxide 0.8.9",
@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-pec"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "imap",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-pos"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "openfatt-core",
@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-sign"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2604,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-store"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2624,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "openfatt-update"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "ring",
  "serde",
@@ -3859,9 +3859,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

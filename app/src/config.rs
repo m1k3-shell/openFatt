@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 pub struct AppConfig {
     pub recent: Vec<PathBuf>,
     pub last: Option<PathBuf>,
+    /// Animazioni dell'interfaccia spente (transizioni, menu che scendono).
+    #[serde(default)]
+    pub still: bool,
 }
 
 /// Dove stanno i dati (vedi anche README, sezione "Dove sono i dati"):

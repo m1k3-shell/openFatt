@@ -291,6 +291,8 @@ pub struct Grid {
     shown: usize,
     /// Il clic su una riga la rende corrente senza toccare le righe spuntate.
     pub keep_selection: bool,
+    /// Righe scelte con fondo chiaro invece che pieno (elenchi con azioni nelle righe).
+    pub soft_selection: bool,
 }
 
 struct Cached {
@@ -310,6 +312,12 @@ pub struct Events {
 impl Grid {
     pub fn new(name: &'static str) -> Self {
         Grid { name, ..Default::default() }
+    }
+
+    /// Righe scelte con fondo chiaro (vedi `soft_selection`).
+    pub fn soft(mut self) -> Self {
+        self.soft_selection = true;
+        self
     }
 
     fn load(&mut self, store: &Store) {
@@ -777,8 +785,14 @@ impl Grid {
             .unwrap_or(0);
         // riga selezionata ben visibile: fondo blu, testo bianco
         let saved_selection = ui.visuals().selection;
-        ui.visuals_mut().selection.bg_fill = theme::tint().main;
-        ui.visuals_mut().selection.stroke.color = egui::Color32::WHITE;
+        if self.soft_selection {
+            // righe spuntate per un'azione: fondo chiaro, il contenuto resta leggibile
+            ui.visuals_mut().selection.bg_fill = theme::tint().soft;
+            ui.visuals_mut().selection.stroke.color = theme::tint().dark;
+        } else {
+            ui.visuals_mut().selection.bg_fill = theme::tint().main;
+            ui.visuals_mut().selection.stroke.color = egui::Color32::WHITE;
+        }
         let mut tb = TableBuilder::new(ui)
             .id_salt(("grid", self.name))
             .striped(false)

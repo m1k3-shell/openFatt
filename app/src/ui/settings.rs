@@ -63,6 +63,12 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         ui.selectable_value(&mut st.tab, Tab::Sign, "Firma digitale");
         ui.selectable_value(&mut st.tab, Tab::Rt, "Registratore di cassa");
         ui.selectable_value(&mut st.tab, Tab::Users, "Dati, utenti e postazioni");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut on = super::theme::motion();
+            if ui.checkbox(&mut on, "Animazioni").on_hover_text("Transizioni tra le schermate e menu che scendono (preferenza di questo computer)").changed() {
+                cx.nav.push(Nav::Motion(on));
+            }
+        });
     });
     ui.separator();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match st.tab {
