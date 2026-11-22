@@ -153,17 +153,27 @@ pub fn einvoice_pdf(xml: &[u8]) -> Result<Vec<u8>, String> {
 pub fn temp_file(name: &str, data: &[u8]) -> Result<PathBuf, String> {
     let dir = std::env::temp_dir().join("GestionaleAperto");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let safe: String = name.chars().map(|c| if c.is_alphanumeric() || ".-_".contains(c) { c } else { '_' }).collect();
-    let p = dir.join(safe);
+    let p = dir.join(safe_name(name));
     std::fs::write(&p, data).map_err(|e| e.to_string())?;
     Ok(p)
 }
 
-/// Apre un file con il programma predefinito di Windows.
+/// Apre un file (o un indirizzo web) con il programma predefinito di Windows.
+///
+/// Si usa direttamente ShellExecute: passare dal prompt dei comandi (`cmd /C start`) era
+/// pericoloso, perché caratteri come `&` o `^` nel percorso venivano interpretati come
+/// comandi.
 pub fn open_path(p: &Path) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(p).spawn();
+        use std::os::windows::ffi::OsStrExt;
+        let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let file = wide(p.as_os_str());
+        let verb = wide(std::ffi::OsStr::new("open"));
+        // SAFETY: stringhe UTF-16 terminate da zero che vivono per tutta la chiamata
+        unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
+        }
     }
     #[cfg(not(windows))]
     {
@@ -171,10 +181,92 @@ pub fn open_path(p: &Path) {
     }
 }
 
+/// Apre un file prodotto dal programma (PDF, stampe, esportazioni).
 pub fn open_bytes(name: &str, data: &[u8]) -> Result<(), String> {
     let p = temp_file(name, data)?;
     open_path(&p);
     Ok(())
+}
+
+/// Tipi di file che si possono aprire direttamente anche se arrivano da fuori (allegati delle
+/// fatture ricevute, delle email, documenti allegati): non contengono programmi eseguibili.
+const SAFE_TO_OPEN: &[&str] = &[
+    "pdf", "xml", "txt", "csv", "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "docx", "xlsx", "pptx", "odt", "ods", "odp", "rtf", "p7m", "eml",
+];
+
+/// Vero se un file con questo nome si può aprire senza rischi.
+pub fn safe_to_open(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.trim().to_ascii_lowercase()).unwrap_or_default();
+    SAFE_TO_OPEN.contains(&ext.as_str())
+}
+
+/// Apre un file che arriva da fuori (allegato di una fattura o di un'email, file allegato
+/// all'archivio). Il file viene segnato come "scaricato da Internet", così Windows e Office
+/// lo aprono in modalità protetta; i tipi che possono contenere programmi (.exe, .js, .hta,
+/// .lnk, .docm...) non vengono aperti: si propone di salvarli per farli controllare.
+pub fn open_untrusted(name: &str, data: &[u8]) -> Result<(), String> {
+    if !safe_to_open(name) {
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_string()).unwrap_or_else(|| "senza estensione".into());
+        let save = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("File potenzialmente pericoloso")
+            .set_description(format!(
+                "Per sicurezza il file \"{}\" non viene aperto: i file di tipo .{} possono contenere programmi.\n\nSalvarlo in una cartella per farlo controllare dall'antivirus?",
+                name, ext
+            ))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if save == rfd::MessageDialogResult::Yes {
+            if let Some(p) = rfd::FileDialog::new().set_file_name(safe_name(name)).save_file() {
+                std::fs::write(&p, data).map_err(|e| e.to_string())?;
+                mark_from_internet(&p);
+            }
+        }
+        return Ok(());
+    }
+    let p = temp_file(name, data)?;
+    mark_from_internet(&p);
+    open_path(&p);
+    Ok(())
+}
+
+/// Segna un file come proveniente da Internet (Mark of the Web): Windows chiede conferma
+/// prima di eseguirlo e Office lo apre in visualizzazione protetta.
+pub fn mark_from_internet(p: &Path) {
+    #[cfg(windows)]
+    {
+        let mut ads = p.as_os_str().to_os_string();
+        ads.push(":Zone.Identifier");
+        let _ = std::fs::write(ads, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+    #[cfg(not(windows))]
+    let _ = p;
+}
+
+/// Nome di file senza caratteri pericolosi o non validi.
+fn safe_name(name: &str) -> String {
+    let s: String = name.chars().map(|c| if c.is_alphanumeric() || ".-_".contains(c) { c } else { '_' }).collect();
+    // niente nomi fatti solo di punti (".." risalirebbe di cartella) né punti finali
+    let s = s.trim_matches('.').to_string();
+    if s.is_empty() {
+        "file".into()
+    } else {
+        s.chars().take(150).collect()
+    }
+}
+
+/// Toglie i file temporanei del programma più vecchi di un giorno (stampe e allegati aperti
+/// restano altrimenti nella cartella temporanea con i dati dei clienti).
+pub fn clean_temp_files() {
+    let dir = std::env::temp_dir().join("GestionaleAperto");
+    let Ok(list) = std::fs::read_dir(&dir) else { return };
+    let limit = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    for e in list.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).map(|t| t < limit).unwrap_or(false);
+        if old && e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -292,6 +384,31 @@ pub fn spawn_test(cfg: PecConfig, password: String, tx: std::sync::mpsc::Sender<
         let r = openfatt_pec::test_connection(&cfg, &password).map_err(|e| e.to_string());
         let _ = tx.send(PecJobResult::Tested(r));
     });
+}
+
+#[cfg(test)]
+mod sicurezza {
+    use super::*;
+
+    #[test]
+    fn allegati_pericolosi_non_si_aprono() {
+        for ok in ["fattura.pdf", "FOTO.JPG", "listino.xlsx", "IT01234567890_00001.xml", "contratto.p7m"] {
+            assert!(safe_to_open(ok), "{}", ok);
+        }
+        for bad in ["fattura.pdf.exe", "documento.js", "avviso.hta", "collegamento.lnk", "macro.docm", "foglio.xlsm", "script.ps1", "pagina.html", "archivio.zip", "senza_estensione", "fattura.pdf.", "x.scr", "x.bat", "x.cmd", "x.vbs", "x.msi"] {
+            assert!(!safe_to_open(bad), "{}", bad);
+        }
+    }
+
+    #[test]
+    fn nomi_dei_file_temporanei_sicuri() {
+        assert_eq!(safe_name("..\\..\\Windows\\evil.dll"), "_.._Windows_evil.dll");
+        assert_eq!(safe_name("../../x.pdf"), "_.._x.pdf");
+        assert_eq!(safe_name("a&b^c%d.pdf"), "a_b_c_d.pdf");
+        assert_eq!(safe_name(".."), "file");
+        assert_eq!(safe_name("fattura.pdf..."), "fattura.pdf");
+        assert!(safe_name(&"a".repeat(500)).len() <= 150);
+    }
 }
 
 #[cfg(test)]

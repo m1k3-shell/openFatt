@@ -9,6 +9,7 @@ mod demo;
 mod backups;
 mod easyfatt;
 mod printing;
+mod profile;
 mod reports;
 mod mailer;
 mod services;

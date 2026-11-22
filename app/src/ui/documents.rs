@@ -166,7 +166,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
     // un filtro sulla data deve poter uscire dall'anno scelto
     let date_filtered = st.grids.iter().any(|(g, grid)| *g == group && grid.has_filter("date"));
     let year = if date_filtered { None } else { st.year };
-    let filter = DocFilter { kinds: kinds.clone(), year, search: st.search.clone(), status: st.status, ..Default::default() };
+    let search = super::settled(ui.ctx(), ("documents_search", format!("{:?}", group)), &st.search);
+    let filter = DocFilter { kinds: kinds.clone(), year, search, status: st.status, ..Default::default() };
     let fkey = (format!("{:?}", filter.kinds), filter.year, filter.search.clone(), filter.status.map(|s| s.code()));
     let all_rc = st.data.get(cx.store.generation(), &fkey, || cx.store.documents(&filter).unwrap_or_default());
     let all: &Vec<DocSummary> = &all_rc;

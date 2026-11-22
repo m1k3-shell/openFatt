@@ -295,6 +295,53 @@ impl<K: PartialEq + Clone, V> Cache<K, V> {
     }
 }
 
+/// Interrogazione tenuta in memoria finché l'archivio (`generation`) e la `key` non
+/// cambiano: le schermate la usano per tutto quello che leggono a ogni ridisegno, così
+/// un movimento del mouse non rilegge l'archivio. Restituisce i dati e una versione da
+/// passare alla griglia (`Grid.version`), che cambia solo quando cambiano i dati.
+pub fn memo<K, V>(ctx: &egui::Context, id: impl std::hash::Hash, generation: u64, key: K, load: impl FnOnce() -> V) -> (std::sync::Arc<V>, u64)
+where
+    K: PartialEq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    type Entry<K, V> = (u64, K, std::sync::Arc<V>, u64);
+    let id = egui::Id::new(("memo", id));
+    let old = ctx.data(|d| d.get_temp::<Entry<K, V>>(id));
+    if let Some((g, k, v, ver)) = &old {
+        if *g == generation && *k == key {
+            return (v.clone(), *ver);
+        }
+    }
+    let v = std::sync::Arc::new(load());
+    let ver = old.map(|e| e.3).unwrap_or(0).wrapping_add(1).max(1);
+    ctx.data_mut(|d| d.insert_temp(id, (generation, key, v.clone(), ver)));
+    (v, ver)
+}
+
+/// Testo di ricerca "assestato": cambia solo quando chi scrive si ferma per un attimo, così
+/// con archivi grandi non si rilegge l'elenco a ogni lettera digitata.
+pub fn settled(ctx: &egui::Context, id: impl std::hash::Hash, text: &str) -> String {
+    const PAUSE: f64 = 0.22;
+    let id = egui::Id::new(("settled", id));
+    let now = ctx.input(|i| i.time);
+    // (testo attuale, momento dell'ultima modifica, testo assestato)
+    let (live, at, done) = ctx.data(|d| d.get_temp::<(String, f64, String)>(id)).unwrap_or_else(|| (text.to_string(), f64::MIN, text.to_string()));
+    let (at, done) = if live != text {
+        (now, done)
+    } else if done != text && now - at >= PAUSE {
+        (at, text.to_string())
+    } else {
+        (at, done)
+    };
+    // svuotare la ricerca ha effetto subito
+    let done = if text.trim().is_empty() { text.to_string() } else { done };
+    if done != text {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((PAUSE - (now - at)).max(0.01)));
+    }
+    ctx.data_mut(|d| d.insert_temp(id, (text.to_string(), at, done.clone())));
+    done
+}
+
 /// Area dei permessi a cui appartiene una schermata.
 pub fn screen_area(s: Screen) -> openfatt_store::Area {
     use business::Extra;

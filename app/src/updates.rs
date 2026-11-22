@@ -123,7 +123,14 @@ fn from_response(body: &str, current: &str) -> Option<Update> {
 
 /// Versione di questo programma (OPENFATT_VERSIONE la sostituisce nelle prove).
 pub fn current() -> String {
-    std::env::var("OPENFATT_VERSIONE").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+    // la versione finta (per provare l'avviso) solo nelle build di prova: altrimenti si
+    // potrebbe far "aggiornare" il programma a una versione più vecchia
+    if cfg!(any(feature = "strumenti-prova", feature = "prova-aggiornamento")) {
+        if let Ok(v) = std::env::var("OPENFATT_VERSIONE") {
+            return v;
+        }
+    }
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 fn fetch() -> Option<Update> {

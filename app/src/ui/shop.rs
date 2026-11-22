@@ -47,13 +47,12 @@ fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(30)).build()
 }
 
+/// Indirizzo del negozio: sempre https, perché con le richieste viaggiano le chiavi di
+/// accesso (un indirizzo http:// le manderebbe in chiaro).
 fn base(cfg: &ShopSettings) -> String {
     let u = cfg.url.trim().trim_end_matches('/');
-    if u.starts_with("http") {
-        u.to_string()
-    } else {
-        format!("https://{}", u)
-    }
+    let u = u.strip_prefix("https://").or_else(|| u.strip_prefix("http://")).unwrap_or(u);
+    format!("https://{}", u)
 }
 
 fn fetch_orders(cfg: &ShopSettings, secret: &str) -> Result<String, String> {

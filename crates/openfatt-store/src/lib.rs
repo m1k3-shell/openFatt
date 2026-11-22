@@ -112,6 +112,13 @@ pub struct Store {
     /// Postazione registrata nella tabella sessions (0 = nessuna)
     session: std::cell::Cell<i64>,
     network: bool,
+    /// Righe dei registri IVA già calcolate, per documento: si rifanno solo per i documenti
+    /// cambiati (la chiave contiene versione e revisione del documento).
+    pub(crate) vat_rows: std::cell::RefCell<std::collections::HashMap<(i64, bool), (u64, Option<openfatt_core::vat::RegisterRow>)>>,
+    /// Dati dei documenti già ridotti per le statistiche, con la stessa regola.
+    pub(crate) stat_docs: std::cell::RefCell<std::collections::HashMap<i64, (u64, std::sync::Arc<stats::StatDoc>)>>,
+    /// Tentativi di accesso sbagliati di fila e fine dell'attesa obbligatoria.
+    pub(crate) login_failures: std::cell::Cell<(u32, Option<std::time::Instant>)>,
 }
 
 /// Un archivio su una cartella di rete (\\server\cartella o unità di rete) non può usare
@@ -219,7 +226,12 @@ impl Store {
         }
         conn.pragma_update(None, "cache_size", -32000)?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
-        let mut s = Store { conn, path, savepoints: std::cell::Cell::new(0), user: Default::default(), session: Default::default(), network };
+        if !network {
+            // lettura del file mappata in memoria: con archivi grandi gli elenchi sono più veloci
+            // (non su cartelle di rete, dove non è affidabile)
+            let _ = conn.query_row("PRAGMA mmap_size = 268435456", [], |_| Ok(()));
+        }
+        let mut s = Store { conn, path, savepoints: std::cell::Cell::new(0), user: Default::default(), session: Default::default(), network, vat_rows: Default::default(), stat_docs: Default::default(), login_failures: Default::default() };
         migrations::migrate(&mut s.conn)?;
         s.seed_defaults()?;
         s.seed_warehouses()?;

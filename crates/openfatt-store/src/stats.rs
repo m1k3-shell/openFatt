@@ -6,9 +6,9 @@ use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 
 use openfatt_core::calc;
-use openfatt_core::model::{DocKind, DocStatus, LineKind};
+use openfatt_core::model::{DocKind, LineKind};
 
-use crate::{DocFilter, Result, Store};
+use crate::{Result, Store};
 
 /// Riga di statistica: vendite (imponibile in euro), costo e margine.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -54,6 +54,57 @@ pub struct FlowRow {
     pub overdue_out: Decimal,
 }
 
+#[derive(Debug, Clone)]
+struct Brief {
+    code: String,
+    description: String,
+    category: String,
+    cost: Decimal,
+}
+
+/// Documento ridotto a quello che serve alle statistiche (importi già in euro e col segno).
+#[derive(Debug)]
+pub(crate) struct StatDoc {
+    date: NaiveDate,
+    party_id: Option<i64>,
+    party_name: String,
+    agent_id: Option<i64>,
+    lines: Vec<StatLine>,
+}
+
+#[derive(Debug)]
+struct StatLine {
+    product_id: Option<i64>,
+    /// riga del documento (non una riga aggiunta dal calcolo, come il bollo)
+    item: bool,
+    qty: Decimal,
+    revenue: Decimal,
+    /// costo indicato sulla riga (zero: si usa quello dell'articolo)
+    unit_cost: Decimal,
+}
+
+impl StatDoc {
+    fn from(d: &openfatt_core::model::Document) -> Option<StatDoc> {
+        let t = calc::compute(d).ok()?;
+        let sign = if d.kind.is_credit() { Decimal::NEGATIVE_ONE } else { Decimal::ONE };
+        let mut lines = Vec::new();
+        for lc in t.lines.iter().filter(|l| !l.is_text) {
+            let l = lc.index.and_then(|i| d.lines.get(i));
+            if l.map(|l| l.kind != LineKind::Item).unwrap_or(false) {
+                continue;
+            }
+            lines.push(StatLine {
+                product_id: l.and_then(|l| l.product_id),
+                item: lc.index.is_some(),
+                qty: lc.qty * sign,
+                revenue: d.to_eur(lc.total) * sign,
+                unit_cost: l.map(|l| l.unit_cost).unwrap_or_default(),
+            });
+        }
+        Some(StatDoc { date: d.date, party_id: d.party_id, party_name: d.party.display_name(), agent_id: d.agent_id, lines })
+    }
+}
+
 const SALES_STAT: &[DocKind] = &[DocKind::Invoice, DocKind::AccompanyingInvoice, DocKind::CreditNote, DocKind::DebitNote, DocKind::Fee, DocKind::RetailSale];
 const PURCHASE_STAT: &[DocKind] = &[DocKind::PurchaseInvoice, DocKind::PurchaseCreditNote];
 
@@ -62,27 +113,40 @@ impl Store {
     /// Le fatture differite che evadono DDT si contano una volta (sulla fattura).
     pub fn statistics(&self, by: StatBy, from: NaiveDate, to: NaiveDate) -> Result<Vec<StatRow>> {
         let kinds: Vec<DocKind> = if by == StatBy::Supplier { PURCHASE_STAT.to_vec() } else { SALES_STAT.to_vec() };
-        let list = self.documents(&DocFilter { kinds, status: Some(DocStatus::Issued), from: Some(from), to: Some(to), ..Default::default() })?;
         let agents: BTreeMap<i64, String> = self.agents(true)?.into_iter().map(|a| (a.id, a.name)).collect();
         let mut rows: BTreeMap<String, StatRow> = BTreeMap::new();
-        let mut product_cache: std::collections::HashMap<i64, Option<openfatt_core::model::Product>> = std::collections::HashMap::new();
-        for s in list {
-            let d = self.document(s.id)?;
-            let Ok(t) = calc::compute(&d) else { continue };
-            let sign = if d.kind.is_credit() { Decimal::NEGATIVE_ONE } else { Decimal::ONE };
-            let mut touched: Vec<String> = Vec::new();
-            for lc in t.lines.iter().filter(|l| !l.is_text) {
-                let l = lc.index.and_then(|i| d.lines.get(i));
-                if l.map(|l| l.kind != LineKind::Item).unwrap_or(false) {
-                    continue;
+        // dell'articolo servono solo codice, descrizione, categoria e costo: si leggono senza
+        // aprire tutta la scheda (con molti articoli diversi era la parte più lenta)
+        let mut product_cache: std::collections::HashMap<i64, Option<Brief>> = std::collections::HashMap::new();
+        let mut brief = self.conn().prepare_cached("SELECT code, description, COALESCE(category, ''), json_extract(data, '$.cost') FROM products WHERE id = ?1")?;
+        for (id, key) in self.issued_keys(&kinds, from, to)? {
+            // ogni documento si rilegge solo se è cambiato dall'ultima statistica
+            let cached = self.stat_docs.borrow().get(&id).filter(|(k, _)| *k == key).map(|(_, d)| d.clone());
+            let d = match cached {
+                Some(d) => d,
+                None => {
+                    let Some(d) = StatDoc::from(&self.document(id)?) else { continue };
+                    let d = std::sync::Arc::new(d);
+                    self.stat_docs.borrow_mut().insert(id, (key, d.clone()));
+                    d
                 }
-                let product = match l.and_then(|l| l.product_id) {
-                    Some(id) => product_cache.entry(id).or_insert_with(|| self.product(id).ok().flatten()).clone(),
+            };
+            let mut touched: Vec<String> = Vec::new();
+            for lc in &d.lines {
+                let product = match lc.product_id {
+                    Some(id) => product_cache
+                        .entry(id)
+                        .or_insert_with(|| {
+                            brief
+                                .query_row([id], |r| Ok(Brief { code: r.get(0)?, description: r.get(1)?, category: r.get(2)?, cost: crate::dec_from_sql(r.get::<_, Option<String>>(3)?) }))
+                                .ok()
+                        })
+                        .clone(),
                     None => None,
                 };
                 let (key, label) = match by {
                     StatBy::Month => (d.date.format("%Y-%m").to_string(), month_label(d.date)),
-                    StatBy::Customer | StatBy::Supplier => (d.party_id.map(|x| x.to_string()).unwrap_or_else(|| "-".into()), if d.party.display_name().is_empty() { "Vendite al banco".into() } else { d.party.display_name() }),
+                    StatBy::Customer | StatBy::Supplier => (d.party_id.map(|x| x.to_string()).unwrap_or_else(|| "-".into()), if d.party_name.is_empty() { "Vendite al banco".into() } else { d.party_name.clone() }),
                     StatBy::Product => match &product {
                         Some(p) => (p.code.clone(), format!("{}  {}", p.code, p.description)),
                         None => ("-".into(), "Righe senza articolo".into()),
@@ -98,11 +162,11 @@ impl Store {
                     },
                 };
                 let r = rows.entry(key.clone()).or_insert_with(|| StatRow { key: key.clone(), label, ..Default::default() });
-                r.revenue += d.to_eur(lc.total) * sign;
-                if lc.index.is_some() {
-                    r.qty += lc.qty * sign;
-                    let unit_cost = l.map(|l| l.unit_cost).filter(|c| !c.is_zero()).or_else(|| product.as_ref().map(|p| p.cost)).unwrap_or_default();
-                    r.cost += unit_cost * lc.qty * sign;
+                r.revenue += lc.revenue;
+                if lc.item {
+                    r.qty += lc.qty;
+                    let unit_cost = Some(lc.unit_cost).filter(|c| !c.is_zero()).or_else(|| product.as_ref().map(|p| p.cost)).unwrap_or_default();
+                    r.cost += unit_cost * lc.qty;
                 }
                 if !touched.contains(&key) {
                     touched.push(key);

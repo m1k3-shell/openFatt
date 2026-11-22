@@ -267,7 +267,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, role: PartyRole) {
         }
     }
 
-    let key = (role, st.search.clone(), st.show_inactive);
+    let key = (role, super::settled(ui.ctx(), ("parties_search", role == PartyRole::Supplier), &st.search), st.show_inactive);
     let list_rc = st.data.get(cx.store.generation(), &key, || cx.store.parties(&PartyFilter { role: Some(role), search: key.1.clone(), include_inactive: key.2 }).unwrap_or_default());
     let list: &Vec<Party> = &list_rc;
     // elenco con colonne, ordinamento, gruppi ed esportazione

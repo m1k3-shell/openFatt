@@ -36,7 +36,7 @@ pub enum PayView {
     Until,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum DueFilter {
     Receivable,
     Payable,
@@ -140,13 +140,15 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     };
     super::title(ui, title);
     let today = chrono::Local::now().date_naive();
-    let tpl = mailer::templates(cx.store);
-    let candidates = cx.store.reminder_candidates(today, tpl.grace_days, tpl.min_days_between).unwrap_or_default();
+    let gen = cx.store.generation();
+    let ctx = ui.ctx().clone();
+    let (tpl, _) = super::memo(&ctx, "mail_templates", gen, (), || mailer::templates(cx.store));
     if st.view == DuesView::Reminders {
+        let (candidates, _) = super::memo(&ctx, "reminder_candidates", gen, (today, tpl.grace_days, tpl.min_days_between), || cx.store.reminder_candidates(today, tpl.grace_days, tpl.min_days_between).unwrap_or_default());
         reminders(ui, cx, st, &candidates, &tpl);
         return;
     }
-    let accounts = cx.store.accounts().unwrap_or_default();
+    let (accounts, _) = super::memo(&ctx, "accounts", gen, (), || cx.store.accounts().unwrap_or_default());
 
     // registrazione incasso/pagamento
     let mut close = false;
@@ -162,7 +164,7 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                 ui.end_row();
                 ui.label("Conto");
                 egui::ComboBox::from_id_salt("pay_acc").selected_text(account.clone()).show_ui(ui, |ui| {
-                    for a in &accounts {
+                    for a in accounts.iter() {
                         ui.selectable_value(account, a.clone(), a);
                     }
                 });
@@ -208,21 +210,20 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         ui.label("Fino al");
         widgets::opt_date_field(ui, "due_until", &mut st.until);
     });
-    let list: Vec<_> = cx
-        .store
-        .due_list_with_drafts(st.only_open, st.until)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|d| match st.due_filter {
-            DueFilter::Receivable => d.receivable,
-            DueFilter::Payable => !d.receivable,
-            DueFilter::All => true,
-        })
-        .filter(|d| {
-            let q = st.search.trim().to_lowercase();
-            q.is_empty() || d.party_name.to_lowercase().contains(&q) || d.doc_label.to_lowercase().contains(&q)
-        })
-        .collect();
+    let search = super::settled(&ctx, "due_search", &st.search);
+    let (all, _) = super::memo(&ctx, "due_list", gen, (st.only_open, st.until), || cx.store.due_list_with_drafts(st.only_open, st.until).unwrap_or_default());
+    let (list, list_version) = super::memo(&ctx, "due_list_view", gen, (st.only_open, st.until, st.due_filter, search.clone()), || {
+        let q = search.trim().to_lowercase();
+        all.iter()
+            .filter(|d| match st.due_filter {
+                DueFilter::Receivable => d.receivable,
+                DueFilter::Payable => !d.receivable,
+                DueFilter::All => true,
+            })
+            .filter(|d| q.is_empty() || d.party_name.to_lowercase().contains(&q) || d.doc_label.to_lowercase().contains(&q))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     #[derive(Clone, Copy)]
     enum DueAction {
         Open(i64),
@@ -284,7 +285,7 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         });
     });
     let avail = ui.available_height() - 4.0;
-    st.due_grid.version = 0;
+    st.due_grid.version = list_version;
     let ev = st.due_grid.show(ui, cx.store, &cols, &list, |d| d.id, avail, false, 24.0);
     if let Some(d) = ev.opened.and_then(|id| list.iter().find(|d| d.id == id)) {
         cx.nav.push(Nav::OpenDocument(d.document_id));
@@ -308,7 +309,9 @@ fn reminders(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, list: &[ReminderCa
         st.rem_sel = list.iter().filter(|c| (!c.email.is_empty() || !c.pec.is_empty()) && !c.recently_reminded).map(rem_key).collect();
         st.rem_init = true;
     }
-    st.rem_sel.retain(|k| list.iter().any(|c| &rem_key(c) == k));
+    // insieme delle chiavi (prima un doppio ciclo: con migliaia di clienti bloccava la finestra)
+    let keys: std::collections::HashSet<String> = list.iter().map(rem_key).collect();
+    st.rem_sel.retain(|k| keys.contains(k));
     let total: Decimal = list.iter().map(|c| c.overdue_total).sum();
     ui.label(theme::muted(format!(
         "Clienti con pagamenti scaduti da più di {} giorni: {} · totale scaduto € {}. Il livello sale a ogni sollecito: promemoria, secondo sollecito, ultimo avviso (via PEC se il cliente ne ha una).",
@@ -459,7 +462,9 @@ fn ui_text() -> egui::Color32 {
 
 pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     super::title(ui, "Prima nota");
-    let accounts = cx.store.accounts().unwrap_or_default();
+    let gen = cx.store.generation();
+    let ctx = ui.ctx().clone();
+    let (accounts, _) = super::memo(&ctx, "accounts", gen, (), || cx.store.accounts().unwrap_or_default());
 
     let mut close = false;
     if let Some((e, is_out)) = &mut st.new_entry {
@@ -483,7 +488,7 @@ pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                 ui.label("Conto");
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("ce_acc").selected_text(e.account.clone()).show_ui(ui, |ui| {
-                        for a in &accounts {
+                        for a in accounts.iter() {
                             ui.selectable_value(&mut e.account, a.clone(), a);
                         }
                     });
@@ -522,19 +527,19 @@ pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         widgets::date_field(ui, "cash_to", &mut st.cash_to);
         egui::ComboBox::from_id_salt("cash_acc_f").selected_text(st.cash_account.clone().unwrap_or_else(|| "Tutti i conti".into())).show_ui(ui, |ui| {
             ui.selectable_value(&mut st.cash_account, None, "Tutti i conti");
-            for a in &accounts {
+            for a in accounts.iter() {
                 ui.selectable_value(&mut st.cash_account, Some(a.clone()), a);
             }
         });
     });
-    let balances = cx.store.account_balances().unwrap_or_default();
+    let (balances, _) = super::memo(&ctx, "account_balances", gen, (), || cx.store.account_balances().unwrap_or_default());
     ui.horizontal_wrapped(|ui| {
-        for b in &balances {
+        for b in balances.iter() {
             ui.label(RichText::new(format!("{}: € {}", b.account, eur(b.balance))).strong().color(if b.balance.is_sign_negative() { RED } else { GREEN }));
             ui.separator();
         }
     });
-    let list = cx.store.cash_entries(Some(st.cash_from), Some(st.cash_to), st.cash_account.as_deref()).unwrap_or_default();
+    let (list, list_version) = super::memo(&ctx, "cash_entries", gen, (st.cash_from, st.cash_to, st.cash_account.clone()), || cx.store.cash_entries(Some(st.cash_from), Some(st.cash_to), st.cash_account.as_deref()).unwrap_or_default());
     let delete_req = std::cell::Cell::new(None);
     let open_req = std::cell::Cell::new(None);
     let (delete_ref, open_ref) = (&delete_req, &open_req);
@@ -571,7 +576,7 @@ pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         });
     });
     let avail = ui.available_height() - 4.0;
-    st.cash_grid.version = 0;
+    st.cash_grid.version = list_version;
     st.cash_grid.show(ui, cx.store, &cols, &list, |e| e.id, avail, false, 22.0);
     if let Some(d) = open_req.get() {
         cx.nav.push(Nav::OpenDocument(d));

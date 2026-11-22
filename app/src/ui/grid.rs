@@ -542,7 +542,7 @@ impl Grid {
         let mut edit = false;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label(egui::RichText::new(icon::FUNNEL).color(theme::ACCENT));
+            ui.label(egui::RichText::new(icon::FUNNEL).color(theme::tint().main));
             ui.label(theme::medium(format!("{} di {}", self.shown, total)).size(12.5));
             if !self.search_all.trim().is_empty() && ui.small_button(format!("\"{}\" {}", self.search_all.trim(), icon::X)).clicked() {
                 self.search_all.clear();
@@ -777,7 +777,7 @@ impl Grid {
             .unwrap_or(0);
         // riga selezionata ben visibile: fondo blu, testo bianco
         let saved_selection = ui.visuals().selection;
-        ui.visuals_mut().selection.bg_fill = theme::ROW_SELECTED;
+        ui.visuals_mut().selection.bg_fill = theme::tint().main;
         ui.visuals_mut().selection.stroke.color = egui::Color32::WHITE;
         let mut tb = TableBuilder::new(ui)
             .id_salt(("grid", self.name))
@@ -806,9 +806,11 @@ impl Grid {
                     }
                 });
             }
+            let head = theme::tint();
             for i in &vis {
                 let c = &cols[*i];
                 h.col(|ui| {
+                    ui.painter().rect_filled(ui.max_rect().expand2(egui::vec2(4.0, 0.0)), 0.0, head.tint);
                     let arrow = match &self.prefs.sort {
                         Some((id, desc)) if id == c.id => if *desc { format!(" {}", icon::ARROW_DOWN) } else { format!(" {}", icon::ARROW_UP) },
                         _ => String::new(),
@@ -818,13 +820,15 @@ impl Grid {
                         if c.right {
                             ui.add_space(8.0);
                         }
-                        if ui.add(egui::Label::new(theme::medium(format!("{}{}", c.title, arrow)).size(12.5).color(theme::INK_SOFT)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ordina").clicked() {
+                        if ui.add(egui::Label::new(theme::medium(format!("{}{}", c.title, arrow)).size(12.5).color(head.dark)).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ordina").clicked() {
                             sort_click = Some(c.id);
                         }
                     });
                 });
             }
-            h.col(|_| {});
+            h.col(|ui| {
+                ui.painter().rect_filled(ui.max_rect().expand2(egui::vec2(4.0, 0.0)), 0.0, head.tint);
+            });
         })
         .body(|body| {
             body.rows(row_h, lines.len(), |mut row| {

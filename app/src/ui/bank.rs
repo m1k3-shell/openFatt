@@ -154,8 +154,9 @@ fn company_problem(kind: BankKind, s: &BankSettings, iban: &str) -> Option<&'sta
 }
 
 pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
-    let pending: Vec<(BankKind, Vec<DueRow>)> = BankKind::ALL.iter().map(|k| (*k, cx.store.bank_pending(*k).unwrap_or_default())).collect();
-    let batches = cx.store.batches(None).unwrap_or_default();
+    let gen = cx.store.generation();
+    let (pending, _) = super::memo(ui.ctx(), "bank_pending", gen, (), || BankKind::ALL.iter().map(|k| (*k, cx.store.bank_pending(*k).unwrap_or_default())).collect::<Vec<(BankKind, Vec<DueRow>)>>());
+    let (batches, batches_version) = super::memo(ui.ctx(), "bank_batches", gen, (), || cx.store.batches(None).unwrap_or_default());
     let count = |k: BankKind| pending.iter().find(|p| p.0 == k).map(|p| p.1.len()).unwrap_or(0);
     let sum = |k: BankKind| pending.iter().find(|p| p.0 == k).map(|p| p.1.iter().map(|d| d.residual()).sum::<Decimal>()).unwrap_or_default();
     let sub = theme::subline(&[
@@ -178,8 +179,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     let _ = (&count, &batches);
     dialogs(ui, cx, st);
     match st.tab.kind() {
-        Some(kind) => pending_view(ui, cx, st, kind, pending.into_iter().find(|p| p.0 == kind).map(|p| p.1).unwrap_or_default()),
-        None => batches_view(ui, cx, st, &batches),
+        Some(kind) => pending_view(ui, cx, st, kind, pending.iter().find(|p| p.0 == kind).map(|p| p.1.as_slice()).unwrap_or_default()),
+        None => batches_view(ui, cx, st, &batches, batches_version),
     }
 }
 
@@ -268,16 +269,22 @@ fn dialogs(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     }
 }
 
-fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind, all: Vec<DueRow>) {
-    let settings = cx.store.bank_settings().unwrap_or_default();
-    let company = cx.store.company().unwrap_or_default();
-    let list: Vec<DueRow> = all.into_iter().filter(|d| st.until.is_none_or(|u| d.date <= u)).collect();
-    let parties: Vec<Option<Party>> = list.iter().map(|d| d.party_id.and_then(|id| cx.store.party(id).ok().flatten())).collect();
-    let problems: Vec<Option<String>> = parties.iter().map(|p| row_problem(kind, p.as_ref())).collect();
+fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind, all: &[DueRow]) {
+    let gen = cx.store.generation();
+    let (settings, _) = super::memo(ui.ctx(), "bank_settings", gen, (), || cx.store.bank_settings().unwrap_or_default());
+    let (company, _) = super::memo(ui.ctx(), "company", gen, (), || cx.store.company().unwrap_or_default());
+    // voci, anagrafiche e problemi si ricalcolano solo quando cambiano i dati o il filtro
+    let (data, data_version) = super::memo(ui.ctx(), ("bank_rows", kind), gen, st.until, || {
+        let list: Vec<DueRow> = all.iter().filter(|d| st.until.is_none_or(|u| d.date <= u)).cloned().collect();
+        let parties: Vec<Option<Party>> = list.iter().map(|d| d.party_id.and_then(|id| cx.store.party(id).ok().flatten())).collect();
+        let problems: Vec<Option<String>> = parties.iter().map(|p| row_problem(kind, p.as_ref())).collect();
+        (list, parties, problems)
+    });
+    let (list, parties, problems) = (&data.0, &data.1, &data.2);
     let today = chrono::Local::now().date_naive();
     let past = |d: &DueRow| kind == BankKind::Riba && d.date <= today;
     if st.sel_for != Some(st.tab) {
-        st.sel = list.iter().zip(&problems).filter(|(d, p)| p.is_none() && !past(d)).map(|(d, _)| d.id).collect();
+        st.sel = list.iter().zip(problems.iter()).filter(|(d, p)| p.is_none() && !past(d)).map(|(d, _)| d.id).collect();
         st.sel_for = Some(st.tab);
     }
     st.sel.retain(|id| list.iter().any(|d| d.id == *id));
@@ -298,7 +305,7 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
     let selected: Vec<&DueRow> = list.iter().filter(|d| st.sel.contains(&d.id)).collect();
     let sel_total: Decimal = selected.iter().map(|d| d.residual()).sum();
     // voci che la banca può accettare
-    let visible: Vec<DueRow> = list.iter().zip(&problems).filter(|(d, p)| p.is_none() && !past(d)).map(|(d, _)| d.clone()).collect();
+    let visible: Vec<DueRow> = list.iter().zip(problems.iter()).filter(|(d, p)| p.is_none() && !past(d)).map(|(d, _)| d.clone()).collect();
     ui.horizontal(|ui| {
         let has = !visible.is_empty();
         if theme::primary_enabled(ui, has, icon::FILE_ARROW_DOWN, "Esporta file per home banking").on_hover_text("File CBI da caricare nel portale della banca (InBank e altri): la distinta viene registrata").clicked() {
@@ -418,8 +425,8 @@ fn pending_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, kind: BankKind,
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         st.grid.selected = st.sel.clone();
-        st.grid.version = 0;
-        st.grid.show(ui, cx.store, &cols, &list, |d| d.id, (avail - 40.0).max(120.0), true, 26.0);
+        st.grid.version = data_version;
+        st.grid.show(ui, cx.store, &cols, list, |d| d.id, (avail - 40.0).max(120.0), true, 26.0);
         st.sel = st.grid.selected.clone();
         st.current = st.grid.anchor();
     });
@@ -471,7 +478,7 @@ fn status_pill(ui: &mut egui::Ui, b: &BankBatch) {
     theme::pill(ui, t, tone);
 }
 
-fn batches_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, list: &[BankBatch]) {
+fn batches_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, list: &[BankBatch], list_version: u64) {
     if list.is_empty() {
         theme::card(ui, "Nessuna distinta emessa", |_| {}, |ui| {
             ui.label(theme::muted("Le distinte create dalle schede Ri.Ba., SDD e bonifici compaiono qui, con il file, la stampa e la registrazione degli incassi."));
@@ -528,7 +535,7 @@ fn batches_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, list: &[BankBat
     let h = (ui.available_height() * if st.open_batch.is_some() { 0.45 } else { 1.0 } - 40.0).max(140.0);
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        st.batch_grid.version = 0;
+        st.batch_grid.version = list_version;
         st.batch_grid.show(ui, cx.store, &cols, list, |b| b.id, h, false, 30.0);
     });
     st.open_batch = st.batch_grid.single();

@@ -153,9 +153,19 @@ cargo build --release --target i686-pc-windows-msvc -p openfatt-fbread
 
 Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con dati di prova. Da riga di comando: `openfatt.exe --crea-demo prova.gadb`.
 
+## Sicurezza
+
+- **Accesso utenti**: password con PBKDF2-SHA256 a 600.000 giri e sale casuale (le password più vecchie si aggiornano al primo accesso), stesso messaggio e stesso tempo di risposta per utente inesistente o password sbagliata, attesa crescente dopo tre tentativi sbagliati. Le funzioni di prova che saltano l'accesso esistono solo nelle build compilate con `--features strumenti-prova`.
+- **File ricevuti**: gli allegati delle fatture elettroniche e delle email si aprono solo se di tipo innocuo (PDF, immagini, XML, documenti Office senza macro...); i tipi che possono contenere programmi (.exe, .js, .hta, .lnk, .docm...) non vengono aperti e si propone di salvarli per l'antivirus. Ogni file aperto viene segnato come "scaricato da Internet", così Windows e Office lo aprono in modalità protetta. I file si aprono con ShellExecute, senza passare dal prompt dei comandi.
+- **Lettura robusta**: fatture, buste .p7m e notifiche SdI alterate a caso (4.000 varianti a ogni prova) non bloccano il programma; l'XML non risolve entità esterne.
+- **Archivio**: tutte le interrogazioni SQL usano parametri (nessuna SQL injection); i CSV esportati neutralizzano le formule nascoste nei nomi arrivati da fuori.
+- **Rete**: PEC ed email solo con TLS verificato, copie su WebDAV e negozio online solo in https, aggiornamenti firmati con Ed25519 e controllati prima dell'installazione.
+- **Librerie**: controllate con `cargo audit` (banca dati RustSec): nessuna vulnerabilità nota.
+- L'archivio `.gadb` non è cifrato: per proteggere i dati del PC usare un account Windows con password e la cifratura del disco (BitLocker); le copie di sicurezza esterne possono essere cifrate (AES-GCM).
+
 ## Verifiche
 
-- **208 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
+- **214 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
 - **Collaudo completo** (`cargo test -p openfatt collaudo -- --nocapture`): percorre tutte le funzioni (righe speciali, valuta, dichiarazione d'intento, NSO, produzione, distinte bancarie, LIPE, agenti, statistiche, ricorrenti, carte, negozio online, utenti e blocchi, fine anno, conservazione, interscambio, copie di sicurezza) e salva i file prodotti in `target/collaudo` con un rapporto.
 - I file prodotti sono **validi contro gli schemi ufficiali**: fatture elettroniche (`tools/valida-xsd.ps1`, schema VFPR12 1.2.3), bonifici e SDD CBI (`tools/valida-cbi.ps1`), Comunicazione LIPE (`tools/valida-lipe.ps1`).
 - Codici a barre riletti con un decodificatore indipendente (ZXing); firme verificate con il validatore di .NET.

@@ -116,7 +116,9 @@ fn tracking_details(ui: &mut egui::Ui, cx: &mut Ctx, product_id: i64, warehouse:
 
 pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     super::title(ui, "Magazzino");
-    let warehouses = cx.store.warehouses().unwrap_or_default();
+    let gen = cx.store.generation();
+    let ctx = ui.ctx().clone();
+    let (warehouses, _) = super::memo(&ctx, "warehouses", gen, (), || cx.store.warehouses().unwrap_or_default());
     manage_window(ui, cx, st, &warehouses);
 
     st.grid.name = "magazzino";
@@ -127,7 +129,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         let text = st.warehouse_filter.clone().unwrap_or_else(|| "Tutti i magazzini".into());
         egui::ComboBox::from_id_salt("wh_filter").width(180.0).selected_text(text).show_ui(ui, |ui| {
             ui.selectable_value(&mut st.warehouse_filter, None, "Tutti i magazzini");
-            for w in &warehouses {
+            for w in warehouses.iter() {
                 ui.selectable_value(&mut st.warehouse_filter, Some(w.name.clone()), &w.name);
             }
         });
@@ -145,7 +147,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             st.managing = true;
         }
     });
-    let key = (st.search.clone(), st.warehouse_filter.clone());
+    let key = (super::settled(&ctx, "stock_search", &st.search), st.warehouse_filter.clone());
     let rows_rc = st.data.get(cx.store.generation(), &key, || cx.store.stock_report(&key.0, key.1.as_deref()).unwrap_or_default());
     let rows: Vec<&StockRow> = rows_rc.iter().filter(|r| !st.only_under_min || r.under_min).collect();
     let cols: Vec<Col<&StockRow>> = vec![
@@ -193,7 +195,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             st.expiring_days = 30;
         }
         let until = chrono::Local::now().date_naive() + chrono::Duration::days(st.expiring_days as i64);
-        let exp = cx.store.expiring_lots(until).unwrap_or_default();
+        let (exp, _) = super::memo(&ctx, "expiring_lots", gen, until, || cx.store.expiring_lots(until).unwrap_or_default());
         ui.label(RichText::new(format!("Lotti scaduti o in scadenza entro {} giorni: {}", st.expiring_days, exp.len())).color(if exp.is_empty() { GRAY } else { ORANGE }))
             .on_hover_text(exp.iter().map(|(p, l)| format!("{} lotto {} ({}) scad. {}", p.code, l.lot, fmt_it_trim(l.qty, 0, 3), l.expiry.map(|e| e.format("%d/%m/%Y").to_string()).unwrap_or_default())).collect::<Vec<_>>().join("\n"));
     });
@@ -238,8 +240,11 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     }
     let selected = st.selected;
     let moves_rc = st.moves.get(cx.store.generation(), &selected, || {
-        let names: std::collections::HashMap<i64, (String, String)> = cx.store.products("", true).unwrap_or_default().into_iter().map(|p| (p.id, (p.code, p.description))).collect();
-        cx.store.stock_moves(selected, 2000).unwrap_or_default().into_iter().map(|m| {
+        let moves = cx.store.stock_moves(selected, 2000).unwrap_or_default();
+        // codice e descrizione dei soli articoli presenti nei movimenti
+        let ids: Vec<i64> = moves.iter().map(|m| m.product_id).collect();
+        let names = cx.store.product_labels(&ids).unwrap_or_default();
+        moves.into_iter().map(|m| {
             let (code, desc) = names.get(&m.product_id).cloned().unwrap_or_default();
             (m, code, desc)
         }).collect()

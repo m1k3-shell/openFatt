@@ -52,14 +52,19 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut st.search).hint_text("codice o intestatario").desired_width(260.0));
     });
-    let list = cx.store.cards(None, &st.search).unwrap_or_default();
+    let search = super::settled(ui.ctx(), "cards_search", &st.search);
+    let (list, _) = super::memo(ui.ctx(), "cards", cx.store.generation(), search.clone(), || cx.store.cards(None, &search).unwrap_or_default());
     ui.horizontal_top(|ui| {
         type CardRow = (Card, Decimal, Decimal, String);
-        let rows: Vec<CardRow> = list.iter().map(|c| {
-            let (p, a) = cx.store.card_balance(c.id).unwrap_or_default();
-            let holder = c.party_id.and_then(|id| cx.store.party(id).ok().flatten()).map(|p| p.display_name()).unwrap_or_else(|| c.holder.clone());
-            (c.clone(), p, a, holder)
-        }).collect();
+        let (rows, rows_version) = super::memo(ui.ctx(), "card_rows", cx.store.generation(), search.clone(), || {
+            list.iter()
+                .map(|c| {
+                    let (p, a) = cx.store.card_balance(c.id).unwrap_or_default();
+                    let holder = c.party_id.and_then(|id| cx.store.party(id).ok().flatten()).map(|p| p.display_name()).unwrap_or_else(|| c.holder.clone());
+                    (c.clone(), p, a, holder)
+                })
+                .collect::<Vec<CardRow>>()
+        });
         let cols: Vec<Col<CardRow>> = vec![
             Col::text("code", "Codice", 110.0, |r: &CardRow| r.0.code.clone()),
             Col::text("kind", "Tipo", 70.0, |r: &CardRow| if r.0.kind == CardKind::Gift { "Buono".to_string() } else { "Fedeltà".to_string() }).group(),
@@ -72,7 +77,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         let h = ui.available_height();
         ui.allocate_ui_with_layout(egui::vec2(590.0, h), egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.horizontal(|ui| st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &rows, "Carte e buoni"));
-            st.grid.version = 0;
+            st.grid.version = rows_version;
             let h = ui.available_height() - 4.0;
             st.grid.show(ui, cx.store, &cols, &rows, |r| r.0.id, h, false, 22.0);
         });

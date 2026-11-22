@@ -173,7 +173,13 @@ pub fn liquidation_pdf(store: &Store, p: Period, l: &Liquidation) -> Vec<u8> {
 }
 
 fn csv_field(s: &str) -> String {
-    if s.contains([';', '"', '\n']) {
+    // un testo che inizia con = + - @ verrebbe eseguito come formula da Excel (i nomi dei
+    // fornitori arrivano dalle loro fatture): si fa precedere da un apostrofo; gli importi
+    // negativi restano numeri
+    let number = !s.is_empty() && s.trim_start_matches('-').chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.');
+    let s = if !number && s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{}", s) } else { s.to_string() };
+    let s = s.as_str();
+    if s.contains([';', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -226,6 +232,19 @@ pub fn lipe(store: &Store, year: i32, quarter: u32) -> Result<(String, String), 
     let xml = vat::lipe_xml(&subject, year, &modules)?;
     let n = store.next_counter("lipe").map_err(|e| vec![e.to_string()])?;
     Ok((vat::lipe_file_name(&cf, n), xml))
+}
+
+#[cfg(test)]
+mod csv_sicuro {
+    #[test]
+    fn niente_formule_nei_csv() {
+        assert_eq!(super::csv_field("=HYPERLINK(\"http://x\")"), "\"'=HYPERLINK(\"\"http://x\"\")\"");
+        assert_eq!(super::csv_field("+39 cmd"), "'+39 cmd");
+        assert_eq!(super::csv_field("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(super::csv_field("-cmd|' /C calc'!A0"), "'-cmd|' /C calc'!A0");
+        assert_eq!(super::csv_field("-12,50"), "-12,50");
+        assert_eq!(super::csv_field("Rossi S.r.l."), "Rossi S.r.l.");
+    }
 }
 
 #[cfg(test)]

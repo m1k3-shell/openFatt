@@ -10,7 +10,9 @@ use openfatt_core::calc;
 use openfatt_core::model::{DocKind, DocStatus, Document};
 use openfatt_core::vat::{DeferredRow, Liquidation, Period, PeriodInputs, PeriodTotals, Periodicity, RateAmount, Register, RegisterRow, RetailRow};
 
-use crate::{date_from_sql, dec_from_sql, DocFilter, Result, Store};
+use rusqlite::params;
+
+use crate::{date_from_sql, date_to_sql, dec_from_sql, Result, Store};
 
 /// Impostazioni IVA dell'azienda.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -97,12 +99,12 @@ impl Store {
 
     /// Data di registrazione di un acquisto: quella di ricezione della fattura elettronica,
     /// se collegata, altrimenti la data del documento.
-    fn purchase_date(&self, d: &Document) -> NaiveDate {
+    fn purchase_date(&self, id: i64, date: NaiveDate) -> NaiveDate {
         let received: Option<String> = self
             .conn()
-            .query_row("SELECT created_at FROM einvoices WHERE document_id = ?1 AND direction = 'IN' ORDER BY id LIMIT 1", [d.id], |r| r.get(0))
+            .query_row("SELECT created_at FROM einvoices WHERE document_id = ?1 AND direction = 'IN' ORDER BY id LIMIT 1", [id], |r| r.get(0))
             .ok();
-        received.map(|s| date_from_sql(&s)).filter(|r| *r >= d.date).unwrap_or(d.date)
+        received.map(|s| date_from_sql(&s)).filter(|r| *r >= date).unwrap_or(date)
     }
 
     /// Registro IVA del periodo (documenti emessi o registrati). Nel registro acquisti
@@ -110,33 +112,18 @@ impl Store {
     pub fn vat_register(&self, register: Register, from: NaiveDate, to: NaiveDate) -> Result<Vec<RegisterRow>> {
         let mut out = Vec::new();
         match register {
-            Register::Sales => {
-                let list = self.documents(&DocFilter { kinds: SALES.to_vec(), status: Some(DocStatus::Issued), from: Some(from), to: Some(to), ..Default::default() })?;
-                for s in list {
-                    let d = self.document(s.id)?;
-                    if d.kind == DocKind::SelfInvoice && SELF_OUTSIDE.contains(&fe_type(&d).as_str()) {
-                        continue;
-                    }
-                    if let Some(r) = self.row_from(&d, Register::Sales) {
-                        out.push(r);
-                    }
-                }
-            }
+            Register::Sales => out = self.sales_rows(&SALES, from, to)?,
             Register::Purchases => {
                 // registrazione fino a qualche settimana dopo la data del documento
-                let list = self.documents(&DocFilter { kinds: PURCHASES.to_vec(), status: Some(DocStatus::Issued), from: Some(from - chrono::Duration::days(400)), to: Some(to), ..Default::default() })?;
-                for s in list {
-                    let d = self.document(s.id)?;
-                    let reg = self.purchase_date(&d);
-                    if reg < from || reg > to {
-                        continue;
-                    }
-                    if let Some(mut r) = self.row_from(&d, Register::Purchases) {
-                        r.date = reg;
+                for (id, key) in self.issued_keys(&PURCHASES, from - chrono::Duration::days(400), to)? {
+                    let Some(mut r) = self.cached_row(id, key, true, |d| self.row_from(d, Register::Purchases))? else { continue };
+                    r.date = self.purchase_date(id, r.doc_date);
+                    if r.date >= from && r.date <= to {
                         out.push(r);
                     }
                 }
-                for mut r in self.vat_register(Register::Sales, from, to)?.into_iter().filter(|r| r.reverse_charge) {
+                // le integrazioni in reverse charge sono solo autofatture: non serve rileggere tutte le vendite
+                for mut r in self.sales_rows(&[DocKind::SelfInvoice], from, to)?.into_iter().filter(|r| r.reverse_charge) {
                     r.kind_label = format!("{} (integrazione)", r.kind_label);
                     out.push(r);
                 }
@@ -144,6 +131,57 @@ impl Store {
         }
         out.sort_by(|a, b| a.date.cmp(&b.date).then(a.number.cmp(&b.number)));
         Ok(out)
+    }
+
+    /// Righe del registro vendite per i tipi di documento indicati.
+    fn sales_rows(&self, kinds: &[DocKind], from: NaiveDate, to: NaiveDate) -> Result<Vec<RegisterRow>> {
+        let mut out = Vec::new();
+        for (id, key) in self.issued_keys(kinds, from, to)? {
+            let row = self.cached_row(id, key, false, |d| {
+                if d.kind == DocKind::SelfInvoice && SELF_OUTSIDE.contains(&fe_type(d).as_str()) {
+                    None
+                } else {
+                    self.row_from(d, Register::Sales)
+                }
+            })?;
+            out.extend(row);
+        }
+        Ok(out)
+    }
+
+    /// Documenti emessi del periodo con una chiave che cambia a ogni loro modifica.
+    pub(crate) fn issued_keys(&self, kinds: &[DocKind], from: NaiveDate, to: NaiveDate) -> Result<Vec<(i64, u64)>> {
+        let marks: Vec<String> = kinds.iter().map(|k| format!("'{}'", k.code())).collect();
+        let mut st = self.conn().prepare_cached(&format!(
+            "SELECT id, version, s_rev, kind, date, total, created_at FROM documents WHERE status = ?1 AND kind IN ({}) AND date >= ?2 AND date <= ?3
+             ORDER BY date, number, id",
+            marks.join(",")
+        ))?;
+        let rows = st.query_map(params![DocStatus::Issued.code(), date_to_sql(from), date_to_sql(to)], |r| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            r.get::<_, i64>(1)?.hash(&mut h);
+            r.get::<_, i64>(2)?.hash(&mut h);
+            r.get::<_, String>(3)?.hash(&mut h);
+            r.get::<_, String>(4)?.hash(&mut h);
+            r.get::<_, Option<String>>(5)?.hash(&mut h);
+            r.get::<_, Option<String>>(6)?.hash(&mut h);
+            Ok((r.get::<_, i64>(0)?, h.finish()))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Riga del registro calcolata una volta per versione del documento.
+    fn cached_row(&self, id: i64, key: u64, purchase: bool, make: impl FnOnce(&Document) -> Option<RegisterRow>) -> Result<Option<RegisterRow>> {
+        if let Some((k, row)) = self.vat_rows.borrow().get(&(id, purchase)) {
+            if *k == key {
+                return Ok(row.clone());
+            }
+        }
+        let d = self.document(id)?;
+        let row = make(&d);
+        self.vat_rows.borrow_mut().insert((id, purchase), (key, row.clone()));
+        Ok(row)
     }
 
     /// Registro dei corrispettivi: vendite al banco per giorno e aliquota.
@@ -163,9 +201,19 @@ impl Store {
     pub fn deferred_vat(&self, from: NaiveDate, to: NaiveDate) -> Result<Vec<DeferredRow>> {
         let mut out = Vec::new();
         let kinds: Vec<DocKind> = SALES.iter().chain(PURCHASES.iter()).copied().collect();
-        let list = self.documents(&DocFilter { kinds, status: Some(DocStatus::Issued), from: Some(from - chrono::Duration::days(370)), to: Some(to), ..Default::default() })?;
-        for s in list {
-            let d = self.document(s.id)?;
+        // solo i documenti a esigibilità differita (colonna di riepilogo): prima si
+        // rileggevano per intero tutti i documenti degli ultimi tredici mesi
+        let marks: Vec<String> = kinds.iter().map(|k| format!("'{}'", k.code())).collect();
+        let ids: Vec<i64> = {
+            let mut st = self.conn().prepare_cached(&format!(
+                "SELECT id FROM documents WHERE status = ?1 AND s_liability = 'D' AND kind IN ({}) AND date >= ?2 AND date <= ?3 ORDER BY date, id",
+                marks.join(",")
+            ))?;
+            let rows = st.query_map(params![DocStatus::Issued.code(), date_to_sql(from - chrono::Duration::days(370)), date_to_sql(to)], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for id in ids {
+            let d = self.document(id)?;
             let Ok(t) = calc::compute(&d) else { continue };
             let tax_d: Decimal = d.to_eur(t.vat_rows.iter().filter(|r| r.liability == "D").map(|r| r.tax).sum());
             if tax_d.is_zero() || t.total.is_zero() {

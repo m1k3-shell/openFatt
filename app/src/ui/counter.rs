@@ -621,7 +621,7 @@ fn sales(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         ui.label("al");
         widgets::date_field(ui, "pos_to", &mut st.to);
     });
-    let list = cx.store.retail_sales(st.from, st.to).unwrap_or_default();
+    let (list, list_version) = super::memo(ui.ctx(), "retail_sales", cx.store.generation(), (st.from, st.to), || cx.store.retail_sales(st.from, st.to).unwrap_or_default());
     let busy = st.pending.is_some();
     #[derive(Clone, Copy)]
     enum Act {
@@ -689,7 +689,7 @@ fn sales(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         ui.label(RichText::new("Nessuna vendita nel periodo").color(GRAY));
     }
     let avail = ui.available_height() - 4.0;
-    st.sales_grid.version = 0;
+    st.sales_grid.version = list_version;
     st.sales_grid.show(ui, cx.store, &cols, &list, |d| d.id, avail, false, 26.0);
     drop(cols);
     match action.get() {

@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Sense, Stroke, U
 use openfatt_core::model::{DocKind, DocStatus, PartyRole};
 use openfatt_store::{Direction, EInvoiceStatus, Store};
 
-use super::theme::{self, icon, ACCENT, INK, MUTED, NEGATIVE, RAISED};
+use super::theme::{self, icon, Section, INK, MUTED, NEGATIVE, RAISED};
 #[allow(unused_imports)]
 use super::theme::INK_SOFT;
 use super::business::Extra;
@@ -76,10 +76,11 @@ pub struct Search {
 fn menu_item(ui: &mut Ui, ic: &str, title: &str, note: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.min_rect().width().max(270.0), 30.0), Sense::click());
     let p = ui.painter();
+    let t = theme::tint();
     if resp.hovered() {
-        p.rect_filled(rect, 3, theme::HOVER);
+        p.rect_filled(rect, 3, t.soft);
     }
-    p.text(egui::pos2(rect.left() + 12.0, rect.center().y), egui::Align2::LEFT_CENTER, ic, FontId::new(17.0, FontFamily::Proportional), ACCENT);
+    p.text(egui::pos2(rect.left() + 12.0, rect.center().y), egui::Align2::LEFT_CENTER, ic, FontId::new(17.0, FontFamily::Proportional), t.main);
     p.text(egui::pos2(rect.left() + 40.0, rect.center().y), egui::Align2::LEFT_CENTER, title, FontId::new(13.5, FontFamily::Proportional), INK);
     if !note.is_empty() {
         p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, note, FontId::new(12.0, FontFamily::Proportional), MUTED);
@@ -96,19 +97,22 @@ fn menu_sep(ui: &mut Ui) {
 }
 
 /// Pulsante della barra: icona grande sopra, nome sotto.
-fn tool_button(ui: &mut Ui, ic: &str, text: &str, current: bool, badge: usize, dropdown: bool) -> egui::Response {
+fn tool_button(ui: &mut Ui, sec: Section, ic: &str, text: &str, current: bool, badge: usize, dropdown: bool) -> egui::Response {
     let font = FontId::new(12.0, theme::medium_family());
     let label = if dropdown { format!("{} {}", text, icon::CARET_DOWN) } else { text.to_string() };
     let tw = ui.fonts(|f| f.layout_no_wrap(label.clone(), font.clone(), INK).size().x);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new((tw + 14.0).max(52.0), 56.0), Sense::click());
     let p = ui.painter();
+    let t = sec.tint();
+    // ogni pulsante ha il colore della sua sezione; quello corrente è pieno e sottolineato
     if current {
-        p.rect_filled(rect, 3, theme::CURRENT);
+        p.rect_filled(rect, 4, t.soft);
+        p.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 6.0, rect.bottom() - 3.0), egui::pos2(rect.right() - 6.0, rect.bottom())), 2, t.main);
     } else if resp.hovered() {
-        p.rect_filled(rect, 3, theme::HOVER);
+        p.rect_filled(rect, 4, t.tint);
     }
-    p.text(egui::pos2(rect.center().x, rect.top() + 21.0), egui::Align2::CENTER_CENTER, ic, FontId::new(25.0, FontFamily::Proportional), ACCENT);
-    p.text(egui::pos2(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, label, font, INK);
+    p.text(egui::pos2(rect.center().x, rect.top() + 21.0), egui::Align2::CENTER_CENTER, ic, FontId::new(25.0, FontFamily::Proportional), t.main);
+    p.text(egui::pos2(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, label, font, if current { t.dark } else { INK });
     if badge > 0 {
         let c = egui::pos2(rect.center().x + 15.0, rect.top() + 10.0);
         let t = badge.to_string();
@@ -120,8 +124,8 @@ fn tool_button(ui: &mut Ui, ic: &str, text: &str, current: bool, badge: usize, d
 }
 
 /// Pulsante della barra che apre un menu a tendina.
-fn tool_menu(ui: &mut Ui, ic: &str, text: &str, current: bool, badge: usize, add: impl FnOnce(&mut Ui)) {
-    let resp = tool_button(ui, ic, text, current, badge, true);
+fn tool_menu(ui: &mut Ui, sec: Section, ic: &str, text: &str, current: bool, badge: usize, add: impl FnOnce(&mut Ui)) {
+    let resp = tool_button(ui, sec, ic, text, current, badge, true);
     let id = ui.make_persistent_id(("tool_menu", text));
     if resp.clicked() {
         ui.memory_mut(|m| m.toggle_popup(id));
@@ -129,7 +133,7 @@ fn tool_menu(ui: &mut Ui, ic: &str, text: &str, current: bool, badge: usize, add
     egui::popup_below_widget(ui, id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
         ui.set_min_width(270.0);
         ui.spacing_mut().item_spacing.y = 0.0;
-        add(ui);
+        theme::with_section(sec, || add(ui));
     });
 }
 
@@ -138,40 +142,50 @@ fn tool_sep(ui: &mut Ui) {
     ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0_f32, theme::BORDER));
 }
 
-fn section_of(s: Screen) -> &'static str {
+/// Sezione (e quindi colore) di una schermata; per il documento aperto conta il tipo.
+pub fn section_of(s: Screen, editing: Option<DocKind>) -> Section {
     match s {
-        Screen::Home => "start",
-        Screen::Parties(PartyRole::Supplier) => "fornitori",
-        Screen::Parties(_) => "clienti",
-        Screen::Products | Screen::PriceLists => "prodotti",
-        Screen::Counter => "banco",
-        Screen::Documents(DocGroup::Production) => "magazzino",
-        Screen::Documents(DocGroup::SelfInvoices) => "fe",
-        Screen::Documents(_) => "documenti",
-        Screen::EInvoicesOut | Screen::EInvoicesIn => "fe",
-        Screen::Stock | Screen::Inventory => "magazzino",
-        Screen::Dues | Screen::Bank => "pagamenti",
-        Screen::Cash | Screen::Vat => "strumenti",
-        Screen::Editor => "editor",
-        Screen::Settings => "opzioni",
-        Screen::Tools | Screen::Backup => "archivi",
+        Screen::Home => Section::Start,
+        Screen::Parties(PartyRole::Supplier) => Section::Suppliers,
+        Screen::Parties(_) => Section::Customers,
+        Screen::Products | Screen::PriceLists => Section::Products,
+        Screen::Counter => Section::Counter,
+        Screen::Documents(DocGroup::Production) => Section::Stock,
+        Screen::Documents(DocGroup::SelfInvoices) => Section::EInvoice,
+        Screen::Documents(g) if DocGroup::PURCHASES.contains(&g) => Section::Purchases,
+        Screen::Documents(_) => Section::Sales,
+        Screen::EInvoicesOut | Screen::EInvoicesIn => Section::EInvoice,
+        Screen::Stock | Screen::Inventory => Section::Stock,
+        Screen::Dues | Screen::Bank => Section::Payments,
+        Screen::Cash | Screen::Vat => Section::Tools,
+        Screen::Editor => match editing {
+            Some(k) if k.is_purchase() => Section::Purchases,
+            Some(DocKind::RetailSale) => Section::Counter,
+            Some(DocKind::SelfInvoice) => Section::EInvoice,
+            Some(k) if k.is_internal() => Section::Stock,
+            _ => Section::Sales,
+        },
+        Screen::Settings => Section::Options,
+        Screen::Tools | Screen::Backup => Section::Archives,
         Screen::Extra(x) => match x {
-            Extra::Agenda => "agenda",
-            Extra::Agents | Extra::Stats => "analisi",
-            Extra::Recurring => "documenti",
-            Extra::Conservation => "fe",
-            _ => "strumenti",
+            Extra::Agenda => Section::Agenda,
+            Extra::Agents | Extra::Stats => Section::Analysis,
+            Extra::Recurring => Section::Sales,
+            Extra::Conservation => Section::EInvoice,
+            _ => Section::Tools,
         },
     }
 }
 
 /// Unica barra in alto: le sezioni del programma come pulsanti con icona, sempre visibili.
 #[allow(clippy::too_many_arguments)]
-pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Search, pec_busy: bool, screen: Screen, editor: Option<(String, bool)>, b: &Badges, nav: &mut Vec<Nav>) {
-    let cur = section_of(screen);
+pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Search, pec_busy: bool, screen: Screen, editor: Option<(String, bool, DocKind)>, b: &Badges, nav: &mut Vec<Nav>) {
+    // il documento aperto non accende nessun pulsante della barra
+    let cur = if screen == Screen::Editor { None } else { Some(section_of(screen, None)) };
+    let is = |s: Section| cur == Some(s);
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 1.0;
-        tool_menu(ui, icon::PLUS_CIRCLE, "Nuovo", false, 0, |ui| {
+        tool_menu(ui, Section::Sales, icon::PLUS_CIRCLE, "Nuovo", false, 0, |ui| {
             for (ic, k) in [
                 (icon::NOTE_PENCIL, DocKind::Quote),
                 (icon::CLIPBOARD_TEXT, DocKind::CustomerOrder),
@@ -186,51 +200,55 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 }
             }
             menu_sep(ui);
-            for (ic, k) in [(icon::NOTE_PENCIL, DocKind::SupplierQuote), (icon::CLIPBOARD_TEXT, DocKind::SupplierOrder), (icon::PACKAGE, DocKind::GoodsReceipt), (icon::FILE_TEXT, DocKind::PurchaseInvoice)] {
-                if menu_item(ui, ic, k.label(), "") {
-                    nav.push(Nav::NewDocument(k));
+            theme::with_section(Section::Purchases, || {
+                for (ic, k) in [(icon::NOTE_PENCIL, DocKind::SupplierQuote), (icon::CLIPBOARD_TEXT, DocKind::SupplierOrder), (icon::PACKAGE, DocKind::GoodsReceipt), (icon::FILE_TEXT, DocKind::PurchaseInvoice)] {
+                    if menu_item(ui, ic, k.label(), "") {
+                        nav.push(Nav::NewDocument(k));
+                    }
                 }
-            }
+            });
             menu_sep(ui);
             if menu_item(ui, icon::ARROWS_COUNTER_CLOCKWISE, DocKind::SelfInvoice.label(), "") {
                 nav.push(Nav::Go(Screen::Documents(DocGroup::SelfInvoices)));
             }
         });
-        if tool_button(ui, icon::CASH_REGISTER, "Banco", cur == "banco", 0, false).on_hover_text("Vendita al banco (F9)").clicked() {
+        if tool_button(ui, Section::Counter, icon::CASH_REGISTER, "Banco", is(Section::Counter), 0, false).on_hover_text("Vendita al banco (F9)").clicked() {
             nav.push(Nav::Go(Screen::Counter));
         }
         tool_sep(ui);
-        if tool_button(ui, icon::HOUSE, "Start", cur == "start", 0, false).clicked() {
+        if tool_button(ui, Section::Start, icon::HOUSE, "Start", is(Section::Start), 0, false).clicked() {
             nav.push(Nav::Go(Screen::Home));
         }
-        if tool_button(ui, icon::USERS, "Clienti", cur == "clienti", 0, false).clicked() {
+        if tool_button(ui, Section::Customers, icon::USERS, "Clienti", is(Section::Customers), 0, false).clicked() {
             nav.push(Nav::Go(Screen::Parties(PartyRole::Customer)));
         }
-        if tool_button(ui, icon::TRUCK, "Fornitori", cur == "fornitori", 0, false).clicked() {
+        if tool_button(ui, Section::Suppliers, icon::TRUCK, "Fornitori", is(Section::Suppliers), 0, false).clicked() {
             nav.push(Nav::Go(Screen::Parties(PartyRole::Supplier)));
         }
-        if tool_button(ui, icon::PACKAGE, "Prodotti", cur == "prodotti", 0, false).clicked() {
+        if tool_button(ui, Section::Products, icon::PACKAGE, "Prodotti", is(Section::Products), 0, false).clicked() {
             nav.push(Nav::Go(Screen::Products));
         }
-        tool_menu(ui, icon::FILES, "Documenti", cur == "documenti", 0, |ui| {
+        tool_menu(ui, Section::Sales, icon::FILES, "Documenti", is(Section::Sales) || is(Section::Purchases), 0, |ui| {
             for g in DocGroup::SALES.iter().filter(|g| **g != DocGroup::SelfInvoices) {
                 if menu_item(ui, icon::FILE_TEXT, g.label(), "") {
                     nav.push(Nav::Go(Screen::Documents(*g)));
                 }
             }
             menu_sep(ui);
-            for g in DocGroup::PURCHASES {
-                if menu_item(ui, icon::SHOPPING_CART, g.label(), "") {
-                    nav.push(Nav::Go(Screen::Documents(g)));
+            theme::with_section(Section::Purchases, || {
+                for g in DocGroup::PURCHASES {
+                    if menu_item(ui, icon::SHOPPING_CART, g.label(), "") {
+                        nav.push(Nav::Go(Screen::Documents(g)));
+                    }
                 }
-            }
+            });
             menu_sep(ui);
             let n = if b.recurring_due > 0 { b.recurring_due.to_string() } else { String::new() };
             if menu_item(ui, icon::REPEAT, "Documenti ricorrenti", &n) {
                 nav.push(Nav::Go(Screen::Extra(Extra::Recurring)));
             }
         });
-        tool_menu(ui, icon::PAPER_PLANE_TILT, "Fatture elettr.", cur == "fe", b.rejected, |ui| {
+        tool_menu(ui, Section::EInvoice, icon::PAPER_PLANE_TILT, "Fatture elettr.", is(Section::EInvoice), b.rejected, |ui| {
             if menu_item(ui, icon::PAPER_PLANE_TILT, "Fatture inviate", &if b.to_send > 0 { format!("{} da inviare", b.to_send) } else { String::new() }) {
                 nav.push(Nav::Go(Screen::EInvoicesOut));
             }
@@ -248,7 +266,7 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 nav.push(Nav::Go(Screen::Extra(Extra::Conservation)));
             }
         });
-        tool_menu(ui, icon::CURRENCY_CIRCLE_DOLLAR, "Pagamenti", cur == "pagamenti", 0, |ui| {
+        tool_menu(ui, Section::Payments, icon::CURRENCY_CIRCLE_DOLLAR, "Pagamenti", is(Section::Payments), 0, |ui| {
             for (ic, t, v) in [(icon::ARROWS_DOWN_UP, "Tutti", PayView::All), (icon::ARROW_UP, "Entrate", PayView::In), (icon::ARROW_DOWN, "Uscite", PayView::Out)] {
                 if menu_item(ui, ic, t, "") {
                     nav.push(Nav::Payments(v));
@@ -278,7 +296,7 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 nav.push(Nav::BankSettings);
             }
         });
-        tool_menu(ui, icon::WAREHOUSE, "Magazzino", cur == "magazzino", 0, |ui| {
+        tool_menu(ui, Section::Stock, icon::WAREHOUSE, "Magazzino", is(Section::Stock), 0, |ui| {
             if menu_item(ui, icon::STACK, "Giacenze e movimenti", "") {
                 nav.push(Nav::Go(Screen::Stock));
             }
@@ -289,10 +307,10 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 nav.push(Nav::Go(Screen::Documents(DocGroup::Production)));
             }
         });
-        if tool_button(ui, icon::CALENDAR_BLANK, "Agenda", cur == "agenda", b.agenda_today, false).clicked() {
+        if tool_button(ui, Section::Agenda, icon::CALENDAR_BLANK, "Agenda", is(Section::Agenda), b.agenda_today, false).clicked() {
             nav.push(Nav::Go(Screen::Extra(Extra::Agenda)));
         }
-        tool_menu(ui, icon::CHART_LINE_UP, "Analisi", cur == "analisi", 0, |ui| {
+        tool_menu(ui, Section::Analysis, icon::CHART_LINE_UP, "Analisi", is(Section::Analysis), 0, |ui| {
             if menu_item(ui, icon::CHART_LINE_UP, "Statistiche e flussi", "") {
                 nav.push(Nav::Go(Screen::Extra(Extra::Stats)));
             }
@@ -301,7 +319,7 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
             }
         });
         tool_sep(ui);
-        tool_menu(ui, icon::WRENCH, "Strumenti", cur == "strumenti", 0, |ui| {
+        tool_menu(ui, Section::Tools, icon::WRENCH, "Strumenti", is(Section::Tools), 0, |ui| {
             if menu_item(ui, icon::PERCENT, "Registri e liquidazione IVA", "") {
                 nav.push(Nav::Go(Screen::Vat));
             }
@@ -325,10 +343,10 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 nav.push(Nav::Go(Screen::Extra(Extra::YearEnd)));
             }
         });
-        if tool_button(ui, icon::GEAR_SIX, "Opzioni", cur == "opzioni", 0, false).clicked() {
+        if tool_button(ui, Section::Options, icon::GEAR_SIX, "Opzioni", is(Section::Options), 0, false).clicked() {
             nav.push(Nav::Go(Screen::Settings));
         }
-        tool_menu(ui, icon::FOLDER_OPEN, "Archivi", cur == "archivi", 0, |ui| {
+        tool_menu(ui, Section::Archives, icon::FOLDER_OPEN, "Archivi", is(Section::Archives), 0, |ui| {
             if menu_item(ui, icon::FOLDER_OPEN, "Apri un altro archivio...", "") {
                 if let Some(p) = rfd::FileDialog::new().add_filter("Archivio openFatt", &["gadb"]).pick_file() {
                     nav.push(Nav::OpenArchive(p));
@@ -352,10 +370,10 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 nav.push(Nav::CloseArchive);
             }
         });
-        if let Some((label, dirty)) = editor.filter(|_| cur != "editor") {
+        if let Some((label, dirty, kind)) = editor.filter(|_| screen != Screen::Editor) {
             tool_sep(ui);
             let t = if dirty { "Doc. aperto *" } else { "Doc. aperto" };
-            if tool_button(ui, icon::PENCIL_SIMPLE, t, false, 0, false).on_hover_text(label).clicked() {
+            if tool_button(ui, section_of(Screen::Editor, Some(kind)), icon::PENCIL_SIMPLE, t, false, 0, false).on_hover_text(label).clicked() {
                 nav.push(Nav::Go(Screen::Editor));
             }
         }
@@ -392,13 +410,22 @@ fn global_search(ui: &mut Ui, store: &Store, st: &mut Search, width: f32, nav: &
         st.text.clear();
         resp.surrender_focus();
     }
-    let q = st.text.trim().to_string();
+    let live = st.text.trim().to_string();
+    if live.len() < 2 {
+        return;
+    }
+    // si cerca quando chi scrive si ferma, e solo i primi risultati di ogni gruppo
+    let q = super::settled(ui.ctx(), "global_search", &live);
     if q.len() < 2 {
         return;
     }
-    let parties = store.parties(&openfatt_store::PartyFilter { role: None, search: q.clone(), include_inactive: false }).unwrap_or_default();
-    let products = store.products(&q, false).unwrap_or_default();
-    let docs = store.documents(&openfatt_store::DocFilter { search: q.clone(), ..Default::default() }).unwrap_or_default();
+    let (found, _) = super::memo(ui.ctx(), "global_search", store.generation(), q.clone(), || {
+        let parties: Vec<_> = store.parties(&openfatt_store::PartyFilter { role: None, search: q.clone(), include_inactive: false }).unwrap_or_default().into_iter().take(5).collect();
+        let products = store.products_page(&q, false, 5).unwrap_or_default();
+        let docs = store.documents(&openfatt_store::DocFilter { search: q.clone(), limit: Some(6), ..Default::default() }).unwrap_or_default();
+        (parties, products, docs)
+    });
+    let (parties, products, docs) = (&found.0, &found.1, &found.2);
     let pos = resp.rect.left_bottom() + Vec2::new(-30.0, 10.0);
     let mut chosen = false;
     egui::Area::new(id.with("pop")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
@@ -518,5 +545,4 @@ pub fn status_bar(ui: &mut Ui, store: Option<&Store>, pec_busy: Option<&str>, pe
             ui.label(small(&format!("openFatt {}", env!("CARGO_PKG_VERSION"))));
         });
     });
-    let _ = ACCENT;
 }

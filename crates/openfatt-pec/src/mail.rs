@@ -214,7 +214,7 @@ pub fn build_message(acc: &SmtpAccount, reply_to: &str, bcc_self: bool, mail: &O
     if mail.size() > MAX_MAIL_BYTES {
         return Err(PecError::Message(format!("il messaggio supera i {} MB: togliere qualche allegato", MAX_MAIL_BYTES / 1024 / 1024)));
     }
-    let mut b = lettre::Message::builder().from(mailbox(&acc.from_name, &acc.address)?).subject(mail.subject.trim());
+    let mut b = lettre::Message::builder().from(mailbox(&acc.from_name, &acc.address)?).subject(mail.subject.replace(['\r', '\n'], " ").trim());
     for t in &mail.to {
         b = b.to(mailbox("", t)?);
     }

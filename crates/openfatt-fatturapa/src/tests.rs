@@ -372,3 +372,88 @@ fn intent_subtotal_currency_and_nso() {
     assert!(l[2].descrizione.starts_with("Subtotale USD 1.002,50"), "{}", l[2].descrizione);
     assert!(g.xml.contains("<CodiceCommessaConvenzione>#B9BGAQ#</CodiceCommessaConvenzione>"));
 }
+
+/// File ricevuti da sconosciuti (fatture, buste firmate, notifiche) alterati a caso: la
+/// lettura deve dare un errore o un risultato, mai bloccare o chiudere il programma.
+#[test]
+fn file_ricevuti_alterati_non_bloccano_il_programma() {
+    let company = sample_company();
+    let mut doc = Document::new(DocKind::Invoice);
+    doc.date = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+    doc.party = sample_customer();
+    doc.lines.push(DocLine { code: "A".into(), description: "Bulloni".into(), qty: dec!(3), unit_price: dec!(1.5), vat: v22(), ..Default::default() });
+    doc.lines.push(DocLine { description: "Servizio esente".into(), qty: dec!(1), unit_price: dec!(40), vat: VatRef { vat_id: None, rate: dec!(0), natura: Some("N4".into()), legal_ref: "Art. 10".into(), split: false }, ..Default::default() });
+    let t = finalize(&mut doc);
+    let g = generate(&company, &doc, &t, &BuildOptions { progressivo: "00009".into(), ..Default::default() }).unwrap();
+    let xml = g.xml.into_bytes();
+    let signed = crate::p7m::tests::fake_p7m(&xml, true);
+
+    // generatore pseudo-casuale riproducibile
+    let mut seed: u64 = 0x5eed_0f_fa77;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut mutate = |src: &[u8], next: &mut dyn FnMut() -> u64| -> Vec<u8> {
+        let mut v = src.to_vec();
+        match next() % 5 {
+            0 => {
+                // byte cambiati a caso
+                for _ in 0..(1 + next() % 8) {
+                    let i = (next() as usize) % v.len();
+                    v[i] = next() as u8;
+                }
+            }
+            1 => v.truncate((next() as usize) % v.len()),
+            2 => {
+                // un pezzo ripetuto
+                let a = (next() as usize) % v.len();
+                let b = (a + (next() as usize) % 200).min(v.len());
+                let piece = v[a..b].to_vec();
+                let at = (next() as usize) % v.len();
+                v.splice(at..at, piece);
+            }
+            3 => {
+                // un pezzo tolto
+                let a = (next() as usize) % v.len();
+                let b = (a + (next() as usize) % 200).min(v.len());
+                v.drain(a..b);
+            }
+            _ => {
+                // lunghezze e marcatori estremi
+                let i = (next() as usize) % v.len();
+                v[i] = [0x00, 0x80, 0xFF, b'<', b'&', 0x84][(next() % 6) as usize];
+            }
+        }
+        if v.is_empty() {
+            v.push(0x30);
+        }
+        v
+    };
+    let mut parsed = 0;
+    for round in 0..4000 {
+        let src: &[u8] = if round % 2 == 0 { &xml } else { &signed };
+        let data = mutate(src, &mut next);
+        let res = std::panic::catch_unwind(|| {
+            let _ = crate::p7m::extract(&data);
+            let _ = crate::notify::parse_notification_bytes(&data);
+            if let Ok((f, _)) = read_any(&data) {
+                for i in 0..f.bodies.len() {
+                    let _ = crate::to_domain::purchase_document(&f, i);
+                    let _ = crate::to_domain::declared_total(&f.bodies[i]);
+                }
+                let _ = crate::to_domain::supplier_from(&f.header.cedente);
+                return true;
+            }
+            false
+        });
+        match res {
+            Ok(ok) => parsed += ok as usize,
+            Err(_) => panic!("lettura interrotta al giro {} ({} byte)", round, data.len()),
+        }
+    }
+    // una parte delle varianti resta leggibile: la prova attraversa anche la conversione
+    assert!(parsed > 50, "solo {} varianti lette", parsed);
+}

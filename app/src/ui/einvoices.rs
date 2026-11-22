@@ -65,7 +65,8 @@ fn view_window(ctx: &egui::Context, cx: &mut Ctx, st: &mut State) {
                 save_xml(cx, e.id);
             }
             if ui.button("\u{E23A} Apri XML").clicked() {
-                cx.msgs.check(services::open_bytes(&e.file_name.replace(".p7m", ""), &e.xml), "");
+                let stem = e.file_name.trim_end_matches(".p7m").trim_end_matches(".P7M").trim_end_matches(".xml").trim_end_matches(".XML");
+                cx.msgs.check(services::open_untrusted(&format!("{}.xml", stem), &e.xml), "");
             }
             if let Some(doc) = e.document_id {
                 if ui.button("Apri documento").clicked() {
@@ -121,7 +122,7 @@ fn view_window(ctx: &egui::Context, cx: &mut Ctx, st: &mut State) {
                     let atts = &f.bodies[0].allegati;
                     for a in atts {
                         if ui.link(format!("\u{E39A} {}", a.nome)).clicked() {
-                            cx.msgs.check(services::open_bytes(&a.nome, &a.dati), "");
+                            cx.msgs.check(services::open_untrusted(&a.nome, &a.dati), "");
                         }
                     }
                 });
@@ -184,7 +185,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, dir: Direction) {
         }
     }
 
-    let list = cx.store.einvoices(dir, &st.search, st.year).unwrap_or_default();
+    let gen = cx.store.generation();
+    let ctx = ui.ctx().clone();
+    let search = super::settled(&ctx, ("fe_search", dir == Direction::Out), &st.search);
+    let (list, list_version) = super::memo(&ctx, ("einvoices", dir == Direction::Out), gen, (search.clone(), st.year), || cx.store.einvoices(dir, &search, st.year).unwrap_or_default());
     let sel = st.selected.and_then(|id| list.iter().find(|e| e.id == id)).cloned();
 
     ui.horizontal_wrapped(|ui| {
@@ -294,7 +298,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, dir: Direction) {
         });
     });
     if dir == Direction::Out {
-        let pending = cx.store.documents_without_einvoice().unwrap_or_default().len();
+        let (pending, _) = super::memo(&ctx, "documents_without_einvoice", gen, (), || cx.store.documents_without_einvoice().unwrap_or_default().len());
+        let pending = *pending;
         if pending > 0 {
             ui.label(RichText::new(format!("{} documenti emessi non hanno ancora una fattura elettronica: generarla da 'Fatture e note'.", pending)).color(ORANGE));
         }
@@ -331,7 +336,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, dir: Direction) {
         st.grid.select_only(id);
     }
     let avail = ui.available_height() - 4.0;
-    st.grid.version = 0;
+    st.grid.version = list_version;
     let ev = st.grid.show(ui, cx.store, &cols, &list, |e| e.id, avail, false, 22.0);
     st.selected = st.grid.single();
     if ev.opened.is_some() {

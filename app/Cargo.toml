@@ -38,6 +38,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 [features]
 # Solo per le prove: chiave e indirizzi di prova al posto di quelli reali
 prova-aggiornamento = []
+# Solo per collaudi e schermate automatiche: schermata iniziale senza accesso (OPENFATT_SCREEN),
+# clic simulati (OPENFATT_CLICKS) e versione finta (OPENFATT_VERSIONE). Mai nelle versioni distribuite.
+strumenti-prova = []
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true

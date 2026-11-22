@@ -1451,7 +1451,7 @@ impl Editor {
             missing += (l.qty - a).max(Decimal::ZERO);
             amount += a.min(l.qty) * calc::apply_cascade(l.unit_price, &calc::parse_discounts(&l.discounts).unwrap_or_default());
         }
-        egui::Frame::new().fill(theme::BAR).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+        egui::Frame::new().fill(theme::tint().tint).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let stat = |ui: &mut egui::Ui, t: &str, v: String, c: egui::Color32| {

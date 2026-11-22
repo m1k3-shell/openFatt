@@ -49,7 +49,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, x: Extra) {
 
 fn recurring(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     let today = chrono::Local::now().date_naive();
-    let list = cx.store.recurrences().unwrap_or_default();
+    let (list, _) = super::memo(ui.ctx(), "recurrences", cx.store.generation(), (), || cx.store.recurrences().unwrap_or_default());
     let due = list.iter().filter(|r| r.active && r.next_date <= today && r.end_date.map(|e| r.next_date <= e).unwrap_or(true)).count();
     theme::title_row(ui, &["Vendite"], "Documenti ricorrenti", None, |ui| {
         if theme::primary_enabled(ui, due > 0, icon::REPEAT, &format!("Genera i documenti scaduti ({})", due)).clicked() {
@@ -65,7 +65,7 @@ fn recurring(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         return;
     }
     type Row = (openfatt_store::Recurrence, Option<openfatt_core::model::Document>);
-    let rows: Vec<Row> = list.iter().map(|r| (r.clone(), cx.store.document(r.template_id).ok())).collect();
+    let (rows, rows_version) = super::memo(ui.ctx(), "recurrence_rows", cx.store.generation(), (), || list.iter().map(|r| (r.clone(), cx.store.document(r.template_id).ok())).collect::<Vec<Row>>());
     let open_req = std::cell::Cell::new(None);
     let del_req = std::cell::Cell::new(None);
     let (open_ref, del_ref) = (&open_req, &del_req);
@@ -94,7 +94,7 @@ fn recurring(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     st.recurring_grid.name = "ricorrenti";
     ui.horizontal(|ui| st.recurring_grid.toolbar(ui, cx.store, cx.msgs, &cols, &rows, "Documenti ricorrenti"));
     let h = ui.available_height() - 4.0;
-    st.recurring_grid.version = 0;
+    st.recurring_grid.version = rows_version;
     st.recurring_grid.show(ui, cx.store, &cols, &rows, |r| r.0.id, h, false, 26.0);
     if let Some(d) = open_req.get() {
         cx.nav.push(Nav::OpenDocument(d));

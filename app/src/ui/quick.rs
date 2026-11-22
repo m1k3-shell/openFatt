@@ -261,6 +261,10 @@ impl ProductCard {
     }
 
     fn show(&mut self, ctx: &egui::Context, cx: &mut Ctx) -> bool {
+        theme::with_section(theme::Section::Products, || self.draw(ctx, cx))
+    }
+
+    fn draw(&mut self, ctx: &egui::Context, cx: &mut Ctx) -> bool {
         self.load(ctx, cx);
         let mut open = true;
         let Some(p) = self.product.clone() else {
@@ -435,7 +439,7 @@ impl ProductCard {
             self.grid.toolbar(ui, cx.store, cx.msgs, &cols, &self.moves, "Movimenti di magazzino");
         });
         let h = list_height(ui);
-        self.grid.version = 0;
+        self.grid.version = self.generation.max(1);
         self.grid.show(ui, cx.store, &cols, &self.moves, |m| m.id, h, false, 22.0);
         if let Some(d) = opened.get() {
             cx.nav.push(Nav::OpenDocument(d));
@@ -478,6 +482,11 @@ impl PartyCard {
     }
 
     fn show(&mut self, ctx: &egui::Context, cx: &mut Ctx) -> bool {
+        let sec = if self.party.as_ref().is_some_and(|p| p.role == openfatt_core::model::PartyRole::Supplier) { theme::Section::Suppliers } else { theme::Section::Customers };
+        theme::with_section(sec, || self.draw(ctx, cx))
+    }
+
+    fn draw(&mut self, ctx: &egui::Context, cx: &mut Ctx) -> bool {
         self.load(cx);
         let Some(p) = self.party.clone() else {
             cx.msgs.warn("Il soggetto non esiste più");
@@ -575,7 +584,7 @@ impl PartyCard {
             self.doc_grid.toolbar(ui, cx.store, cx.msgs, &cols, &self.docs, "Documenti");
         });
         let h = list_height(ui);
-        self.doc_grid.version = 0;
+        self.doc_grid.version = self.generation.max(1);
         let ev = self.doc_grid.show(ui, cx.store, &cols, &self.docs, |d| d.id, h, false, 22.0);
         if let Some(id) = ev.opened {
             cx.nav.push(Nav::OpenDocument(id));
@@ -594,7 +603,7 @@ impl PartyCard {
             self.due_grid.toolbar(ui, cx.store, cx.msgs, &cols, &self.dues, "Pagamenti");
         });
         let h = list_height(ui);
-        self.due_grid.version = 0;
+        self.due_grid.version = self.generation.max(1);
         let ev = self.due_grid.show(ui, cx.store, &cols, &self.dues, |d| d.id, h, false, 22.0);
         if let Some(id) = ev.opened.and_then(|k| self.dues.iter().find(|d| d.id == k)).map(|d| d.document_id) {
             cx.nav.push(Nav::OpenDocument(id));
@@ -688,6 +697,10 @@ impl MoveDialog {
     }
 
     fn show(&mut self, ctx: &egui::Context, cx: &mut Ctx) -> bool {
+        theme::with_section(theme::Section::Stock, || self.draw(ctx, cx))
+    }
+
+    fn draw(&mut self, ctx: &egui::Context, cx: &mut Ctx) -> bool {
         let (title, subtitle) = self.title();
         let mut keep = true;
         let tracked = self.product.tracking != Tracking::None || !self.product.variants.is_empty();

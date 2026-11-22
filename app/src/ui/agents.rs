@@ -17,7 +17,6 @@ pub struct State {
     editing: Option<Agent>,
     from: NaiveDate,
     to: NaiveDate,
-    rows: Option<(i64, Vec<CommissionRow>)>,
     confirm_settle: bool,
     cat: (String, Decimal),
 }
@@ -26,7 +25,7 @@ impl Default for State {
     fn default() -> Self {
         let today = chrono::Local::now().date_naive();
         State {
-            grid: Grid::new("agente-provvigioni"), selected: None, editing: None, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, rows: None, confirm_settle: false, cat: (String::new(), Decimal::ZERO) }
+            grid: Grid::new("agente-provvigioni"), selected: None, editing: None, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, confirm_settle: false, cat: (String::new(), Decimal::ZERO) }
     }
 }
 
@@ -55,7 +54,6 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                 let label = format!("{}  ·  {}%{}", a.name, fmt_it_trim(a.rate, 0, 2), if a.active { "" } else { "  (non attivo)" });
                 if ui.selectable_label(sel, label).clicked() {
                     st.selected = Some(a.id);
-                    st.rows = None;
                 }
             }
         }));
@@ -77,14 +75,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                 let a = widgets::date_field(ui, "ag_from", &mut st.from);
                 ui.label("al");
                 let b = widgets::date_field(ui, "ag_to", &mut st.to);
-                if a || b {
-                    st.rows = None;
-                }
+                let _ = (a, b);
             });
-            if st.rows.as_ref().map(|(id, _)| *id != agent.id).unwrap_or(true) {
-                st.rows = Some((agent.id, cx.store.commissions(agent.id, st.from, st.to, today).unwrap_or_default()));
-            }
-            let rows = st.rows.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
+            let (from, to) = (st.from, st.to);
+            let (rows, rows_version) = super::memo(ui.ctx(), "commissions", cx.store.generation(), (agent.id, from, to, today), || cx.store.commissions(agent.id, from, to, today).unwrap_or_default());
             let tot = |f: fn(&CommissionRow) -> Decimal| -> Decimal { rows.iter().map(f).sum() };
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -142,7 +136,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                 });
             });
             let h = (ui.available_height() - 110.0).max(140.0);
-            st.grid.version = 0;
+            st.grid.version = rows_version;
             st.grid.show(ui, cx.store, &cols, &rows, |r| r.document_id, h, false, 22.0);
             if let Some(d) = open_req.get() {
                 cx.nav.push(Nav::OpenDocument(d));
@@ -157,7 +151,6 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                             ui.label(format!("{} · periodo {} - {} · € {} · {} documenti", &s.created_at[..10.min(s.created_at.len())], s.date_from.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default(), s.date_to.map(|d| d.format("%d/%m/%Y").to_string()).unwrap_or_default(), eur(s.total), s.rows.len()));
                             if ui.small_button(icon::TRASH).on_hover_text("Annulla la liquidazione").clicked() {
                                 cx.msgs.check(cx.store.delete_settlement(s.id), "Liquidazione annullata");
-                                st.rows = None;
                             }
                         });
                     }
@@ -170,7 +163,6 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                             cx.msgs.ok(format!("Liquidate provvigioni per € {}", eur(s.total)));
                         }
                         st.confirm_settle = false;
-                        st.rows = None;
                     }
                     Some(false) => st.confirm_settle = false,
                     None => {}
@@ -241,7 +233,6 @@ fn edit_window(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             if theme::primary(ui, icon::CHECK, "Salva").clicked() {
                 if let Some(saved) = cx.msgs.check(cx.store.save_agent(a), "Agente salvato") {
                     st.selected = Some(saved.id);
-                    st.rows = None;
                     close = true;
                 }
             }

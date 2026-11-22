@@ -693,3 +693,27 @@ fn situazione_di_magazzino_dell_articolo() {
     assert!(s.manual_stock_reasons().unwrap().contains(&"Conteggio".to_string()));
     assert!(s.adjust_stock(p.id, dec!(70), today, "", "Conteggio").unwrap().is_none());
 }
+
+#[test]
+fn riepilogo_documenti_sempre_allineato() {
+    // le colonne di riepilogo (città, note, stato ordine...) seguono il documento salvato,
+    // anche quando il documento viene modificato direttamente nell'archivio
+    let (s, c, p, v) = setup();
+    let mut doc = new_doc(&s, DocKind::CustomerOrder, &c, d(2026, 3, 1), vec![line(&p, dec!(1), &v)]);
+    doc.internal_notes = "consegnare al mattino".into();
+    doc.order_status = OrderStatus::Confirmed;
+    doc.expected_date = Some(d(2026, 3, 9));
+    let doc = s.save_document(&doc).unwrap();
+    let find = |s: &Store| s.documents(&DocFilter::default()).unwrap().into_iter().find(|x| x.id == doc.id).unwrap();
+    let r = find(&s);
+    assert_eq!(r.comment, "consegnare al mattino");
+    assert_eq!(r.party_city, "Trento");
+    assert_eq!(r.party_province, "TN");
+    assert_eq!(r.party_vat, "12345678903");
+    assert_eq!(r.expected_date, Some(d(2026, 3, 9)));
+    assert_eq!(r.order_status, doc.order_status);
+    s.conn().execute("UPDATE documents SET data = json_set(data, '$.internal_notes', 'cambiata') WHERE id = ?1", [doc.id]).unwrap();
+    assert_eq!(find(&s).comment, "cambiata");
+    s.conn().execute("UPDATE documents SET data = json_set(data, '$.legacy_fe', json('true')) WHERE id = ?1", [doc.id]).unwrap();
+    assert_eq!(s.conn().query_row("SELECT s_legacy_fe FROM documents WHERE id = ?1", [doc.id], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}

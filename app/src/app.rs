@@ -28,7 +28,7 @@ struct ScriptedClicks {
 
 impl ScriptedClicks {
     fn from_env() -> Self {
-        let points = std::env::var("OPENFATT_CLICKS").unwrap_or_default().split(';').filter_map(|p| p.split_once(',')).filter_map(|(x, y)| Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))).collect();
+        let points = (if cfg!(feature = "strumenti-prova") { std::env::var("OPENFATT_CLICKS").unwrap_or_default() } else { String::new() }).split(';').filter_map(|p| p.split_once(',')).filter_map(|(x, y)| Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))).collect();
         ScriptedClicks { points, step: 0, at: Some(std::time::Instant::now() + std::time::Duration::from_millis(2500)) }
     }
     fn pending(&self) -> bool {
@@ -156,6 +156,7 @@ impl OpenFattApp {
             mail_tx,
             mail_rx,
         };
+        crate::services::clean_temp_files();
         // OPENFATT_ARCHIVE / OPENFATT_SCREEN: apertura diretta (utile per collaudi e collegamenti sul desktop)
         if let Some(p) = std::env::var_os("OPENFATT_ARCHIVE").map(PathBuf::from) {
             app.open_archive(p);
@@ -395,7 +396,9 @@ impl OpenFattApp {
         match Store::open(&path) {
             Ok(s) => {
                 let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "postazione".into());
-                self.needs_login = s.has_users().unwrap_or(false) && std::env::var_os("OPENFATT_SCREEN").is_none();
+                // l'accesso si salta solo nelle build di prova (mai con una variabile d'ambiente
+                // in una versione distribuita: chiunque potrebbe impostarla)
+                self.needs_login = s.has_users().unwrap_or(false) && !(cfg!(feature = "strumenti-prova") && std::env::var_os("OPENFATT_SCREEN").is_some());
                 if !self.needs_login {
                     let _ = s.start_session(&host);
                 }
@@ -785,6 +788,10 @@ impl eframe::App for OpenFattApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let _profile = crate::profile::Frame::start(format!("{:?}", self.screen));
+        if crate::profile::active() {
+            ctx.request_repaint();
+        }
         if self.scripted.pending() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -840,7 +847,9 @@ impl eframe::App for OpenFattApp {
         } else {
             let store = self.store.as_ref().unwrap();
             self.badges.refresh(store);
-            let editor = self.editor.as_ref().map(|e| (format!("{} {}", e.doc.kind.label(), e.doc.number_label()), e.dirty));
+            let editor = self.editor.as_ref().map(|e| (format!("{} {}", e.doc.kind.label(), e.doc.number_label()), e.dirty, e.doc.kind));
+            // colori della sezione corrente (barra del titolo, pulsanti, selezioni)
+            theme::set_section(ctx, ui::shell::section_of(self.screen, self.editor.as_ref().map(|e| e.doc.kind)));
             egui::TopBottomPanel::top("toolbar").exact_height(62.0).frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(egui::Margin::symmetric(6, 0))).show(ctx, |ui| {
                 ui::shell::tool_bar(ui, store, &self.cfg.recent, &mut self.search, self.pec_busy.is_some(), self.screen, editor, &self.badges, &mut self.nav);
             });
@@ -871,7 +880,7 @@ impl eframe::App for OpenFattApp {
                     self.backups.banner_hidden = true;
                 }
             }
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::GROUND).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 6 })).show(ctx, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::ground()).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 6 })).show(ctx, |ui| {
                 let store = self.store.as_ref().unwrap();
                 let mut cx = Ctx { store, msgs: &mut self.msgs, nav: &mut self.nav };
                 match self.screen {

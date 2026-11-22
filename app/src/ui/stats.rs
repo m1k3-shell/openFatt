@@ -18,7 +18,6 @@ pub struct State {
     from: NaiveDate,
     to: NaiveDate,
     year: i32,
-    cache: Option<(u64, StatBy, NaiveDate, NaiveDate, Vec<StatRow>)>,
     months: Option<(u64, i32, Vec<(u32, Decimal, Decimal)>)>,
     flows: Option<(u64, Vec<FlowRow>)>,
     tab: u8,
@@ -29,7 +28,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         let today = chrono::Local::now().date_naive();
-        State { by: StatBy::Customer, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, year: today.year(), cache: None, months: None, flows: None, tab: 0, grid: Grid::new("statistiche"), codes: Default::default() }
+        State { by: StatBy::Customer, from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(), to: today, year: today.year(), months: None, flows: None, tab: 0, grid: Grid::new("statistiche"), codes: Default::default() }
     }
 }
 
@@ -114,11 +113,8 @@ fn breakdown(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, gen: u64) {
         ui.label("al");
         widgets::date_field(ui, "st_to", &mut st.to);
     });
-    let stale = st.cache.as_ref().map(|(g, b, f, t, _)| *g != gen || *b != st.by || *f != st.from || *t != st.to).unwrap_or(true);
-    if stale {
-        st.cache = Some((gen, st.by, st.from, st.to, cx.store.statistics(st.by, st.from, st.to).unwrap_or_default()));
-    }
-    let rows = st.cache.as_ref().map(|c| c.4.clone()).unwrap_or_default();
+    let (by, from, to) = (st.by, st.from, st.to);
+    let (rows, rows_version) = super::memo(ui.ctx(), "statistics", gen, (format!("{:?}", by), from, to), || cx.store.statistics(by, from, to).unwrap_or_default());
     let total: Decimal = rows.iter().map(|r| r.revenue).sum();
     let margin: Decimal = rows.iter().map(|r| r.margin()).sum();
     ui.horizontal(|ui| {
@@ -164,7 +160,7 @@ fn breakdown(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, gen: u64) {
         });
     });
     let h = ui.available_height() - 4.0;
-    st.grid.version = 0;
+    st.grid.version = rows_version;
     st.grid.show(ui, cx.store, &cols, &rows, |r| {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();

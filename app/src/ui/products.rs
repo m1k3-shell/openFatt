@@ -855,7 +855,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     }
 
     let gen = cx.store.generation();
-    let key = (st.search.clone(), st.show_inactive);
+    // la ricerca parte quando si smette di scrivere: con molti articoli non si rilegge a ogni lettera
+    let key = (super::settled(ui.ctx(), "products_search", &st.search), st.show_inactive);
     let list_rc = st.data.get(gen, &key, || cx.store.products(&key.0, key.1).unwrap_or_default());
     let list: &Vec<Product> = &list_rc;
 

@@ -1,7 +1,8 @@
 //! Aspetto dell'applicazione: caratteri, colori, pulsanti e componenti comuni.
 //!
-//! Stile "registro": la cornice non ha colore, l'azione principale è nera, il blu
-//! (`ACCENT`) va solo sul dato principale e il rosso/verde solo sugli stati.
+//! Ogni sezione del programma ha un suo colore (`Section`): lo prendono le icone della barra,
+//! la barra del titolo, il pulsante principale, le schede scelte e la riga selezionata, così
+//! si riconosce a colpo d'occhio dove ci si trova. Rosso, verde e arancio restano per gli stati.
 //! Carattere Geist (SIL OFL 1.1) con le cifre tabulari rese predefinite, così gli
 //! importi restano incolonnati; icone Phosphor (MIT) tramite `egui-phosphor`.
 
@@ -28,13 +29,139 @@ pub const NEGATIVE: Color32 = Color32::from_rgb(0xc4, 0x24, 0x2a);
 pub const WARNING: Color32 = Color32::from_rgb(0x92, 0x40, 0x0e);
 pub const TRACK: Color32 = Color32::from_rgb(0xdf, 0xe3, 0xe8);
 pub const CHART_MUTED: Color32 = Color32::from_rgb(0xc3, 0xc8, 0xcf);
-/// Barra del titolo di ogni sezione.
-pub const BAR: Color32 = Color32::from_rgb(0xe6, 0xec, 0xf5);
-/// Sfondo del pulsante della barra sotto il puntatore e di quello corrente.
-pub const HOVER: Color32 = Color32::from_rgb(0xee, 0xf3, 0xfa);
+/// Sfondo dell'avviso di nuova versione.
 pub const CURRENT: Color32 = Color32::from_rgb(0xd6, 0xe6, 0xfa);
-/// Riga selezionata negli elenchi.
-pub const ROW_SELECTED: Color32 = Color32::from_rgb(0x1f, 0x74, 0xdb);
+
+/// Sezioni del programma, ognuna con il suo colore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
+    Start,
+    Customers,
+    Suppliers,
+    Products,
+    Sales,
+    Purchases,
+    EInvoice,
+    Payments,
+    Stock,
+    Counter,
+    Agenda,
+    Analysis,
+    Tools,
+    Options,
+    Archives,
+}
+
+/// Le tinte di una sezione, ricavate dal colore principale.
+#[derive(Debug, Clone, Copy)]
+pub struct Tint {
+    /// pieno: pulsante principale, icone, riga selezionata (testo bianco sopra)
+    pub main: Color32,
+    /// scuro: titoli e collegamenti
+    pub dark: Color32,
+    /// chiaro: scheda scelta, pulsante corrente della barra
+    pub soft: Color32,
+    /// chiarissimo: barra del titolo, intestazioni delle tabelle
+    pub tint: Color32,
+    /// appena accennato: passaggio del mouse
+    pub hover: Color32,
+}
+
+impl Section {
+    pub fn main(self) -> Color32 {
+        let (r, g, b) = match self {
+            Section::Start => (0x36, 0x4f, 0xc7),
+            Section::Customers => (0x0c, 0x85, 0x99),
+            Section::Suppliers | Section::Purchases => (0xc2, 0x41, 0x0c),
+            Section::Products => (0x86, 0x2e, 0x9c),
+            Section::Sales => (0x19, 0x71, 0xc2),
+            Section::EInvoice => (0x5f, 0x3d, 0xc4),
+            Section::Payments => (0x2f, 0x7d, 0x32),
+            Section::Stock => (0xa8, 0x5d, 0x00),
+            Section::Counter => (0xc2, 0x25, 0x5c),
+            Section::Agenda => (0x08, 0x7f, 0x5b),
+            Section::Analysis => (0xa6, 0x1e, 0x4d),
+            Section::Tools => (0x49, 0x5a, 0x6e),
+            Section::Options => (0x5c, 0x63, 0x70),
+            Section::Archives => (0x7a, 0x52, 0x30),
+        };
+        Color32::from_rgb(r, g, b)
+    }
+    pub fn tint(self) -> Tint {
+        let m = self.main();
+        Tint { main: m, dark: mix(m, Color32::BLACK, 0.28), soft: mix(Color32::WHITE, m, 0.17), tint: mix(Color32::WHITE, m, 0.09), hover: mix(Color32::WHITE, m, 0.06) }
+    }
+    /// Icona della sezione (barra del titolo).
+    pub fn icon(self) -> &'static str {
+        match self {
+            Section::Start => icon::HOUSE,
+            Section::Customers => icon::USERS,
+            Section::Suppliers => icon::TRUCK,
+            Section::Products => icon::PACKAGE,
+            Section::Sales => icon::FILES,
+            Section::Purchases => icon::SHOPPING_CART,
+            Section::EInvoice => icon::PAPER_PLANE_TILT,
+            Section::Payments => icon::CURRENCY_CIRCLE_DOLLAR,
+            Section::Stock => icon::WAREHOUSE,
+            Section::Counter => icon::CASH_REGISTER,
+            Section::Agenda => icon::CALENDAR_BLANK,
+            Section::Analysis => icon::CHART_LINE_UP,
+            Section::Tools => icon::WRENCH,
+            Section::Options => icon::GEAR_SIX,
+            Section::Archives => icon::FOLDER_OPEN,
+        }
+    }
+}
+
+/// Miscela di due colori (`t` = quota del secondo).
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
+}
+
+thread_local! {
+    static SECTION: std::cell::Cell<Section> = const { std::cell::Cell::new(Section::Start) };
+}
+
+/// Sezione della schermata che si sta disegnando.
+pub fn section() -> Section {
+    SECTION.with(|s| s.get())
+}
+/// Tinte della sezione corrente.
+pub fn tint() -> Tint {
+    section().tint()
+}
+/// Disegna `f` con i colori di un'altra sezione (schede rapide, menu della barra).
+pub fn with_section<R>(s: Section, f: impl FnOnce() -> R) -> R {
+    let old = SECTION.with(|c| c.replace(s));
+    let r = f();
+    SECTION.with(|c| c.set(old));
+    r
+}
+
+/// Imposta la sezione corrente e adegua i colori di egui (schede scelte, selezioni,
+/// collegamenti). Lo stile si cambia solo quando cambia la sezione.
+pub fn set_section(ctx: &egui::Context, s: Section) {
+    SECTION.with(|c| c.set(s));
+    let id = egui::Id::new("theme_section");
+    if ctx.data(|d| d.get_temp::<Section>(id)) == Some(s) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, s));
+    let t = s.tint();
+    ctx.all_styles_mut(|style| {
+        let v = &mut style.visuals;
+        v.selection.bg_fill = t.soft;
+        v.selection.stroke = Stroke::new(1.0_f32, t.dark);
+        v.hyperlink_color = t.dark;
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, mix(t.main, Color32::WHITE, 0.45));
+    });
+}
+
+/// Fondo della finestra, appena tinto del colore della sezione.
+pub fn ground() -> Color32 {
+    mix(GROUND, tint().main, 0.035)
+}
 
 const GEIST_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Geist-Regular.ttf");
 const GEIST_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Geist-Medium.ttf");
@@ -191,7 +318,8 @@ pub fn primary_enabled(ui: &mut Ui, enabled: bool, icon: &str, text: &str) -> Re
         return ui.add_enabled(false, button_widget(icon, text));
     }
     ui.scope(|ui| {
-        flat_visuals(ui, PRIMARY, Color32::from_rgb(0x2e, 0x2e, 0x2e), Color32::BLACK);
+        let t = tint();
+        flat_visuals(ui, t.main, mix(t.main, Color32::BLACK, 0.15), t.dark);
         ui.add(egui::Button::new(RichText::new(label(icon, text)).family(medium_family()).color(Color32::WHITE)).min_size(Vec2::new(0.0, 27.0)))
     })
     .inner
@@ -199,7 +327,20 @@ pub fn primary_enabled(ui: &mut Ui, enabled: bool, icon: &str, text: &str) -> Re
 
 /// Pulsante normale (bianco con bordo), alto 36.
 pub fn button_widget(icon: &str, text: &str) -> egui::Button<'static> {
-    egui::Button::new(medium(label(icon, text))).min_size(Vec2::new(0.0, 27.0))
+    egui::Button::new(colored_label(icon, text, INK)).min_size(Vec2::new(0.0, 27.0))
+}
+
+/// Icona nel colore della sezione e testo nel colore indicato.
+fn colored_label(icon: &str, text: &str, color: Color32) -> egui::text::LayoutJob {
+    let mut j = egui::text::LayoutJob::default();
+    let font = FontId::new(13.0, medium_family());
+    if !icon.is_empty() {
+        j.append(icon, 0.0, egui::TextFormat { font_id: font.clone(), color: tint().main, ..Default::default() });
+    }
+    if !text.is_empty() {
+        j.append(text, if icon.is_empty() { 0.0 } else { 6.0 }, egui::TextFormat { font_id: font, color, ..Default::default() });
+    }
+    j
 }
 pub fn button(ui: &mut Ui, icon: &str, text: &str) -> Response {
     ui.add(button_widget(icon, text))
@@ -214,7 +355,11 @@ pub fn ghost(ui: &mut Ui, enabled: bool, icon: &str, text: &str) -> Response {
 }
 pub fn ghost_colored(ui: &mut Ui, enabled: bool, icon: &str, text: &str, color: Color32) -> Response {
     ui.scope(|ui| {
-        flat_visuals(ui, Color32::TRANSPARENT, ACTIVE, Color32::from_rgb(0xd8, 0xdc, 0xe2));
+        let tn = tint();
+        flat_visuals(ui, Color32::TRANSPARENT, tn.soft, mix(tn.soft, tn.main, 0.15));
+        if enabled && color == INK {
+            return ui.add(egui::Button::new(colored_label(icon, text, INK)).min_size(Vec2::new(0.0, 30.0)));
+        }
         let t = RichText::new(label(icon, text)).family(medium_family());
         let t = if enabled { t.color(color) } else { t };
         ui.add_enabled(enabled, egui::Button::new(t).min_size(Vec2::new(0.0, 30.0)))
@@ -225,8 +370,9 @@ pub fn ghost_colored(ui: &mut Ui, enabled: bool, icon: &str, text: &str, color: 
 /// Pulsante con la sola icona e il suggerimento al passaggio del mouse.
 pub fn icon_button(ui: &mut Ui, icon: &str, tip: &str) -> Response {
     ui.scope(|ui| {
-        flat_visuals(ui, Color32::TRANSPARENT, RAISED, ACTIVE);
-        ui.add(egui::Button::new(RichText::new(icon).size(18.0).color(INK_SOFT)).min_size(Vec2::splat(36.0)))
+        let t = tint();
+        flat_visuals(ui, Color32::TRANSPARENT, t.hover, t.soft);
+        ui.add(egui::Button::new(RichText::new(icon).size(18.0).color(t.dark)).min_size(Vec2::splat(36.0)))
     })
     .inner
     .on_hover_text(tip)
@@ -234,11 +380,14 @@ pub fn icon_button(ui: &mut Ui, icon: &str, tip: &str) -> Response {
 
 /// Barra del titolo della sezione: nome e dati a sinistra, azioni a destra.
 pub fn title_row(ui: &mut Ui, _crumbs: &[&str], title: &str, sub: Option<egui::text::LayoutJob>, actions: impl FnOnce(&mut Ui)) {
-    egui::Frame::new().fill(BAR).inner_margin(Margin { left: 10, right: 6, top: 3, bottom: 3 }).outer_margin(Margin { left: -8, right: -8, top: -8, bottom: 6 }).show(ui, |ui| {
+    let sec = section();
+    let t = sec.tint();
+    let r = egui::Frame::new().fill(t.tint).inner_margin(Margin { left: 14, right: 6, top: 3, bottom: 3 }).outer_margin(Margin { left: -8, right: -8, top: -8, bottom: 6 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.set_min_height(27.0);
-            ui.label(bold(title).size(15.0));
+            ui.label(RichText::new(sec.icon()).size(17.0).color(t.main));
+            ui.label(bold(title).size(15.0).color(t.dark));
             if let Some(j) = sub {
                 ui.add_space(8.0);
                 ui.label(j);
@@ -248,6 +397,10 @@ pub fn title_row(ui: &mut Ui, _crumbs: &[&str], title: &str, sub: Option<egui::t
             });
         });
     });
+    // filo colorato a sinistra e sotto la barra
+    let rect = r.response.rect;
+    ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height())), CornerRadius::ZERO, t.main);
+    ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, mix(t.tint, t.main, 0.35)));
 }
 
 /// Sottotitolo composto: parti normali in grigio e parti evidenziate in nero.
@@ -275,6 +428,10 @@ pub fn card<R>(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui), body: impl
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
+                if !title.is_empty() {
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(4.0, 16.0), Sense::hover());
+                    ui.painter().rect_filled(r, CornerRadius::same(2), tint().main);
+                }
                 ui.label(medium(title).size(16.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| right(ui));
             });
@@ -338,7 +495,7 @@ pub fn sdi_steps(ui: &mut Ui, code: Option<&str>) {
         let r = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - 3.0), Vec2::new(16.0, 6.0));
         // completate in nero, quella in corso in blu, lo scarto in rosso
         let c = if i < done {
-            PRIMARY
+            if done == 3 { POSITIVE } else { tint().main }
         } else if i == done && current {
             ACCENT
         } else if i == done && ko {
@@ -407,7 +564,7 @@ pub fn bar_chart(ui: &mut Ui, labels: &[String], values: &[f64], height: f32, fm
         let cx = plot.left() + slot * (i as f32 + 0.5);
         let h = (*v / top) as f32 * plot.height();
         let r = egui::Rect::from_min_max(egui::pos2(cx - bw / 2.0, plot.bottom() - h), egui::pos2(cx + bw / 2.0, plot.bottom()));
-        let c = if i + 1 == values.len() { ACCENT } else { CHART_MUTED };
+        let c = if i + 1 == values.len() { tint().main } else { mix(CHART_MUTED, tint().main, 0.18) };
         p.rect_filled(r, CornerRadius::ZERO, c);
         p.text(egui::pos2(cx, rect.bottom() - 2.0), egui::Align2::CENTER_BOTTOM, &labels[i], font.clone(), MUTED);
         if let Some(h) = hover {

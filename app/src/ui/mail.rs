@@ -243,7 +243,7 @@ impl Composer {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 let ic = if a.mime == "application/pdf" { icon::FILE_PDF } else { icon::PAPERCLIP };
                                 if ui.add(egui::Label::new(format!("{} {}", ic, a.name)).sense(egui::Sense::click())).on_hover_text("Apri").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                                    if let Err(e) = services::open_bytes(&a.name, &a.data) {
+                                    if let Err(e) = services::open_untrusted(&a.name, &a.data) {
                                         msgs.err(e);
                                     }
                                 }

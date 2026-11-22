@@ -64,6 +64,8 @@ pub struct DocFilter {
     pub status: Option<DocStatus>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
+    /// Al massimo questo numero di documenti (i più recenti), per le ricerche mentre si scrive.
+    pub limit: Option<usize>,
 }
 
 /// DDT di provenienza delle righe di una fattura differita.
@@ -81,15 +83,8 @@ impl Store {
             "SELECT d.id, d.kind, d.status, d.number, d.series, d.year, d.date, d.party_id, d.party_name, d.external_number,
                     d.total, d.net_to_pay,
                     (SELECT e.status FROM einvoices e WHERE e.document_id = d.id AND e.direction = 'OUT' ORDER BY e.id DESC LIMIT 1),
-                    COALESCE(json_extract(d.data, '$.legacy_fe'), 0),
-                    COALESCE(json_extract(d.data, '$.order_status'), ''),
-                    json_extract(d.data, '$.expected_date'),
-                    COALESCE(json_extract(d.data, '$.internal_notes'), ''),
-                    COALESCE(json_extract(d.data, '$.party.city'), ''),
-                    COALESCE(json_extract(d.data, '$.party.province'), ''),
-                    COALESCE(json_extract(d.data, '$.party.vat_number'), ''),
-                    COALESCE(json_extract(d.data, '$.payment.name'), ''),
-                    json_extract(d.data, '$.agent_id')
+                    d.s_legacy_fe, d.s_order_status, d.s_expected_date, d.s_notes,
+                    d.s_city, d.s_province, d.s_vat, d.s_payment, d.agent_id
              FROM documents d WHERE 1=1",
         );
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
@@ -132,6 +127,9 @@ impl Store {
             ));
         }
         sql.push_str(" ORDER BY d.date DESC, d.number DESC, d.id DESC");
+        if let Some(n) = f.limit {
+            sql.push_str(&format!(" LIMIT {}", n));
+        }
         let mut st = self.conn().prepare(&sql)?;
         let rows = st.query_map(rusqlite::params_from_iter(args.iter()), |r| {
             Ok((
@@ -159,9 +157,13 @@ impl Store {
                 r.get::<_, Option<i64>>(21)?,
             ))
         })?;
-        let open = self.open_amounts_by_doc()?;
+        let rows: Vec<_> = rows.collect::<std::result::Result<_, _>>()?;
+        // residui da incassare: per pochi documenti si leggono solo le loro scadenze,
+        // per elenchi lunghi conviene una sola lettura di tutto lo scadenzario
+        let open = if rows.len() < 2000 { self.open_amounts_of(rows.iter().map(|r| r.0))? } else { self.open_amounts_by_doc()? };
         let mut out = Vec::new();
         for row in rows {
+            let row: std::result::Result<_, rusqlite::Error> = Ok(row);
             let (id, kind, status, number, series, year, date, party_id, party_name, ext, total, net, fe, legacy, order_status, expected, comment, party_city, party_province, party_vat, payment_name, agent_id) = row?;
             let kind = DocKind::from_code(&kind).unwrap_or_default();
             let number_label = match number {
@@ -260,6 +262,19 @@ impl Store {
             out.insert(doc, OrderProgress { any, all: any && all, ordered, arrived, targets: list.into_iter().collect() });
         }
         Ok(out)
+    }
+
+    fn open_amounts_of(&self, ids: impl Iterator<Item = i64>) -> Result<HashMap<i64, Decimal>> {
+        let mut st = self.conn().prepare_cached("SELECT amount, paid, writeoff FROM due_dates WHERE document_id = ?1")?;
+        let mut m: HashMap<i64, Decimal> = HashMap::new();
+        for id in ids {
+            let rows = st.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+            for r in rows {
+                let (a, p, w) = r?;
+                *m.entry(id).or_default() += dec_from_sql(Some(a)) - dec_from_sql(Some(p)) - dec_from_sql(Some(w));
+            }
+        }
+        Ok(m)
     }
 
     fn open_amounts_by_doc(&self) -> Result<HashMap<i64, Decimal>> {

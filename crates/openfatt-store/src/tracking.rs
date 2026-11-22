@@ -241,8 +241,15 @@ impl Store {
 
     /// Lotti con giacenza che scadono entro la data indicata (compresi quelli già scaduti).
     pub fn expiring_lots(&self, until: NaiveDate) -> Result<Vec<(Product, LotRow)>> {
+        // solo gli articoli che hanno movimenti con lotto e scadenza entro la data
+        // (prima si leggevano tutti gli articoli dell'archivio)
+        let ids: Vec<i64> = {
+            let mut st = self.conn().prepare("SELECT DISTINCT product_id FROM stock_moves WHERE lot <> '' AND expiry IS NOT NULL AND expiry <= ?1")?;
+            let rows = st.query_map([crate::date_to_sql(until)], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let mut out = Vec::new();
-        for p in self.products("", false)?.into_iter().filter(|p| p.tracking == Tracking::Lot) {
+        for p in ids.into_iter().filter_map(|id| self.product(id).ok().flatten()).filter(|p| p.tracking == Tracking::Lot && p.active) {
             for l in self.lots_available(p.id, None, None)? {
                 if l.expiry.map(|e| e <= until).unwrap_or(false) {
                     out.push((p.clone(), l));

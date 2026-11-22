@@ -143,8 +143,13 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
         });
     }
     // solleciti di pagamento pronti da inviare
-    let tpl = crate::mailer::templates(s);
-    let to_remind: Vec<_> = s.reminder_candidates(today, tpl.grace_days, tpl.min_days_between).unwrap_or_default().into_iter().filter(|c| !c.recently_reminded).collect();
+    // tutto quello che segue si legge dall'archivio solo quando cambia (non a ogni ridisegno)
+    let gen = s.generation();
+    let ctx = ui.ctx().clone();
+    let (to_remind, _) = super::memo(&ctx, "home_reminders", gen, today, || {
+        let tpl = crate::mailer::templates(s);
+        s.reminder_candidates(today, tpl.grace_days, tpl.min_days_between).unwrap_or_default().into_iter().filter(|c| !c.recently_reminded).collect::<Vec<_>>()
+    });
     if !to_remind.is_empty() {
         let n = to_remind.len();
         let names: Vec<String> = to_remind.iter().take(3).map(|c| c.party_name.clone()).collect();
@@ -160,12 +165,13 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
         });
     }
     // versamento IVA dell'ultimo periodo chiuso, se la scadenza è vicina
-    if let Ok(vs) = s.vat_settings() {
+    if let Ok(vs) = super::memo(&ctx, "vat_settings", gen, (), || s.vat_settings().map_err(|e| e.to_string())).0.as_ref() {
         let cur = openfatt_core::vat::Period::containing(today, vs.periodicity);
         let last = if cur.index > 1 { openfatt_core::vat::Period { index: cur.index - 1, ..cur } } else { openfatt_core::vat::Period::new(cur.year - 1, cur.count(), vs.periodicity) };
         let due = last.payment_due();
         if due >= today - chrono::Duration::days(60) && due <= today + chrono::Duration::days(12) {
-            if let Some((_, l)) = s.vat_liquidations(last.year, last.index).ok().and_then(|y| y.into_iter().last()) {
+            let (liq, _) = super::memo(&ctx, "home_vat", gen, (last.year, last.index), || s.vat_liquidations(last.year, last.index).ok().and_then(|y| y.into_iter().last()));
+            if let Some((_, l)) = liq.as_ref() {
                 if l.pay_now && l.inputs.paid_on.is_none() {
                     todo.push(Todo {
                         icon: icon::PERCENT,
@@ -187,7 +193,7 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
         (openfatt_store::BankKind::Sdd, 30, super::bank::Tab::Sdd, "Addebiti SDD da presentare", "Crea distinta"),
         (openfatt_store::BankKind::Sct, 7, super::bank::Tab::Sct, "Bonifici a fornitori da disporre", "Prepara bonifici"),
     ] {
-        let list: Vec<_> = s.bank_pending(kind).unwrap_or_default().into_iter().filter(|d| d.date <= today + chrono::Duration::days(days)).collect();
+        let (list, _) = super::memo(&ctx, ("home_bank", kind), gen, today, || s.bank_pending(kind).unwrap_or_default().into_iter().filter(|d| d.date <= today + chrono::Duration::days(days)).collect::<Vec<_>>());
         if !list.is_empty() {
             let first = list.iter().map(|d| d.date).min().unwrap();
             todo.push(Todo {
@@ -227,8 +233,11 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
             go: Go::Nav(Nav::Go(Screen::Dues)),
         });
     }
-    for id in without_fe.iter().take(4) {
-        if let Ok(d) = s.document(*id) {
+    let first_ids: Vec<i64> = without_fe.iter().take(4).copied().collect();
+    let (without_docs, _) = super::memo(&ctx, "home_without_fe", gen, first_ids.clone(), || first_ids.iter().filter_map(|id| s.document(*id).ok()).collect::<Vec<_>>());
+    for d in without_docs.iter() {
+        let id = &d.id;
+        {
             todo.push(Todo {
                 icon: icon::PAPER_PLANE_TILT,
                 bad: false,
@@ -292,7 +301,7 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
         });
     }
     if let Some(inv) = &open_inv {
-        let t = s.inventory_totals(inv.id).unwrap_or_default();
+        let (t, _) = super::memo(&ctx, "home_inventory", gen, inv.id, || s.inventory_totals(inv.id).unwrap_or_default());
         todo.push(Todo {
             icon: icon::LIST_CHECKS,
             bad: false,
@@ -306,7 +315,7 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
     }
 
     // documenti ricorrenti, agenda
-    let rec = s.due_recurrences(today).unwrap_or_default();
+    let (rec, _) = super::memo(&ctx, "home_recurrences", gen, today, || s.due_recurrences(today).unwrap_or_default());
     if !rec.is_empty() {
         todo.push(Todo {
             icon: icon::REPEAT,
@@ -319,8 +328,8 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
             go: Go::Nav(Nav::Go(Screen::Extra(super::business::Extra::Recurring))),
         });
     }
-    let agenda: Vec<_> = s.agenda(today, today).unwrap_or_default().into_iter().filter(|a| !a.done).collect();
-    let late = s.agenda_overdue(today).unwrap_or_default();
+    let (agenda, _) = super::memo(&ctx, "home_agenda", gen, today, || s.agenda(today, today).unwrap_or_default().into_iter().filter(|a| !a.done).collect::<Vec<_>>());
+    let (late, _) = super::memo(&ctx, "home_agenda_late", gen, today, || s.agenda_overdue(today).unwrap_or_default());
     if !agenda.is_empty() || !late.is_empty() {
         let first = agenda.first().map(|a| format!("{}{}", if a.time.is_empty() { String::new() } else { format!("{} ", a.time) }, a.title)).unwrap_or_default();
         todo.push(Todo {
@@ -557,11 +566,30 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
     });
 }
 
+/// Sezione a cui porta un'attività da fare (per il colore dell'icona).
+fn todo_section(ic: &str) -> theme::Section {
+    use theme::Section;
+    match ic {
+        x if x == icon::PAPER_PLANE_TILT || x == icon::TRAY_ARROW_DOWN || x == icon::ARROW_CLOCKWISE => Section::EInvoice,
+        x if x == icon::ENVELOPE_SIMPLE || x == icon::BANK || x == icon::ARROW_SQUARE_UP_RIGHT || x == icon::CLOCK_COUNTDOWN => Section::Payments,
+        x if x == icon::PERCENT => Section::Tools,
+        x if x == icon::PACKAGE || x == icon::LIST_CHECKS => Section::Stock,
+        x if x == icon::CALENDAR_BLANK => Section::Agenda,
+        x if x == icon::BUILDINGS || x == icon::GEAR_SIX => Section::Options,
+        _ => Section::Sales,
+    }
+}
+
 fn todo_row(ui: &mut Ui, t: &Todo) -> bool {
     let mut clicked = false;
     ui.horizontal(|ui| {
         ui.set_min_height(56.0);
-        ui.add_sized([28.0, 28.0], egui::Label::new(RichText::new(t.icon).size(20.0).color(if t.bad { NEGATIVE } else { theme::INK_SOFT })));
+        // icona su un quadratino del colore della sezione a cui porta l'attività
+        let tn = todo_section(t.icon).tint();
+        let (fg, bg) = if t.bad { (NEGATIVE, egui::Color32::from_rgb(0xff, 0xed, 0xea)) } else { (tn.main, tn.soft) };
+        let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+        ui.painter().rect_filled(r, 8, bg);
+        ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, t.icon, egui::FontId::proportional(18.0), fg);
         let w = ui.available_width();
         ui.vertical(|ui| {
             ui.set_width((w - 320.0).max(160.0));

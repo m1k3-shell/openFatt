@@ -468,7 +468,7 @@ impl Attachments {
                     ui.label(RichText::new(format!("{} kB", (a.size + 1023) / 1024)).color(GRAY));
                     if ui.small_button("Apri").clicked() {
                         if let Ok((name, data)) = store.attachment_content(a.id) {
-                            if let Err(e) = crate::services::open_bytes(&name, &data) {
+                            if let Err(e) = crate::services::open_untrusted(&name, &data) {
                                 msgs.err(e);
                             }
                         }

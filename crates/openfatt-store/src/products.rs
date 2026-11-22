@@ -415,11 +415,31 @@ impl Store {
         Ok(out)
     }
 
+    /// Codice e descrizione degli articoli indicati (senza leggere l'intera scheda).
+    pub fn product_labels(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, (String, String)>> {
+        let mut out = std::collections::HashMap::new();
+        let mut st = self.conn().prepare_cached("SELECT code, description FROM products WHERE id = ?1")?;
+        for id in ids {
+            if out.contains_key(id) {
+                continue;
+            }
+            if let Some(v) = st.query_row([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional()? {
+                out.insert(*id, v);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn stock_moves(&self, product_id: Option<i64>, limit: usize) -> Result<Vec<StockMove>> {
-        let mut st = self.conn().prepare(
+        // due interrogazioni distinte, così ognuna usa il proprio indice
+        let sql = if product_id.is_some() {
             "SELECT id, date, product_id, qty, warehouse, unit_value, reason, document_id, line_id, lot, variant, expiry, serial FROM stock_moves
-             WHERE (?1 IS NULL OR product_id = ?1) ORDER BY date DESC, id DESC LIMIT ?2",
-        )?;
+             WHERE product_id = ?1 ORDER BY date DESC, id DESC LIMIT ?2"
+        } else {
+            "SELECT id, date, product_id, qty, warehouse, unit_value, reason, document_id, line_id, lot, variant, expiry, serial FROM stock_moves
+             WHERE ?1 IS NULL ORDER BY date DESC, id DESC LIMIT ?2"
+        };
+        let mut st = self.conn().prepare_cached(sql)?;
         let rows = st.query_map(params![product_id, limit as i64], |r| {
             Ok(StockMove {
                 id: r.get(0)?,

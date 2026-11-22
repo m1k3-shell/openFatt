@@ -260,10 +260,11 @@ fn outcome_tone(l: &Liquidation) -> Tone {
 }
 
 fn liquidation(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, period: Period) {
-    let year = match cx.store.vat_liquidations(period.year, period.count()) {
+    let (year, _) = super::memo(ui.ctx(), "vat_liquidations", cx.store.generation(), (period.year, period.count()), || cx.store.vat_liquidations(period.year, period.count()).map_err(|e| e.to_string()));
+    let year = match year.as_ref() {
         Ok(y) => y,
         Err(e) => {
-            ui.label(RichText::new(e.to_string()).color(theme::NEGATIVE));
+            ui.label(RichText::new(e).color(theme::NEGATIVE));
             return;
         }
     };
@@ -416,7 +417,7 @@ fn liquidation(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, period: Period) 
                     ui.label(theme::medium(t).size(12.0).color(theme::MUTED));
                 }
                 ui.end_row();
-                for (p, l) in &year {
+                for (p, l) in year.iter() {
                     let today = chrono::Local::now().date_naive();
                     let future = p.first() > today;
                     let running = !future && p.last() >= today;
@@ -457,7 +458,7 @@ fn liquidation(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, period: Period) 
 
 fn register_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, register: Register, period: Period) {
     let (from, to) = (period.first(), period.last());
-    let rows = cx.store.vat_register(register, from, to).unwrap_or_default();
+    let (rows, rows_version) = super::memo(ui.ctx(), "vat_register", cx.store.generation(), (register, from, to), || cx.store.vat_register(register, from, to).unwrap_or_default());
     let counted: Vec<RegisterRow> = rows.iter().filter(|r| register == Register::Sales || !r.reverse_charge).cloned().collect();
     let name = if register == Register::Sales { "Registro IVA vendite" } else { "Registro IVA acquisti" };
     ui.horizontal(|ui| {
@@ -528,7 +529,7 @@ fn register_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, register: Regi
                     st.register_grid.toolbar(ui, cx.store, cx.msgs, &cols, &flat, "Registro IVA");
                 });
             });
-            st.register_grid.version = 0;
+            st.register_grid.version = rows_version;
             st.register_grid.show(ui, cx.store, &cols, &flat, |x| x.0.document_id.wrapping_mul(100).wrapping_add(x.0.rates.iter().position(|a| std::ptr::eq(a, x.1)).unwrap_or(0) as i64), (avail - 270.0).max(160.0), false, 26.0);
             if let Some(d) = open_req.get() {
                 cx.nav.push(Nav::OpenDocument(d));
@@ -558,7 +559,7 @@ fn register_view(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, register: Regi
 
 fn retail_view(ui: &mut egui::Ui, cx: &mut Ctx, period: Period) {
     let (from, to) = (period.first(), period.last());
-    let rows = cx.store.retail_register(from, to).unwrap_or_default();
+    let (rows, _) = super::memo(ui.ctx(), "retail_register", cx.store.generation(), (from, to), || cx.store.retail_register(from, to).unwrap_or_default());
     let gross: Decimal = rows.iter().map(|r| r.gross).sum();
     ui.horizontal(|ui| {
         ui.label(theme::muted(format!("{} giorni con vendite · corrispettivi € {}", rows.len(), eur(gross))));
@@ -582,7 +583,7 @@ fn retail_view(ui: &mut egui::Ui, cx: &mut Ctx, period: Period) {
                 ui.label(theme::medium(t).size(12.0).color(theme::MUTED));
             }
             ui.end_row();
-            for d in &rows {
+            for d in rows.iter() {
                 for (i, (l, taxable, tax)) in d.rates.iter().enumerate() {
                     ui.label(if i == 0 { d.date.format("%d/%m/%Y").to_string() } else { String::new() });
                     ui.label(if i == 0 { d.count.to_string() } else { String::new() });

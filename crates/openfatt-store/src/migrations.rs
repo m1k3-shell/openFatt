@@ -374,6 +374,36 @@ const MIGRATIONS: &[&str] = &[
     INSERT OR IGNORE INTO vat_codes(code, data) SELECT '5sp', '{"id":0,"code":"5sp","description":"Imponibile 5% con scissione dei pagamenti","rate":"5","natura":null,"legal_ref":"Scissione dei pagamenti art. 17-ter DPR 633/72","active":true,"split_payment":true}' WHERE EXISTS (SELECT 1 FROM vat_codes);
     INSERT OR IGNORE INTO vat_codes(code, data) SELECT '4sp', '{"id":0,"code":"4sp","description":"Imponibile 4% con scissione dei pagamenti","rate":"4","natura":null,"legal_ref":"Scissione dei pagamenti art. 17-ter DPR 633/72","active":true,"split_payment":true}' WHERE EXISTS (SELECT 1 FROM vat_codes);
     CREATE INDEX IF NOT EXISTS ix_doc_lines_source ON doc_lines(source_doc_id);
+    "#,    r#"
+    -- dati di riepilogo dei documenti in colonne proprie: gli elenchi non devono più
+    -- leggere tutto il documento salvato (alcuni KB l'uno) per mostrarne pochi campi
+    ALTER TABLE documents ADD COLUMN s_legacy_fe INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE documents ADD COLUMN s_order_status TEXT NOT NULL DEFAULT '';
+    ALTER TABLE documents ADD COLUMN s_expected_date TEXT;
+    ALTER TABLE documents ADD COLUMN s_notes TEXT NOT NULL DEFAULT '';
+    ALTER TABLE documents ADD COLUMN s_city TEXT NOT NULL DEFAULT '';
+    ALTER TABLE documents ADD COLUMN s_province TEXT NOT NULL DEFAULT '';
+    ALTER TABLE documents ADD COLUMN s_vat TEXT NOT NULL DEFAULT '';
+    ALTER TABLE documents ADD COLUMN s_payment TEXT NOT NULL DEFAULT '';
+    ALTER TABLE documents ADD COLUMN s_liability TEXT NOT NULL DEFAULT '';
+    ALTER TABLE documents ADD COLUMN s_rev INTEGER NOT NULL DEFAULT 0;
+    UPDATE documents SET s_legacy_fe = COALESCE(json_extract(data, '$.legacy_fe'), 0), s_order_status = COALESCE(json_extract(data, '$.order_status'), ''), s_expected_date = json_extract(data, '$.expected_date'), s_notes = COALESCE(json_extract(data, '$.internal_notes'), ''), s_city = COALESCE(json_extract(data, '$.party.city'), ''), s_province = COALESCE(json_extract(data, '$.party.province'), ''), s_vat = COALESCE(json_extract(data, '$.party.vat_number'), ''), s_payment = COALESCE(json_extract(data, '$.payment.name'), ''), s_liability = TRIM(COALESCE(json_extract(data, '$.vat_liability'), ''));
+    CREATE TRIGGER tr_documents_summary_insert AFTER INSERT ON documents BEGIN
+        UPDATE documents SET s_legacy_fe = COALESCE(json_extract(NEW.data, '$.legacy_fe'), 0), s_order_status = COALESCE(json_extract(NEW.data, '$.order_status'), ''), s_expected_date = json_extract(NEW.data, '$.expected_date'), s_notes = COALESCE(json_extract(NEW.data, '$.internal_notes'), ''), s_city = COALESCE(json_extract(NEW.data, '$.party.city'), ''), s_province = COALESCE(json_extract(NEW.data, '$.party.province'), ''), s_vat = COALESCE(json_extract(NEW.data, '$.party.vat_number'), ''), s_payment = COALESCE(json_extract(NEW.data, '$.payment.name'), ''), s_liability = TRIM(COALESCE(json_extract(NEW.data, '$.vat_liability'), '')) WHERE id = NEW.id;
+    END;
+    CREATE TRIGGER tr_documents_summary_update AFTER UPDATE OF data ON documents BEGIN
+        UPDATE documents SET s_rev = s_rev + 1, s_legacy_fe = COALESCE(json_extract(NEW.data, '$.legacy_fe'), 0), s_order_status = COALESCE(json_extract(NEW.data, '$.order_status'), ''), s_expected_date = json_extract(NEW.data, '$.expected_date'), s_notes = COALESCE(json_extract(NEW.data, '$.internal_notes'), ''), s_city = COALESCE(json_extract(NEW.data, '$.party.city'), ''), s_province = COALESCE(json_extract(NEW.data, '$.party.province'), ''), s_vat = COALESCE(json_extract(NEW.data, '$.party.vat_number'), ''), s_payment = COALESCE(json_extract(NEW.data, '$.payment.name'), ''), s_liability = TRIM(COALESCE(json_extract(NEW.data, '$.vat_liability'), '')) WHERE id = NEW.id;
+    END;
+    CREATE INDEX ix_stock_date ON stock_moves(date, id);
+    CREATE INDEX ix_documents_deferred ON documents(date) WHERE s_liability = 'D';
+    -- sostituito dall'indice degli elenchi qui sotto, che inizia con le stesse colonne
+    DROP INDEX IF EXISTS ix_documents_kind;
+    -- indice "che copre" gli elenchi: contiene tutte le colonne che mostrano, così non si
+    -- legge la riga del documento (lunga, con il documento completo salvato in `data`)
+    CREATE INDEX ix_documents_list ON documents(kind, year, date, number, status, series, party_id, party_name, external_number, total, net_to_pay, agent_id,
+        s_legacy_fe, s_order_status, s_expected_date, s_notes, s_city, s_province, s_vat, s_payment, s_liability, s_rev, version, created_at);
+    CREATE INDEX ix_stock_product_date ON stock_moves(product_id, date, id);
+    CREATE INDEX ix_stock_expiry ON stock_moves(expiry) WHERE lot <> '';
     "#,
 ];
 

@@ -95,7 +95,14 @@ pub struct Session {
 
 /// Dopo questo tempo senza segnali una postazione si considera scollegata.
 pub const SESSION_TIMEOUT_SECS: i64 = 180;
-const ROUNDS: u32 = 120_000;
+/// Giri di PBKDF2-SHA256 per le password nuove (raccomandazione OWASP 2023). Le password
+/// salvate con meno giri si aggiornano da sole al primo accesso riuscito.
+const ROUNDS: u32 = 600_000;
+/// Oltre questo numero di giri un hash salvato è considerato non valido (un valore enorme
+/// inserito nell'archivio bloccherebbe il programma a ogni accesso).
+const MAX_ROUNDS: u32 = 5_000_000;
+/// Tentativi sbagliati consentiti prima dell'attesa obbligatoria.
+const FREE_ATTEMPTS: u32 = 3;
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()
@@ -104,6 +111,9 @@ fn hex(b: &[u8]) -> String {
 fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
+
+/// Hash di riferimento per gli utenti inesistenti (stesso costo di uno vero).
+const DUMMY_HASH: &str = "pbkdf2-sha256$600000$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000";
 
 pub fn hash_password(password: &str) -> Result<String> {
     let mut salt = [0u8; 16];
@@ -119,6 +129,9 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
         return false;
     }
     let (Ok(rounds), Some(salt), Some(expected)) = (parts[1].parse::<u32>(), unhex(parts[2]), unhex(parts[3])) else { return false };
+    if rounds == 0 || rounds > MAX_ROUNDS || expected.is_empty() || expected.len() > 64 {
+        return false;
+    }
     let mut out = vec![0u8; expected.len()];
     pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, rounds, &mut out);
     // confronto a tempo costante
@@ -193,20 +206,54 @@ impl Store {
         Ok(())
     }
 
-    /// Verifica nome e password. Gli errori non dicono quale dei due è sbagliato.
+    /// Verifica nome e password. Gli errori non dicono quale dei due è sbagliato, e il tempo
+    /// di risposta è lo stesso anche per un utente che non esiste. Dopo alcuni tentativi
+    /// sbagliati bisogna attendere, con un'attesa che raddoppia a ogni errore.
     pub fn login(&self, username: &str, password: &str) -> Result<User> {
+        if let Some(wait) = self.login_wait() {
+            return Err(StoreError::Invalid(format!("Troppi tentativi sbagliati: riprovare tra {} secondi", wait)));
+        }
         let u = self.users()?.into_iter().find(|u| u.username.eq_ignore_ascii_case(username.trim()) && u.active);
+        // per un utente inesistente si calcola comunque un hash: la risposta non lo rivela
+        let ok = match &u {
+            Some(u) => verify_password(password, &u.password_hash),
+            None => {
+                let _ = verify_password(password, DUMMY_HASH);
+                false
+            }
+        };
         match u {
-            Some(u) if verify_password(password, &u.password_hash) => {
+            Some(u) if ok => {
+                self.login_failures.set((0, None));
                 *self.user.borrow_mut() = u.username.clone();
                 self.audit("user", u.id, "login", "")?;
+                // hash con meno giri di quelli attuali: si rifà con la password appena verificata
+                if u.password_hash.split('$').nth(1).and_then(|r| r.parse::<u32>().ok()).is_some_and(|r| r < ROUNDS) {
+                    if let Ok(h) = hash_password(password) {
+                        let _ = self.conn().execute("UPDATE users SET data = json_set(data, '$.password_hash', ?1) WHERE id = ?2", params![h, u.id]);
+                    }
+                }
                 Ok(u)
             }
             _ => {
+                let (n, _) = self.login_failures.get();
+                let n = n + 1;
+                let lock = (n >= FREE_ATTEMPTS).then(|| {
+                    let secs = (5u64 << (n - FREE_ATTEMPTS).min(6)).min(300);
+                    std::time::Instant::now() + std::time::Duration::from_secs(secs)
+                });
+                self.login_failures.set((n, lock));
                 self.audit("user", 0, "login_failed", username.trim())?;
                 Err(StoreError::Invalid("Nome utente o password non corretti".into()))
             }
         }
+    }
+
+    /// Secondi da attendere prima di un nuovo tentativo di accesso (None: si può provare).
+    pub fn login_wait(&self) -> Option<u64> {
+        let (_, until) = self.login_failures.get();
+        let left = until?.checked_duration_since(std::time::Instant::now())?;
+        Some(left.as_secs() + 1)
     }
 
     /// Utente collegato (vuoto se l'archivio non ha utenti).
@@ -306,6 +353,41 @@ mod tests {
         assert!(!verify_password("segreta124", &h));
         assert_ne!(h, hash_password("segreta123").unwrap(), "sale diverso a ogni salvataggio");
         assert!(!verify_password("x", "formato-sbagliato"));
+        // un numero di giri enorme scritto nell'archivio non deve bloccare il programma
+        assert!(!verify_password("x", "pbkdf2-sha256$4000000000$00$00"));
+        assert!(!verify_password("x", "pbkdf2-sha256$0$00$00"));
+        assert!(h.starts_with("pbkdf2-sha256$600000$"));
+    }
+
+    #[test]
+    fn tentativi_sbagliati_e_password_aggiornate() {
+        let s = Store::open_in_memory().unwrap();
+        let admin = s.save_user(&User { username: "admin".into(), admin: true, ..Default::default() }, Some("password1")).unwrap();
+        // password salvata da una versione precedente (meno giri): al primo accesso si aggiorna
+        let mut salt = [0u8; 16];
+        getrandom::getrandom(&mut salt).unwrap();
+        let mut out = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<Sha256>(b"password1", &salt, 120_000, &mut out);
+        let old = format!("pbkdf2-sha256$120000${}${}", hex(&salt), hex(&out));
+        s.conn().execute("UPDATE users SET data = json_set(data, '$.password_hash', ?1) WHERE id = ?2", params![old, admin.id]).unwrap();
+        s.login("admin", "password1").unwrap();
+        let now: String = s.conn().query_row("SELECT json_extract(data, '$.password_hash') FROM users WHERE id = ?1", [admin.id], |r| r.get(0)).unwrap();
+        assert!(now.starts_with("pbkdf2-sha256$600000$"), "{}", now);
+        assert!(verify_password("password1", &now));
+        // tre errori sono concessi, poi bisogna aspettare (anche con la password giusta)
+        for _ in 0..3 {
+            assert!(s.login("admin", "sbagliata").is_err());
+        }
+        assert!(s.login_wait().is_some());
+        let e = s.login("admin", "password1").unwrap_err().to_string();
+        assert!(e.contains("Troppi tentativi"), "{}", e);
+        // un utente inesistente dà lo stesso messaggio di una password sbagliata
+        s.login_failures.set((0, None));
+        let a = s.login("nessuno", "x").unwrap_err().to_string();
+        let b = s.login("admin", "x").unwrap_err().to_string();
+        assert_eq!(a, b);
+        s.login_failures.set((0, None));
+        assert!(s.login("admin", "password1").is_ok());
     }
 
     #[test]

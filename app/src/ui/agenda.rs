@@ -34,8 +34,18 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     let first = st.month;
     let next = openfatt_store::add_months(first, 1);
     let last = next.pred_opt().unwrap();
-    let items = cx.store.agenda(first, last).unwrap_or_default();
-    let dues = cx.store.due_list(true, Some(last)).unwrap_or_default();
+    let gen = cx.store.generation();
+    let ctx = ui.ctx().clone();
+    let (items, _) = super::memo(&ctx, "agenda_month", gen, (first, last), || cx.store.agenda(first, last).unwrap_or_default());
+    let (dues, _) = super::memo(&ctx, "agenda_dues", gen, last, || cx.store.due_list(true, Some(last)).unwrap_or_default());
+    // scadenze per giorno, contate una volta sola (prima per ogni casella del calendario)
+    let (due_count, _) = super::memo(&ctx, "agenda_due_count", gen, last, || {
+        let mut m: std::collections::HashMap<chrono::NaiveDate, usize> = std::collections::HashMap::new();
+        for x in dues.iter() {
+            *m.entry(x.date).or_default() += 1;
+        }
+        m
+    });
     ui.horizontal_top(|ui| {
         // calendario
         theme::card_frame().show(ui, |ui| ui.vertical(|ui| {
@@ -71,7 +81,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                         ui.painter().rect_filled(rect, 4, fill);
                         ui.painter().text(rect.left_top() + Vec2::new(5.0, 3.0), egui::Align2::LEFT_TOP, d.day().to_string(), egui::FontId::proportional(13.0), if in_month { theme::INK } else { theme::CHART_MUTED });
                         let n = items.iter().filter(|a| a.date == d).count();
-                        let nd = dues.iter().filter(|x| x.date == d).count();
+                        let nd = due_count.get(&d).copied().unwrap_or(0);
                         let mut y = rect.top() + 22.0;
                         for a in items.iter().filter(|a| a.date == d).take(2) {
                             let c = if a.done { theme::CHART_MUTED } else { theme::ACCENT };
@@ -100,11 +110,17 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         // giorno
         ui.vertical(|ui| {
             ui.label(theme::bold(format!("{} {} {}", ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"][st.day.weekday().num_days_from_monday() as usize], st.day.day(), MESI[st.day.month0() as usize])).size(18.0));
-            let day_items = cx.store.agenda(st.day, st.day).unwrap_or_default();
+            let day = st.day;
+            let (day_items, _) = super::memo(&ctx, "agenda_day", gen, day, || {
+                cx.store.agenda(day, day).unwrap_or_default().into_iter().map(|a| {
+                    let who = a.party_id.and_then(|pid| cx.store.party(pid).ok().flatten()).map(|p| p.display_name());
+                    (a, who)
+                }).collect::<Vec<_>>()
+            });
             if day_items.is_empty() {
                 ui.label(RichText::new("Nessun impegno.").color(GRAY));
             }
-            for a in &day_items {
+            for (a, who) in day_items.iter() {
                 ui.horizontal(|ui| {
                     let mut done = a.done;
                     if ui.checkbox(&mut done, "").on_hover_text("Fatto").changed() {
@@ -118,9 +134,9 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     if ui.add(egui::Label::new(if a.done { t.strikethrough().color(GRAY) } else { t }).sense(Sense::click())).on_hover_text("Modifica").clicked() {
                         st.editing = Some(a.clone());
                     }
-                    if let Some(pid) = a.party_id {
-                        if let Ok(Some(p)) = cx.store.party(pid) {
-                            ui.label(RichText::new(format!("· {}", p.display_name())).color(GRAY));
+                    if let Some(name) = who {
+                        {
+                            ui.label(RichText::new(format!("· {}", name)).color(GRAY));
                         }
                     }
                 });
@@ -143,7 +159,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     });
                 }
             }
-            let late = cx.store.agenda_overdue(today).unwrap_or_default();
+            let (late, _) = super::memo(&ctx, "agenda_late", gen, today, || cx.store.agenda_overdue(today).unwrap_or_default());
             if !late.is_empty() {
                 ui.add_space(8.0);
                 ui.label(theme::medium(format!("Attività arretrate ({})", late.len())));

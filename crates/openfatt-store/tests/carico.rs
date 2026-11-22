@@ -152,3 +152,66 @@ fn archivio_grande() {
     check("scadenzario aperto", start, 1500.0);
     println!("rapporto peggiore tra tempo misurato e obiettivo: {:.2}", worst);
 }
+
+/// Tempi delle interrogazioni che le schermate fanno più spesso, sull'archivio grande già
+/// creato da `archivio_grande` (sola lettura).
+///   cargo test --release -p openfatt-store --test carico tempi -- --ignored --nocapture
+#[test]
+#[ignore]
+fn tempi_delle_interrogazioni() {
+    use openfatt_store::{Direction, EInvoiceStatus};
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/perf/grande.gadb");
+    if !path.exists() {
+        eprintln!("manca {}: eseguire prima archivio_grande", path.display());
+        return;
+    }
+    let s = Store::open(&path).unwrap();
+    let today = chrono::Local::now().date_naive();
+    macro_rules! m {
+        ($label:expr, $e:expr) => {{
+            let start = Instant::now();
+            let r = $e;
+            t($label, start);
+            r
+        }};
+    }
+    m!("generation", s.generation());
+    m!("company", s.company().unwrap());
+    m!("warehouses", s.warehouses().unwrap());
+    m!("accounts", s.accounts().unwrap());
+    m!("expiring_lots", s.expiring_lots(today + chrono::Duration::days(30)).unwrap());
+    m!("stock_moves(None, 2000)", s.stock_moves(None, 2000).unwrap());
+    m!("stock_moves(Some(42), 2000)", s.stock_moves(Some(42), 2000).unwrap());
+    m!("products(\"\", true)", s.products("", true).unwrap());
+    m!("stock_report", s.stock_report("", None).unwrap());
+    m!("reminder_candidates", s.reminder_candidates(today, 0, 0).unwrap());
+    m!("due_list_with_drafts(true)", s.due_list_with_drafts(true, None).unwrap());
+    m!("due_list_with_drafts(false)", s.due_list_with_drafts(false, None).unwrap());
+    m!("einvoices(Out)", s.einvoices(Direction::Out, "", None).unwrap());
+    m!("documents_without_einvoice", s.documents_without_einvoice().unwrap());
+    m!("einvoice_count", s.einvoice_count(Direction::Out, EInvoiceStatus::Sent).unwrap());
+    m!("due_recurrences", s.due_recurrences(today).unwrap());
+    m!("agenda", s.agenda(today, today).unwrap());
+    m!("documents(Quote, Draft)", s.documents(&DocFilter { kinds: vec![DocKind::Quote], status: Some(DocStatus::Draft), ..Default::default() }).unwrap());
+    m!("inventory_sessions", s.inventory_sessions().unwrap());
+    m!("documents(tutti)", s.documents(&DocFilter::default()).unwrap());
+    m!("parties(tutti)", s.parties(&PartyFilter { include_inactive: true, ..Default::default() }).unwrap());
+    m!("products_page(\"vite\", 60)", s.products_page("vite", false, 60).unwrap());
+    m!("documents(search vite)", s.documents(&DocFilter { search: "vite".into(), ..Default::default() }).unwrap());
+    m!("parties(search vite)", s.parties(&PartyFilter { search: "vite".into(), ..Default::default() }).unwrap());
+    m!("products(\"vite\")", s.products("vite", false).unwrap());
+    m!("account_balances", s.account_balances().unwrap());
+    let year = chrono::Datelike::year(&today);
+    let (gf, gt) = (chrono::NaiveDate::from_ymd_opt(year, 3, 1).unwrap(), chrono::NaiveDate::from_ymd_opt(year, 3, 31).unwrap());
+    m!("vat_register(vendite, marzo)", s.vat_register(openfatt_core::vat::Register::Sales, gf, gt).unwrap());
+    m!("vat_register(acquisti, marzo)", s.vat_register(openfatt_core::vat::Register::Purchases, gf, gt).unwrap());
+    m!("retail_register(marzo)", s.retail_register(gf, gt).unwrap());
+    m!("deferred_vat(marzo)", s.deferred_vat(gf, gt).unwrap());
+    m!("vat_liquidations(anno, 12)", s.vat_liquidations(year, 12).unwrap());
+    m!("vat_liquidations(anno, 12) di nuovo", s.vat_liquidations(year, 12).unwrap());
+    m!("vat_register(vendite, anno)", s.vat_register(openfatt_core::vat::Register::Sales, chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap(), chrono::NaiveDate::from_ymd_opt(year, 12, 31).unwrap()).unwrap());
+    m!("annual_vat", s.annual_vat(year).unwrap());
+    m!("statistics(cliente, anno)", s.statistics(openfatt_store::StatBy::Customer, chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap(), chrono::NaiveDate::from_ymd_opt(year, 12, 31).unwrap()).unwrap());
+    m!("statistics(cliente, anno) di nuovo", s.statistics(openfatt_store::StatBy::Customer, chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap(), chrono::NaiveDate::from_ymd_opt(year, 12, 31).unwrap()).unwrap());
+    m!("statistics(articolo, anno)", s.statistics(openfatt_store::StatBy::Product, chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap(), chrono::NaiveDate::from_ymd_opt(year, 12, 31).unwrap()).unwrap());
+}
