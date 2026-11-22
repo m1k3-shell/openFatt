@@ -222,6 +222,18 @@ impl OpenFattApp {
                         app.ledger.show_reminders();
                         Some(Screen::Dues)
                     }
+                    // un documento preciso (collaudi): "documento:<id>", "incasso:<id>", "acconto:<id>"
+                    x if x.starts_with("documento:") || x.starts_with("incasso:") || x.starts_with("acconto:") => {
+                        let (what, id) = x.split_once(':').unwrap_or_default();
+                        if let Ok(id) = id.parse::<i64>() {
+                            app.nav.push(match what {
+                                "incasso" => Nav::DocumentPayment(id, true),
+                                "acconto" => Nav::DocumentPayment(id, false),
+                                _ => Nav::OpenDocument(id),
+                            });
+                        }
+                        None
+                    }
                     "banco" => Some(Screen::Counter),
                     "editor-stampe" => {
                         app.settings = ui::settings::State::on_print_tab();
@@ -568,6 +580,7 @@ impl OpenFattApp {
                                     if !u.can_write(area) {
                                         ed.set_readonly("permessi di sola lettura");
                                     }
+                                    ed.can_pay = u.can_write(openfatt_store::Area::Accounting);
                                 }
                                 match store.acquire_lock("document", id) {
                                     Ok(Some(who)) => ed.set_readonly(&format!("aperto in modifica da {}", who)),
@@ -686,6 +699,15 @@ impl OpenFattApp {
                 Nav::Payments(v) => {
                     self.ledger.show_view(v);
                     self.nav.push(Nav::Go(Screen::Dues));
+                }
+                Nav::DocumentPayment(id, full) => {
+                    self.nav.push(Nav::OpenDocument(id));
+                    self.nav.push(Nav::EditorPayment(full));
+                }
+                Nav::EditorPayment(full) => {
+                    if let (Some(store), Some(e)) = (&self.store, &mut self.editor) {
+                        e.start_payment(store, &mut self.msgs, full);
+                    }
                 }
                 Nav::PayDue(id) => {
                     if let Some(store) = &self.store {

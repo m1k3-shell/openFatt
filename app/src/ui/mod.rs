@@ -262,6 +262,11 @@ pub enum Nav {
     PrintSettings,
     /// Scadenzario con la finestra di incasso aperta su questa scadenza.
     PayDue(i64),
+    /// Apre il documento sulla scheda Pagamento con la finestra di incasso (true = saldo,
+    /// false = acconto).
+    DocumentPayment(i64, bool),
+    /// Finestra di incasso del documento aperto.
+    EditorPayment(bool),
     /// Animazioni dell'interfaccia accese o spente (preferenza della postazione).
     Motion(bool),
 }

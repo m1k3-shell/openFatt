@@ -216,6 +216,11 @@ impl Store {
         Ok(ids.iter().filter_map(|id| found.iter().find(|d| d.id == *id).cloned()).collect())
     }
 
+    /// Scadenze di un documento (pagate o no), in ordine di data.
+    pub fn dues_of_document(&self, doc_id: i64) -> Result<Vec<DueRow>> {
+        self.query_dues("WHERE s.document_id = ?1 ORDER BY s.date, s.id", &[&doc_id as &dyn ToSql])
+    }
+
     /// Scadenze ancora da saldare di un cliente o fornitore (documenti emessi), dalla più
     /// vecchia. `receivable`: true = da incassare, false = da pagare.
     pub fn open_dues_of_party(&self, party_id: Option<i64>, party_name: &str, receivable: bool) -> Result<Vec<DueRow>> {

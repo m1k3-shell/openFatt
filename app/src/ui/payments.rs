@@ -45,6 +45,18 @@ impl PayForm {
         f
     }
 
+    /// Acconto su scadenze precise (di solito quelle di un documento): stanno in cima e
+    /// l'importo che si scrive va prima a loro; nessuna quota già proposta.
+    pub fn deposit(store: &Store, party_id: Option<i64>, party_name: &str, receivable: bool, dues: &[i64]) -> Self {
+        let mut f = PayForm::for_party(store, party_id, party_name, receivable, dues);
+        for l in f.lines.iter_mut() {
+            l.amount = Decimal::ZERO;
+            l.left = l.due.residual();
+        }
+        f.received = Decimal::ZERO;
+        f
+    }
+
     /// Finestra senza cliente: si sceglie nella finestra stessa.
     pub fn empty(receivable: bool) -> Self {
         PayForm {
@@ -69,7 +81,10 @@ impl PayForm {
                 self.account = default_account(&d.mp_code).to_string();
             }
         }
-        self.lines = dues
+        // le scadenze scelte in cima: l'importo ricevuto si ripartisce prima su di loro
+        let (mut chosen, others): (Vec<DueRow>, Vec<DueRow>) = dues.into_iter().partition(|d| preselect.contains(&d.id));
+        chosen.extend(others);
+        self.lines = chosen
             .into_iter()
             .map(|due| {
                 let amount = if preselect.contains(&due.id) { due.residual() } else { Decimal::ZERO };
@@ -215,7 +230,7 @@ pub fn form_window(ctx: &egui::Context, cx: &mut Ctx, f: &mut PayForm, accounts:
                 }
             });
             ui.label("");
-            ui.label(theme::muted("L'importo si ripartisce dalla fattura più vecchia; si può correggere riga per riga."));
+            ui.label(theme::muted("L'importo va prima alle scadenze in cima (quelle scelte, poi le più vecchie); si corregge riga per riga."));
             ui.end_row();
         });
         ui.add_space(10.0);
@@ -289,6 +304,7 @@ fn lines_table(ui: &mut egui::Ui, f: &mut PayForm) {
                 let mut on = l.amount > Decimal::ZERO || l.writeoff;
                 if ui.checkbox(&mut on, "").changed() {
                     l.amount = if on { l.due.residual() } else { Decimal::ZERO };
+                    l.left = l.due.residual() - l.amount;
                     l.writeoff = false;
                     changed_amount = Some(i);
                 }

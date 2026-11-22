@@ -31,6 +31,11 @@ pub struct Editor {
     cols: LineCols,
     /// Ordini fornitore: generazione dell'archivio, pezzi arrivati da documenti collegati, avanzamento
     arrivals: (u64, std::collections::HashMap<i64, Decimal>, Option<openfatt_store::OrderProgress>),
+    /// Finestre di incasso e dello storico dei pagamenti aperte dal documento.
+    pay: Option<super::payments::PayForm>,
+    pay_history: Option<super::payments::History>,
+    /// L'utente può registrare incassi e pagamenti (permesso Contabilità).
+    pub can_pay: bool,
 }
 
 /// Colonne facoltative delle righe, ricordate nell'archivio.
@@ -93,6 +98,9 @@ impl Editor {
             tab: DocTab::Lines,
             cols: store.get_setting("doc_line_columns").unwrap_or_default(),
             arrivals: Default::default(),
+            pay: None,
+            pay_history: None,
+            can_pay: true,
         }
     }
 
@@ -426,6 +434,9 @@ impl Editor {
                 if theme::ghost(ui, true, icon::PAPERCLIP, &if n > 0 { format!("Allegati ({})", n) } else { "Allegati...".to_string() }).clicked() {
                     self.tools.attachments = Some(super::linetools::Attachments::new("document", self.doc.id, self.doc.title()));
                 }
+            }
+            if self.payable() && self.doc.due_dates.iter().any(|d| !d.is_paid()) && theme::ghost(ui, true, icon::HAND_COINS, if self.receivable() { "Incasso" } else { "Pagamento" }).on_hover_text("Stato del pagamento: saldo o acconto").clicked() {
+                self.tab = DocTab::Payment;
             }
             if !purchase && self.doc.kind.is_fiscal() && !locked && theme::ghost(ui, true, icon::PERCENT, "Rit. acconto").clicked() {
                 self.tab = DocTab::Payment;
@@ -1763,6 +1774,173 @@ impl Editor {
         }));
     }
 
+    /// Il documento può ricevere incassi o pagamenti: emesso, salvato, con scadenze.
+    fn payable(&self) -> bool {
+        self.doc.id != 0 && self.doc.kind.has_due_dates() && self.doc.status == DocStatus::Issued && !self.doc.due_dates.is_empty()
+    }
+
+    /// Clienti incassano, fornitori si pagano (le note di credito al contrario).
+    fn receivable(&self) -> bool {
+        self.doc.kind.is_sale() != self.doc.kind.is_credit()
+    }
+
+    /// Apre la finestra di incasso sulle scadenze aperte del documento: `full` le salda,
+    /// altrimenti si scrive l'acconto ricevuto.
+    fn open_payment(&mut self, cx: &mut Ctx, full: bool) {
+        self.start_payment(cx.store, cx.msgs, full);
+    }
+
+    /// Mostra la scheda Pagamento e apre la finestra di incasso (anche da fuori: scheda del
+    /// cliente, collegamenti).
+    pub fn start_payment(&mut self, store: &openfatt_store::Store, msgs: &mut super::Msgs, full: bool) {
+        self.tab = DocTab::Payment;
+        if !self.can_pay {
+            msgs.warn("Per registrare incassi serve il permesso sulla Contabilità".to_string());
+            return;
+        }
+        if self.doc.status != DocStatus::Issued {
+            msgs.warn("Il documento è in bozza: emetterlo prima di registrare incassi".to_string());
+            return;
+        }
+        let dues: Vec<i64> = store.dues_of_document(self.doc.id).unwrap_or_default().into_iter().filter(|d| d.residual() > Decimal::ZERO).map(|d| d.id).collect();
+        if dues.is_empty() {
+            msgs.warn("Il documento è già saldato".to_string());
+            return;
+        }
+        let party = self.doc.party.display_name();
+        let r = self.receivable();
+        self.pay = Some(if full {
+            super::payments::PayForm::for_party(store, self.doc.party_id, &party, r, &dues)
+        } else {
+            super::payments::PayForm::deposit(store, self.doc.party_id, &party, r, &dues)
+        });
+    }
+
+    /// Finestre di incasso e storico; quando i pagamenti cambiano si aggiornano le scadenze
+    /// mostrate dal documento.
+    fn payment_windows(&mut self, ctx: &egui::Context, cx: &mut Ctx) {
+        let before = cx.store.generation();
+        if let Some(f) = &mut self.pay {
+            let gen = cx.store.generation();
+            let (accounts, _) = super::memo(ctx, "accounts", gen, (), || cx.store.accounts().unwrap_or_default());
+            let parties = vec![(self.doc.party_id, self.doc.party.display_name())];
+            if super::payments::form_window(ctx, cx, f, &accounts, &parties) {
+                self.pay = None;
+            }
+        }
+        if let Some(h) = &mut self.pay_history {
+            if super::payments::history_window(ctx, cx, h) {
+                self.pay_history = None;
+            }
+        }
+        if cx.store.generation() != before && self.doc.id != 0 {
+            if let Ok(rows) = cx.store.dues_of_document(self.doc.id) {
+                self.doc.due_dates = rows
+                    .iter()
+                    .map(|d| DueDate { id: d.id, date: d.date, amount: d.amount, mp_code: d.mp_code.clone(), paid: d.paid, writeoff: d.writeoff, paid_date: d.paid_date })
+                    .collect();
+            }
+        }
+    }
+
+    /// Stato del pagamento del documento con i comandi per saldarlo o registrare un acconto.
+    fn payment_status(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+        if !self.doc.kind.has_due_dates() || self.doc.id == 0 {
+            return;
+        }
+        let r = self.receivable();
+        theme::card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(theme::medium(if r { "Stato dell'incasso" } else { "Stato del pagamento" }).size(16.0));
+                let amount: Decimal = self.doc.due_dates.iter().map(|d| d.amount).sum();
+                let paid: Decimal = self.doc.due_dates.iter().map(|d| d.paid).sum();
+                let left: Decimal = self.doc.due_dates.iter().map(|d| d.residual()).sum();
+                if self.doc.due_dates.is_empty() {
+                } else if left <= Decimal::ZERO {
+                    theme::pill(ui, if r { "Incassata" } else { "Pagata" }, Tone::Positive);
+                } else if !paid.is_zero() {
+                    theme::pill(ui, &format!("Acconto € {} · resta € {}", eur(paid), eur(left)), Tone::Warning);
+                } else {
+                    theme::pill(ui, &format!("{} € {}", if r { "Da incassare" } else { "Da pagare" }, eur(amount)), Tone::Neutral);
+                }
+            });
+            ui.add_space(6.0);
+            if self.doc.status != DocStatus::Issued {
+                ui.label(theme::muted("Il documento è in bozza: emetterlo (Salva e conferma) per registrare incassi e acconti."));
+                return;
+            }
+            if self.doc.due_dates.is_empty() {
+                ui.label(theme::muted("Nessuna scadenza: indicare il cliente e il pagamento, poi salvare."));
+                return;
+            }
+            // rate del documento
+            let mut history = None;
+            egui::Grid::new("doc_pay_rows").num_columns(6).spacing([14.0, 6.0]).show(ui, |ui| {
+                for t in ["Scadenza", "Importo", if r { "Incassato" } else { "Pagato" }, "Resta", "", ""] {
+                    ui.label(RichText::new(t).size(12.0).color(theme::MUTED));
+                }
+                ui.end_row();
+                let today = chrono::Local::now().date_naive();
+                for d in &self.doc.due_dates {
+                    let late = !d.is_paid() && d.date < today;
+                    ui.label(RichText::new(d.date.format("%d/%m/%Y").to_string()).color(if late { theme::NEGATIVE } else { theme::INK }));
+                    ui.label(format!("€ {}", eur(d.amount)));
+                    ui.label(format!("€ {}", eur(d.paid)));
+                    ui.label(theme::medium(format!("€ {}", eur(d.residual()))));
+                    if d.is_paid() {
+                        theme::pill(ui, if d.writeoff.is_zero() { "saldata" } else { "saldata con abbuono" }, Tone::Positive);
+                    } else if !d.paid.is_zero() {
+                        theme::pill(ui, "acconto", Tone::Warning);
+                    } else {
+                        theme::pill(ui, if late { "scaduta" } else { "aperta" }, if late { Tone::Negative } else { Tone::Neutral });
+                    }
+                    if theme::ghost(ui, self.can_pay, icon::CLOCK_COUNTER_CLOCKWISE, "Storico").on_hover_text("Incassi registrati, annullamento, sposta il residuo").clicked() {
+                        history = Some(d.id);
+                    }
+                    ui.end_row();
+                }
+            });
+            if let Some(id) = history {
+                if let Some(row) = cx.store.dues_by_id(&[id]).ok().and_then(|mut v| v.pop()) {
+                    self.pay_history = Some(super::payments::History::new(row));
+                }
+            }
+            ui.add_space(8.0);
+            let open = self.doc.due_dates.iter().any(|d| !d.is_paid()) && self.can_pay;
+            if !self.can_pay {
+                ui.label(theme::muted("Per registrare incassi serve il permesso sulla Contabilità."));
+            }
+            ui.horizontal(|ui| {
+                if theme::primary_enabled(ui, open, icon::CHECK_CIRCLE, if r { "Segna come incassata" } else { "Segna come pagata" })
+                    .on_hover_text("Registra il saldo di tutto quello che resta: si sceglie data, modalità (contanti, assegno, bonifico...) e riferimento")
+                    .clicked()
+                {
+                    self.open_payment(cx, true);
+                }
+                if theme::button_enabled(ui, open, icon::HAND_COINS, "Registra acconto").on_hover_text("Importo versato in parte: il resto rimane da saldare").clicked() {
+                    self.open_payment(cx, false);
+                }
+            });
+            // incassi già registrati
+            if self.doc.due_dates.iter().any(|d| !d.paid.is_zero()) {
+                let doc_id = self.doc.id;
+                let (payments, _) = super::memo(ui.ctx(), "editor_payments", cx.store.generation(), doc_id, || cx.store.payments_of_document(doc_id).unwrap_or_default());
+                if !payments.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(theme::medium(if r { "Incassi registrati" } else { "Pagamenti registrati" }));
+                    for p in payments.iter() {
+                        let here: Decimal = p.lines.iter().filter(|l| l.document_id == doc_id).map(|l| l.amount).sum();
+                        let row = ui.label(format!("{}   € {}   {} · {}", p.date.format("%d/%m/%Y"), eur(here), p.method_text(), p.account));
+                        if p.lines.len() > 1 {
+                            row.on_hover_text(format!("Registrazione di € {} su {} documenti", eur(p.total), p.lines.len()));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// Quantità e valore dei documenti interni (produzione e trasferimenti).
     fn internal_info(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
             if self.doc.kind == DocKind::Production {
@@ -1836,6 +2014,7 @@ impl Editor {
                 None => {}
             }
         }
+        self.payment_windows(ui.ctx(), cx);
         self.title_bar(ui, cx);
         if let super::linetools::LineAction::Changed = self.tools.show(ui.ctx(), cx.store, cx.msgs, &mut self.doc) {
             self.dirty = true;
@@ -1901,6 +2080,9 @@ impl Editor {
                                         ui.add_space(4.0);
                                         self.fiscal_section(ui);
                                     });
+                                    // incassi e acconti: anche sui documenti bloccati (emessi, già trasmessi)
+                                    ui.add_space(10.0);
+                                    self.payment_status(ui, cx);
                                 });
                                 self.totals_panel(ui, cx, &totals);
                             });
