@@ -392,6 +392,9 @@ impl Editor {
     }
 
     fn issue(&mut self, cx: &mut Ctx) {
+        if self.doc.kind.is_credit() && !self.doc.related.iter().any(|r| r.kind == "FATTURA" && !r.number.trim().is_empty()) {
+            cx.msgs.warn("Nota di credito senza la fattura stornata: indicarla con \"Storna fattura...\" o nei Riferimenti");
+        }
         let frozen = self.in_batch || self.doc.due_dates.iter().any(|d| !d.paid.is_zero() || !d.writeoff.is_zero());
         if !frozen && !self.save(cx) {
             return;
@@ -444,6 +447,12 @@ impl Editor {
             if can_save && theme::ghost(ui, true, icon::COPY, "Includi doc.").on_hover_text("Copia le righe da un altro documento").clicked() {
                 self.tools.copy = Some(Default::default());
             }
+            if can_save && !openfatt_store::creditable_kinds(self.doc.kind).is_empty() && theme::ghost(ui, true, icon::ARROW_U_UP_LEFT, "Storna fattura...").on_hover_text("Sceglie la fattura da stornare: viene citata nella nota (anche nella fattura elettronica) con le righe da stornare").clicked() {
+                self.tools.credit = Some(Default::default());
+            }
+            if can_save && openfatt_store::can_deduct_down_payments(self.doc.kind) && theme::ghost(ui, true, icon::MINUS_CIRCLE, "Detrai acconti...").on_hover_text("Fattura di saldo: detrae una o più fatture d'acconto del cliente, con il riferimento e gli importi in negativo").clicked() {
+                self.tools.down = Some(Default::default());
+            }
             if saved && self.doc.status != DocStatus::Cancelled {
                 let targets = self.doc.kind.transform_targets();
                 if self.doc.kind.has_order_state() && !self.fulfillment.0 {
@@ -466,7 +475,11 @@ impl Editor {
                     });
                 } else if !self.doc.kind.has_order_state() {
                     for t in targets {
-                        let label = if *t == DocKind::SelfInvoice { "Autofattura / integrazione" } else { t.label() };
+                        let label = match (self.doc.kind, *t) {
+                            (_, DocKind::SelfInvoice) => "Autofattura / integrazione",
+                            (DocKind::DownPaymentInvoice, DocKind::Invoice) => "Fattura di saldo",
+                            _ => t.label(),
+                        };
                         if theme::ghost(ui, true, icon::ARROW_RIGHT, label).clicked() {
                             if let Some(d) = cx.msgs.check(cx.store.transform(&[self.doc.id], *t), "") {
                                 cx.msgs.ok(format!("{} creato", t.label()));
@@ -1626,7 +1639,7 @@ impl Editor {
 
     fn refs_section(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
-        egui::CollapsingHeader::new("Riferimenti (ordine, contratto, CIG/CUP, fattura collegata)").default_open(!self.doc.related.is_empty()).show(ui, |ui| {
+        egui::CollapsingHeader::new("Riferimenti (ordine, contratto, CIG/CUP, fattura collegata)").default_open(!self.doc.related.is_empty() || self.doc.kind.is_credit()).show(ui, |ui| {
             let mut remove = None;
             for (i, r) in self.doc.related.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
@@ -1654,10 +1667,18 @@ impl Editor {
                 self.doc.related.remove(i);
                 changed = true;
             }
-            if ui.button("\u{E3D4} Riferimento").clicked() {
-                self.doc.related.push(RelatedDoc { kind: if self.doc.kind.is_credit() { "FATTURA".into() } else { "ORDINE".into() }, ..Default::default() });
-                changed = true;
-            }
+            ui.horizontal(|ui| {
+                if ui.button("\u{E3D4} Riferimento").clicked() {
+                    self.doc.related.push(RelatedDoc { kind: if self.doc.kind.is_credit() { "FATTURA".into() } else { "ORDINE".into() }, ..Default::default() });
+                    changed = true;
+                }
+                if !openfatt_store::creditable_kinds(self.doc.kind).is_empty() && ui.button(format!("{} Scegli la fattura stornata...", icon::ARROW_U_UP_LEFT)).clicked() {
+                    self.tools.credit = Some(Default::default());
+                }
+                if openfatt_store::can_deduct_down_payments(self.doc.kind) && ui.button(format!("{} Fatture d'acconto da detrarre...", icon::MINUS_CIRCLE)).clicked() {
+                    self.tools.down = Some(Default::default());
+                }
+            });
         });
         if changed {
             self.dirty = true;

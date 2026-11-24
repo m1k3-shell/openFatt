@@ -953,10 +953,25 @@ impl Store {
         if target == DocKind::Invoice && all_ddt {
             d.fe_type = "TD24".into();
         }
-        for s in &sources {
-            if credit {
-                d.related.push(RelatedDoc { kind: "FATTURA".into(), number: s.number_label(), date: Some(s.date), ..Default::default() });
+        // nota di credito: storno di ogni fattura, citata in testa alle sue righe e nei
+        // riferimenti (DatiFattureCollegate)
+        if credit {
+            d.prices_include_vat = first.prices_include_vat;
+            d.currency = first.currency.clone();
+            d.exchange_rate = first.exchange_rate;
+            for s in &sources {
+                self.append_credit_source(&mut d, s, None)?;
             }
+            return self.save_document(&d);
+        }
+        // fattura di saldo dalle fatture d'acconto: si detraggono, le righe del lavoro si
+        // aggiungono a mano (o con Includi doc.)
+        if sources.iter().all(|s| s.kind == DocKind::DownPaymentInvoice) {
+            let ids: Vec<i64> = sources.iter().map(|s| s.id).collect();
+            self.deduct_down_payments(&mut d, &ids)?;
+            return self.save_document(&d);
+        }
+        for s in &sources {
             if sources.len() > 1 || s.kind == DocKind::DeliveryNote || s.kind == DocKind::GoodsReceipt {
                 d.lines.push(DocLine {
                     kind: LineKind::Text,

@@ -661,6 +661,10 @@ impl OpenFattApp {
                     self.msgs.ok(format!("Verifica di {} in corso...", acc.host));
                     mailer::spawn_test(acc, pw, self.mail_tx.clone());
                 }
+                Nav::DeferredInvoicing => {
+                    self.docs.deferred = Some(ui::deferred::Window::new(None));
+                    self.nav.push(Nav::Go(Screen::Documents(ui::DocGroup::DeliveryNotes)));
+                }
                 Nav::Motion(on) => {
                     self.cfg.still = !on;
                     self.cfg.save();

@@ -362,7 +362,8 @@ mod tests {
         assert!(doc(&s, DocKind::Invoice, &c, d(2026, 2, 5), vec![out]).is_err());
         // reso con nota di credito: S1 torna disponibile una sola volta
         let nc = s.transform(&[inv.id], DocKind::CreditNote).unwrap();
-        assert_eq!(nc.lines[0].serials, vec!["S1".to_string()]);
+        assert_eq!(nc.lines[0].kind, LineKind::Text); // "Storno fattura n. ... del ..."
+        assert_eq!(nc.lines[1].serials, vec!["S1".to_string()]);
         s.issue_document(nc.id).unwrap();
         assert_eq!(s.serials_in_stock(p.id, None).unwrap().len(), 2);
         assert_eq!(s.stock_of(p.id).unwrap(), dec!(2));

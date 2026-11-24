@@ -93,6 +93,11 @@ impl StatDoc {
             if l.map(|l| l.kind != LineKind::Item).unwrap_or(false) {
                 continue;
             }
+            // la detrazione di un acconto non è un ricavo in meno: la fattura di saldo conta
+            // per intero (le fatture d'acconto non entrano nelle statistiche)
+            if l.and_then(crate::deducted_down_payment).is_some() {
+                continue;
+            }
             lines.push(StatLine {
                 product_id: l.and_then(|l| l.product_id),
                 item: lc.index.is_some(),
