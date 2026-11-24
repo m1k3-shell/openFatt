@@ -6,7 +6,7 @@ use eframe::egui::{self, RichText};
 use openfatt_core::calc;
 use openfatt_core::model::*;
 use openfatt_core::money::{fmt_it_trim, parse_dec};
-use openfatt_store::{LastPrice, Recurrence, Store};
+use openfatt_store::{DownPayment, LastPrice, Recurrence, Store};
 use rust_decimal::Decimal;
 
 use super::theme::{self, icon};
@@ -32,6 +32,18 @@ pub struct Tools {
     pub percent: Option<(String, String)>,
     pub recurring: Option<Recurrence>,
     pub attachments: Option<Attachments>,
+    /// Nota di credito: scelta della fattura da stornare (e delle righe).
+    pub credit: Option<CopyState>,
+    /// Fattura di saldo: fatture d'acconto da detrarre.
+    pub down: Option<DownState>,
+}
+
+/// Dialogo delle fatture d'acconto da detrarre.
+#[derive(Default)]
+pub struct DownState {
+    loaded: bool,
+    list: Vec<DownPayment>,
+    checked: Vec<bool>,
 }
 
 /// Esito di un dialogo che modifica le righe.
@@ -48,6 +60,8 @@ impl Tools {
         changed |= self.reverse_line_dialog(ctx, doc, msgs);
         changed |= self.target_total_dialog(ctx, doc, msgs);
         changed |= self.copy_dialog(ctx, store, doc, msgs);
+        changed |= self.credit_dialog(ctx, store, doc, msgs);
+        changed |= self.down_dialog(ctx, store, doc, msgs);
         changed |= self.last_prices_dialog(ctx, doc);
         changed |= self.packs_dialog(ctx, store, doc);
         changed |= self.percent_dialog(ctx, doc, msgs);
@@ -208,9 +222,32 @@ impl Tools {
                 }
             });
             ui.add_space(6.0);
+            // fattura d'acconto in una fattura: va detratta, non copiata
+            let down = cs.doc.as_ref().filter(|s| s.kind == DocKind::DownPaymentInvoice && openfatt_store::can_deduct_down_payments(doc.kind)).map(|s| s.id);
+            // fattura in una nota di credito: si cita come fattura stornata
+            let credited = cs.doc.as_ref().filter(|s| openfatt_store::creditable_kinds(doc.kind).contains(&s.kind)).map(|s| s.id);
+            if down.is_some() {
+                ui.label(RichText::new("Fattura d'acconto: nella fattura di saldo si detrae, con il riferimento alla fattura d'acconto e gli importi in negativo.").color(GRAY));
+            } else if credited.is_some() {
+                ui.label(RichText::new("Le righe spuntate si stornano e la fattura viene citata nella nota di credito (anche nella fattura elettronica).").color(GRAY));
+            }
             ui.horizontal(|ui| {
                 let n = cs.checked.iter().filter(|c| **c).count();
-                if theme::primary_enabled(ui, cs.doc.is_some() && n > 0, icon::COPY, &format!("Copia {} righe", n)).clicked() {
+                if let Some(id) = down {
+                    if theme::primary(ui, icon::MINUS_CIRCLE, "Detrai l'acconto").clicked() && msgs.check(store.deduct_down_payments(doc, &[id]), "Acconto detratto").is_some() {
+                        changed = true;
+                        close = true;
+                    }
+                }
+                if let (Some(id), false) = (credited, close) {
+                    if theme::primary_enabled(ui, n > 0, icon::ARROW_U_UP_LEFT, &format!("Storna {} righe", n)).clicked() {
+                        let idx: Vec<usize> = cs.checked.iter().enumerate().filter(|(_, c)| **c).map(|(i, _)| i).collect();
+                        if msgs.check(store.credit_invoice(doc, id, Some(&idx)), "Righe stornate").is_some() {
+                            changed = true;
+                            close = true;
+                        }
+                    }
+                } else if !close && theme::button_enabled(ui, cs.doc.is_some() && n > 0, icon::COPY, &format!("Copia {} righe", n)).clicked() {
                     if let Some(src) = &cs.doc {
                         let purchase_to_sale = src.kind.is_purchase() != doc.kind.is_purchase();
                         for (l, _) in src.lines.iter().zip(cs.checked.iter()).filter(|(_, c)| **c) {
@@ -241,6 +278,172 @@ impl Tools {
         });
         if close {
             self.copy = None;
+        }
+        changed
+    }
+
+    /// Nota di credito: fattura da stornare, tutta, solo alcune righe o solo come riferimento.
+    fn credit_dialog(&mut self, ctx: &egui::Context, store: &Store, doc: &mut Document, msgs: &mut Msgs) -> bool {
+        let Some(cs) = &mut self.credit else { return false };
+        let mut close = false;
+        let mut changed = false;
+        let purchase = doc.kind.is_purchase();
+        let who = if purchase { "fornitore" } else { "cliente" };
+        egui::Window::new("Fattura da stornare").collapsible(false).default_width(780.0).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.label(RichText::new(match doc.party_id {
+                Some(_) => format!("Fatture emesse di {}", doc.party.display_name()),
+                None => format!("Fatture di tutti: il {} della nota di credito sarà quello della fattura scelta", who),
+            }).color(GRAY));
+            ui.horizontal(|ui| {
+                ui.label("Cerca");
+                ui.add(egui::TextEdit::singleline(&mut cs.search).desired_width(260.0).hint_text(format!("numero, {} o descrizione", who)));
+            });
+            ui.add_space(4.0);
+            ui.columns(2, |cols| {
+                egui::ScrollArea::vertical().id_salt("credit_docs").max_height(360.0).show(&mut cols[0], |ui| {
+                    let list = store.creditable_documents(doc.kind, doc.party_id, &cs.search).unwrap_or_default();
+                    if list.is_empty() {
+                        ui.label(RichText::new("Nessuna fattura emessa").color(GRAY));
+                    }
+                    for d in list {
+                        let sel = cs.doc.as_ref().map(|x| x.id) == Some(d.id);
+                        let number = if purchase && !d.external_number.trim().is_empty() { d.external_number.trim().to_string() } else { d.number_label.clone() };
+                        let cited = doc.related.iter().any(|r| r.kind == "FATTURA" && r.number.trim() == number && r.date == Some(d.date));
+                        let mut label = format!("{} {} · {} · € {}", d.kind.label(), number, d.date.format("%d/%m/%Y"), eur(d.total));
+                        if doc.party_id.is_none() {
+                            label.push_str(&format!(" · {}", widgets::truncate(&d.party_name, 24)));
+                        }
+                        if cited {
+                            label.push_str("  (già citata)");
+                        }
+                        if ui.selectable_label(sel, label).clicked() {
+                            if let Ok(full) = store.document(d.id) {
+                                cs.checked = vec![true; full.lines.len()];
+                                cs.doc = Some(full);
+                            }
+                        }
+                    }
+                });
+                let ui = &mut cols[1];
+                match &cs.doc {
+                    None => {
+                        ui.label(RichText::new("Scegliere la fattura a sinistra").color(GRAY));
+                    }
+                    Some(src) => {
+                        ui.label(theme::medium(src.title()));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Tutte").clicked() {
+                                cs.checked.iter_mut().for_each(|c| *c = true);
+                            }
+                            if ui.small_button("Nessuna").clicked() {
+                                cs.checked.iter_mut().for_each(|c| *c = false);
+                            }
+                        });
+                        egui::ScrollArea::vertical().id_salt("credit_lines").max_height(310.0).show(ui, |ui| {
+                            for (i, l) in src.lines.iter().enumerate() {
+                                let t = match l.kind {
+                                    LineKind::Item => format!("{} x {}  € {}", fmt_it_trim(l.qty, 0, 3), widgets::truncate(&l.description, 40), eur(l.unit_price)),
+                                    LineKind::Text => format!("(testo) {}", widgets::truncate(&l.description, 50)),
+                                    LineKind::Subtotal => "(subtotale)".into(),
+                                };
+                                ui.checkbox(&mut cs.checked[i], t);
+                            }
+                        });
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let id = cs.doc.as_ref().map(|d| d.id);
+                let n = cs.checked.iter().filter(|c| **c).count();
+                let all = cs.doc.as_ref().map(|d| cs.checked.len() == d.lines.len() && cs.checked.iter().all(|c| *c)).unwrap_or(false);
+                let mut pick: Option<Option<Vec<usize>>> = None;
+                if theme::primary_enabled(ui, id.is_some() && n > 0, icon::ARROW_U_UP_LEFT, if all { "Storna tutta la fattura".to_string() } else { format!("Storna {} righe", n) }.as_str())
+                    .on_hover_text("Si aggiunge il riferimento alla fattura (DatiFattureCollegate), la riga \"Storno fattura n. ... del ...\" e le righe spuntate: quantità e prezzi si possono poi correggere")
+                    .clicked()
+                {
+                    pick = Some(if all { None } else { Some(cs.checked.iter().enumerate().filter(|(_, c)| **c).map(|(i, _)| i).collect()) });
+                }
+                if theme::button_enabled(ui, id.is_some(), icon::LINK, "Solo riferimento").on_hover_text("Per una rettifica di prezzo o uno sconto: la fattura viene citata, le righe si scrivono a mano").clicked() {
+                    pick = Some(Some(Vec::new()));
+                }
+                if let (Some(sel), Some(id)) = (pick, id) {
+                    if msgs.check(store.credit_invoice(doc, id, sel.as_deref()), "Fattura da stornare indicata").is_some() {
+                        changed = true;
+                        close = true;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::button(ui, icon::X, "Chiudi").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if close {
+            self.credit = None;
+        }
+        changed
+    }
+
+    /// Fattura di saldo: fatture d'acconto del cliente da detrarre.
+    fn down_dialog(&mut self, ctx: &egui::Context, store: &Store, doc: &mut Document, msgs: &mut Msgs) -> bool {
+        let Some(ds) = &mut self.down else { return false };
+        if !ds.loaded {
+            ds.loaded = true;
+            if let Some(p) = doc.party_id {
+                let here: Vec<i64> = doc.lines.iter().filter_map(openfatt_store::deducted_down_payment).collect();
+                ds.list = store.open_down_payments(p, doc.id).unwrap_or_default().into_iter().filter(|d| !here.contains(&d.id)).collect();
+                ds.checked = vec![true; ds.list.len()];
+            }
+        }
+        let mut close = false;
+        let mut changed = false;
+        egui::Window::new("Detrai fatture d'acconto").collapsible(false).default_width(640.0).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            if doc.party_id.is_none() {
+                ui.label(RichText::new("Scegliere prima il cliente della fattura di saldo.").color(GRAY));
+            } else if ds.list.is_empty() {
+                ui.label(RichText::new(format!("Nessuna fattura d'acconto da detrarre per {}.", doc.party.display_name())).color(GRAY));
+            } else {
+                ui.label(RichText::new("Per ogni acconto spuntato si aggiunge il riferimento alla fattura d'acconto (anche nella fattura elettronica) e una riga con l'imponibile in negativo per ogni aliquota: il totale da pagare diventa il saldo.").color(GRAY));
+                ui.add_space(6.0);
+                egui::Grid::new("down_grid").striped(true).num_columns(6).spacing([14.0, 4.0]).show(ui, |ui| {
+                    ui.label("");
+                    ui.label(theme::medium("Fattura d'acconto"));
+                    ui.label(theme::medium("Imponibile"));
+                    ui.label(theme::medium("Totale"));
+                    ui.label(theme::medium("Già detratto"));
+                    ui.label(theme::medium("Da detrarre"));
+                    ui.end_row();
+                    for (i, d) in ds.list.iter().enumerate() {
+                        ui.checkbox(&mut ds.checked[i], "");
+                        ui.label(format!("n. {} del {}", d.number_label, d.date.format("%d/%m/%Y")));
+                        ui.label(format!("€ {}", eur(d.taxable)));
+                        ui.label(format!("€ {}", eur(d.total)));
+                        ui.label(if d.deducted.is_zero() { "-".to_string() } else { format!("€ {}", eur(d.deducted)) });
+                        ui.label(theme::medium(format!("€ {}", eur(d.residual))));
+                        ui.end_row();
+                    }
+                });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let ids: Vec<i64> = ds.list.iter().zip(ds.checked.iter()).filter(|(_, c)| **c).map(|(d, _)| d.id).collect();
+                let total: Decimal = ds.list.iter().zip(ds.checked.iter()).filter(|(_, c)| **c).map(|(d, _)| d.residual).sum();
+                let label = if ids.len() == 1 { format!("Detrai l'acconto (€ {})", eur(total)) } else { format!("Detrai {} acconti (€ {})", ids.len(), eur(total)) };
+                if theme::primary_enabled(ui, !ids.is_empty(), icon::MINUS_CIRCLE, &label).clicked() && msgs.check(store.deduct_down_payments(doc, &ids), "Acconti detratti").is_some() {
+                    changed = true;
+                    close = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::button(ui, icon::X, "Chiudi").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if close {
+            self.down = None;
         }
         changed
     }

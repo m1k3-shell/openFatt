@@ -29,6 +29,8 @@ pub struct State {
     data: super::Cache<(String, Option<i32>, String, Option<&'static str>), Vec<DocSummary>>,
     progress: super::Cache<String, std::collections::HashMap<i64, openfatt_store::OrderProgress>>,
     agents: super::Cache<(), Vec<openfatt_store::Agent>>,
+    /// Finestra della fatturazione differita dei DDT.
+    pub deferred: Option<super::deferred::Window>,
 }
 
 fn grid_name(g: DocGroup) -> &'static str {
@@ -72,6 +74,7 @@ impl Default for State {
             data: Default::default(),
             progress: Default::default(),
             agents: Default::default(),
+            deferred: None,
         }
     }
 }
@@ -133,6 +136,12 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
             }
             Some(false) => st.confirm = None,
             None => {}
+        }
+    }
+
+    if let Some(w) = &mut st.deferred {
+        if !w.show(ui.ctx(), cx) {
+            st.deferred = None;
         }
     }
 
@@ -213,6 +222,9 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
         } else {
             if theme::primary(ui, icon::PLUS, &new_label(kinds[0])).on_hover_text("Ctrl+N").clicked() {
                 cx.nav.push(Nav::NewDocument(kinds[0]));
+            }
+            if matches!(group, DocGroup::DeliveryNotes | DocGroup::Invoices) && theme::button(ui, icon::CALENDAR_CHECK, "Fatturazione differita...").on_hover_text("Fatture dai DDT non ancora fatturati: di un cliente o di tutti (fine mese)").clicked() {
+                st.deferred = Some(super::deferred::Window::new(None));
             }
             if kinds.len() > 1 {
                 egui::menu::menu_custom_button(ui, theme::button_widget(icon::CARET_DOWN, "Altri"), |ui| {
@@ -495,9 +507,17 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
                 }
                 // trasformazioni (anche da più documenti dello stesso tipo)
                 let k0 = selected[0].kind;
-                if selected.iter().all(|d| d.kind == k0) {
+                let one_party = selected.iter().all(|d| d.party_id == selected[0].party_id);
+                if k0 == DocKind::DeliveryNote && selected.iter().all(|d| d.kind == k0) && !one_party {
+                    // DDT di clienti diversi: una fattura per cliente
+                    if theme::ghost(ui, true, icon::ARROW_RIGHT, &format!("Fatture da {} DDT", selected.len())).on_hover_text("Una fattura differita per ogni cliente").clicked() {
+                        let ids: Vec<i64> = selected.iter().map(|d| d.id).collect();
+                        st.deferred = Some(super::deferred::Window::with_selection(cx.store, &ids));
+                    }
+                } else if selected.iter().all(|d| d.kind == k0) {
                     for t in k0.transform_targets() {
-                        let label = if selected.len() > 1 { format!("{} da {} documenti", t.label(), selected.len()) } else { format!("{}", t.label()) };
+                        let name = if k0 == DocKind::DownPaymentInvoice && *t == DocKind::Invoice { "Fattura di saldo" } else { t.label() };
+                        let label = if selected.len() > 1 { format!("{} da {} documenti", name, selected.len()) } else { name.to_string() };
                         if theme::ghost(ui, true, icon::ARROW_RIGHT, &label).clicked() {
                             let ids: Vec<i64> = selected.iter().map(|d| d.id).collect();
                             if let Some(d) = cx.msgs.check(cx.store.transform(&ids, *t), "") {

@@ -316,6 +316,9 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
                 }
             });
             menu_sep(ui);
+            if menu_item(ui, icon::CALENDAR_CHECK, "Fatturazione differita DDT...", "") {
+                nav.push(Nav::DeferredInvoicing);
+            }
             let n = if b.recurring_due > 0 { b.recurring_due.to_string() } else { String::new() };
             if menu_item(ui, icon::REPEAT, "Documenti ricorrenti", &n) {
                 nav.push(Nav::Go(Screen::Extra(Extra::Recurring)));

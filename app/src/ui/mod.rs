@@ -8,6 +8,7 @@ pub mod business;
 pub mod cards;
 pub mod conservation;
 pub mod counter;
+pub mod deferred;
 pub mod documents;
 pub mod editor;
 pub mod einvoices;
@@ -269,6 +270,8 @@ pub enum Nav {
     EditorPayment(bool),
     /// Animazioni dell'interfaccia accese o spente (preferenza della postazione).
     Motion(bool),
+    /// Elenco dei DDT con la finestra della fatturazione differita aperta.
+    DeferredInvoicing,
 }
 
 pub struct Ctx<'a> {
