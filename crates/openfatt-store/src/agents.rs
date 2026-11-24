@@ -121,41 +121,73 @@ impl Store {
         Ok(())
     }
 
-    /// Provvigioni dell'agente sulle fatture e note di credito emesse nel periodo.
+    /// Imponibile (in euro) e provvigione dell'agente sulle righe di un documento, senza segno.
+    /// Le righe che detraggono una fattura d'acconto tolgono la provvigione già riconosciuta
+    /// sull'acconto, con la stessa aliquota; se l'acconto non è dell'agente non contano.
+    fn document_commission(&self, agent: &Agent, d: &openfatt_core::model::Document, cache: &mut std::collections::HashMap<i64, Option<Decimal>>) -> Result<Option<(Decimal, Decimal)>> {
+        let Ok(t) = calc::compute(d) else { return Ok(None) };
+        let mut base = Decimal::ZERO;
+        let mut commission = Decimal::ZERO;
+        for lc in t.lines.iter().filter(|l| !l.is_text && !l.is_generated) {
+            let Some(l) = lc.index.and_then(|i| d.lines.get(i)) else { continue };
+            if l.kind != LineKind::Item {
+                continue;
+            }
+            let b = d.to_eur(lc.total);
+            if let Some(dp) = crate::deducted_down_payment(l) {
+                // aliquota media riconosciuta sulla fattura d'acconto
+                let rate = match cache.get(&dp) {
+                    Some(r) => *r,
+                    None => {
+                        let r = match self.document(dp) {
+                            Ok(acc) if acc.kind == DocKind::DownPaymentInvoice && acc.status == DocStatus::Issued && acc.agent_id == Some(agent.id) => {
+                                self.document_commission(agent, &acc, cache)?.filter(|(ab, _)| !ab.is_zero()).map(|(ab, ac)| ac * Decimal::ONE_HUNDRED / ab)
+                            }
+                            _ => None,
+                        };
+                        cache.insert(dp, r);
+                        r
+                    }
+                };
+                if let Some(rate) = rate {
+                    base += b;
+                    commission += pct_of(b, rate);
+                }
+                continue;
+            }
+            let product = match l.product_id {
+                Some(id) => self.product(id)?,
+                None => None,
+            };
+            let rate = l
+                .commission
+                .or_else(|| product.as_ref().and_then(|p| p.commission))
+                .or_else(|| product.as_ref().and_then(|p| agent.category_rates.iter().find(|(c, _)| !c.is_empty() && p.category.starts_with(c.as_str())).map(|(_, r)| *r)))
+                .or(d.commission_rate)
+                .unwrap_or(agent.rate);
+            base += b;
+            commission += pct_of(b, rate);
+        }
+        Ok(Some((base, commission)))
+    }
+
+    /// Provvigioni dell'agente sui documenti di vendita emessi nel periodo: fatture, fatture
+    /// d'acconto, parcelle, note di credito e di debito. Sulla fattura di saldo la detrazione
+    /// dell'acconto toglie la provvigione già riconosciuta sull'acconto.
     pub fn commissions(&self, agent_id: i64, from: NaiveDate, to: NaiveDate, today: NaiveDate) -> Result<Vec<CommissionRow>> {
         let agent = self.agent(agent_id)?.ok_or_else(|| StoreError::NotFound("agente".into()))?;
-        let kinds = vec![DocKind::Invoice, DocKind::AccompanyingInvoice, DocKind::CreditNote, DocKind::DebitNote, DocKind::Fee];
+        let kinds = vec![DocKind::Invoice, DocKind::AccompanyingInvoice, DocKind::CreditNote, DocKind::DebitNote, DocKind::DownPaymentInvoice, DocKind::Fee];
         let list = self.documents(&DocFilter { kinds, status: Some(DocStatus::Issued), from: Some(from), to: Some(to), ..Default::default() })?;
         let settled = self.settled_by_document(agent_id)?;
+        let mut cache = std::collections::HashMap::new();
         let mut out = Vec::new();
         for s in list {
             let d = self.document(s.id)?;
             if d.agent_id != Some(agent_id) {
                 continue;
             }
-            let Ok(t) = calc::compute(&d) else { continue };
+            let Some((base, commission)) = self.document_commission(&agent, &d, &mut cache)? else { continue };
             let sign = if d.kind.is_credit() { Decimal::NEGATIVE_ONE } else { Decimal::ONE };
-            let mut base = Decimal::ZERO;
-            let mut commission = Decimal::ZERO;
-            for lc in t.lines.iter().filter(|l| !l.is_text && !l.is_generated) {
-                let Some(l) = lc.index.and_then(|i| d.lines.get(i)) else { continue };
-                if l.kind != LineKind::Item {
-                    continue;
-                }
-                let product = match l.product_id {
-                    Some(id) => self.product(id)?,
-                    None => None,
-                };
-                let rate = l
-                    .commission
-                    .or_else(|| product.as_ref().and_then(|p| p.commission))
-                    .or_else(|| product.as_ref().and_then(|p| agent.category_rates.iter().find(|(c, _)| !c.is_empty() && p.category.starts_with(c.as_str())).map(|(_, r)| *r)))
-                    .or(d.commission_rate)
-                    .unwrap_or(agent.rate);
-                let b = d.to_eur(lc.total);
-                base += b;
-                commission += pct_of(b, rate);
-            }
             let base = round2(base) * sign;
             let commission = round2(commission) * sign;
             let total_due: Decimal = d.due_dates.iter().map(|x| x.amount).sum();
@@ -270,5 +302,43 @@ mod tests {
         assert_eq!(rows[0].to_settle(), dec!(0));
         assert!(s.settle_commissions(a.id, from, to, today).is_err());
         assert!(s.delete_agent(a.id).is_err(), "usato in un documento");
+    }
+
+    #[test]
+    fn provvigioni_su_acconto_e_saldo() {
+        let s = Store::open_in_memory().unwrap();
+        let v = VatRef::from_code(&s.vat_codes().unwrap().into_iter().find(|v| v.rate == dec!(22)).unwrap());
+        let a = s.save_agent(&Agent { name: "Agente".into(), rate: dec!(10), ..Default::default() }).unwrap();
+        let c = s.save_party(&Party { name: "Cliente".into(), vat_number: "01234567890".into(), ..Default::default() }).unwrap();
+        let p = s.save_product(&Product { code: "IMP".into(), description: "Impianto".into(), commission: Some(dec!(5)), ..Default::default() }).unwrap();
+        let day = |m: u32, dd: u32| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        let issue = |kind: DocKind, date: NaiveDate, agent: Option<i64>, lines: Vec<DocLine>, deduct: &[i64]| {
+            let mut d = Document::new(kind);
+            d.date = date;
+            d.party_id = Some(c.id);
+            d.agent_id = agent;
+            d.lines = lines;
+            s.deduct_down_payments(&mut d, deduct).ok();
+            let d = s.save_document(&d).unwrap();
+            s.issue_document(d.id).unwrap()
+        };
+        let work = DocLine { product_id: Some(p.id), description: "Impianto".into(), qty: dec!(1), unit_price: dec!(5000), vat: v.clone(), ..Default::default() };
+        let advance = DocLine { description: "Acconto".into(), qty: dec!(1), unit_price: dec!(1000), vat: v.clone(), ..Default::default() };
+        // acconto dell'agente (10% senza articolo) e saldo con l'impianto al 5%
+        let acc = issue(DocKind::DownPaymentInvoice, day(3, 1), Some(a.id), vec![advance.clone()], &[]);
+        issue(DocKind::Invoice, day(4, 1), Some(a.id), vec![work.clone()], &[acc.id]);
+        let (from, to) = (day(1, 1), day(12, 31));
+        let rows = s.commissions(a.id, from, to, day(11, 7)).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].commission, dec!(100)); // sull'acconto, quando è emesso
+        assert_eq!(rows[1].base, dec!(4000));
+        assert_eq!(rows[1].commission, dec!(150)); // 250 sul lavoro - 100 già riconosciuti
+        assert_eq!(rows.iter().map(|r| r.commission).sum::<Decimal>(), dec!(250));
+        // acconto senza agente: sul saldo la provvigione è per l'intero lavoro
+        let acc2 = issue(DocKind::DownPaymentInvoice, day(5, 1), None, vec![advance], &[]);
+        issue(DocKind::Invoice, day(6, 1), Some(a.id), vec![work], &[acc2.id]);
+        let rows = s.commissions(a.id, from, to, day(11, 7)).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].commission, dec!(250));
     }
 }
