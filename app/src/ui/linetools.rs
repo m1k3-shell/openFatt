@@ -301,11 +301,12 @@ impl Tools {
             ui.add_space(4.0);
             ui.columns(2, |cols| {
                 egui::ScrollArea::vertical().id_salt("credit_docs").max_height(360.0).show(&mut cols[0], |ui| {
-                    let list = store.creditable_documents(doc.kind, doc.party_id, &cs.search).unwrap_or_default();
+                    let search = super::settled(ctx, "credit_search", &cs.search);
+                    let (list, _) = super::memo(ctx, "creditable_docs", store.generation(), (doc.kind, doc.party_id, search.clone()), || store.creditable_documents(doc.kind, doc.party_id, &search).unwrap_or_default());
                     if list.is_empty() {
                         ui.label(RichText::new("Nessuna fattura emessa").color(GRAY));
                     }
-                    for d in list {
+                    for d in list.iter() {
                         let sel = cs.doc.as_ref().map(|x| x.id) == Some(d.id);
                         let number = if purchase && !d.external_number.trim().is_empty() { d.external_number.trim().to_string() } else { d.number_label.clone() };
                         let cited = doc.related.iter().any(|r| r.kind == "FATTURA" && r.number.trim() == number && r.date == Some(d.date));

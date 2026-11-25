@@ -222,6 +222,10 @@ impl OpenFattApp {
                         app.ledger.show_reminders();
                         Some(Screen::Dues)
                     }
+                    "fatturazione-differita" => {
+                        app.nav.push(Nav::DeferredInvoicing);
+                        None
+                    }
                     // un documento preciso (collaudi): "documento:<id>", "incasso:<id>", "acconto:<id>"
                     x if x.starts_with("documento:") || x.starts_with("incasso:") || x.starts_with("acconto:") => {
                         let (what, id) = x.split_once(':').unwrap_or_default();

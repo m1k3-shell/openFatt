@@ -106,12 +106,14 @@ pub fn show(ui: &mut Ui, cx: &mut Ctx, st: &mut State) {
     let incoming = &hd.incoming;
     let without_fe = &hd.without_fe;
     let dues = &hd.dues;
-    let receivables: Vec<_> = dues.iter().filter(|d| d.receivable && d.residual() > Decimal::ZERO).collect();
+    let receivables: Vec<_> = dues.iter().filter(|d| d.customer_side() && !d.is_credit() && d.residual() > Decimal::ZERO).collect();
+    // note di credito ai clienti ancora da compensare o rimborsare: riducono il da incassare
+    let open_credits: Decimal = dues.iter().filter(|d| d.customer_side() && d.is_credit()).map(|d| d.residual()).sum();
     let overdue: Vec<_> = receivables.iter().filter(|d| d.date < today).collect();
     let overdue_sum: Decimal = overdue.iter().map(|d| d.residual()).sum();
-    let open_sum: Decimal = receivables.iter().map(|d| d.residual()).sum();
+    let open_sum: Decimal = receivables.iter().map(|d| d.residual()).sum::<Decimal>() - open_credits;
     let in30: Decimal = receivables.iter().filter(|d| d.date >= today && d.date <= today + chrono::Duration::days(30)).map(|d| d.residual()).sum();
-    let payables_overdue: Decimal = dues.iter().filter(|d| !d.receivable && d.date < today).map(|d| d.residual()).sum();
+    let payables_overdue: Decimal = dues.iter().filter(|d| !d.customer_side() && !d.is_credit() && d.date < today).map(|d| d.residual()).sum();
     let under_min = &hd.under_min;
     let open_inv = &hd.open_inv;
     let recent_docs = &hd.recent_docs;

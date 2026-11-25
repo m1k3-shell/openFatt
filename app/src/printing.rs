@@ -244,7 +244,8 @@ pub fn address_item(p: &Party) -> LabelItem {
     LabelItem { label: p.display_name(), content: LabelContent::Address { heading: "Spett.le".into(), lines }, qty: 1 }
 }
 
-/// Etichetta di spedizione di un DDT o di una fattura accompagnatoria (una per collo).
+/// Etichetta di spedizione di un documento di vendita (una per collo): DDT, fattura
+/// accompagnatoria, fattura (anche differita, con i DDT citati), ordine, pro forma.
 pub fn shipping_item(store: &Store, doc: &Document) -> LabelItem {
     let c = store.company().unwrap_or_default();
     let p = &doc.party;
@@ -259,6 +260,11 @@ pub fn shipping_item(store: &Store, doc: &Document) -> LabelItem {
     recipient.retain(|l| !l.trim().is_empty());
     let packages = doc.transport.as_ref().and_then(|t| t.packages).unwrap_or(1).max(1);
     let mut info = vec![format!("{} n. {} del {}", doc.kind.label(), doc.number_label(), doc.date.format("%d/%m/%Y"))];
+    // fattura differita: i DDT con cui è partita la merce
+    let ddts = store.ddt_sources(doc).unwrap_or_default();
+    if !ddts.is_empty() {
+        info.push(format!("DDT n. {}", ddts.iter().map(|d| d.number.clone()).collect::<Vec<_>>().join(", ")));
+    }
     if let Some(t) = &doc.transport {
         if let Some(w) = t.gross_weight.filter(|w| !w.is_zero()) {
             info.push(format!("Peso lordo {} kg", openfatt_core::money::fmt_it_trim(w, 0, 3)));
@@ -287,9 +293,9 @@ pub fn labels_pdf(items: &[LabelItem], format: &str, skip: usize, border: bool) 
     openfatt_pdf::labels::render_labels(&openfatt_pdf::labels::format_by_id(format), &list, skip, border)
 }
 
-#[allow(dead_code)]
+/// Documenti per cui si stampa l'etichetta di spedizione.
 pub fn is_shipping_doc(k: DocKind) -> bool {
-    matches!(k, DocKind::DeliveryNote | DocKind::AccompanyingInvoice)
+    matches!(k, DocKind::DeliveryNote | DocKind::AccompanyingInvoice | DocKind::Invoice | DocKind::CustomerOrder | DocKind::Proforma | DocKind::CreditNote)
 }
 
 #[cfg(test)]
@@ -364,5 +370,27 @@ mod tests {
             std::fs::write(out.join(format!("fattura-{}.pdf", t)), document_pdf(&s, &s.document(inv.id).unwrap()).unwrap()).unwrap();
         }
         std::fs::write(out.join("etichette-rotolo.pdf"), labels_pdf(&product_items(&s, &s.products("", false).unwrap().into_iter().take(3).collect::<Vec<_>>()), "roll-50x30", 0, false)).unwrap();
+    }
+
+    #[test]
+    fn etichetta_di_spedizione_della_fattura_differita() {
+        let s = Store::open_in_memory().unwrap();
+        crate::demo::populate(&s).unwrap();
+        // un DDT emesso fatturato in differita: l'etichetta della fattura cita il DDT
+        let ddt = s
+            .documents(&openfatt_store::DocFilter { kinds: vec![DocKind::DeliveryNote], status: Some(openfatt_core::model::DocStatus::Issued), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .map(|d| s.document(d.id).unwrap())
+            .find(|d| s.pending_delivery_notes(None, d.date, d.party_id).map(|p| p.iter().any(|x| x.id == d.id)).unwrap_or(false))
+            .expect("DDT da fatturare");
+        let mut inv = s.transform(&[ddt.id], DocKind::Invoice).unwrap();
+        inv.date = chrono::Local::now().date_naive().max(ddt.date);
+        let inv = s.save_document(&inv).unwrap();
+        assert!(is_shipping_doc(inv.kind));
+        let it = shipping_item(&s, &inv);
+        let LabelContent::Shipping { recipient, info, .. } = &it.content else { panic!("non è un'etichetta di spedizione") };
+        assert_eq!(recipient[0], inv.party.display_name());
+        assert!(info.iter().any(|l| l == &format!("DDT n. {}", ddt.number_label())), "{:?}", info);
     }
 }

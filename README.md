@@ -65,6 +65,7 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 - **Più fornitori per articolo**, ciascuno con il proprio codice e prezzo: nei documenti di acquisto si propongono quelli del fornitore scelto.
 - **Numero e scadenze già dal salvataggio in bozza**: le Ri.Ba. si possono emettere anche da una fattura non ancora confermata.
 - **Incassi e acconti**: un incasso (o pagamento) con data, modalità (contanti, assegno, bonifico, carta, RiBa...), conto e riferimento (numero dell'assegno, CRO...) si ripartisce su una o più fatture dello stesso cliente partendo dalla più vecchia; per ogni fattura si corregge la quota o si scrive quanto resterà da saldare, anche con abbuono. Elenco degli incassi registrati con annullamento della singola registrazione, storico dei pagamenti di ogni scadenza, residuo spostabile a una nuova data; un movimento di prima nota per fattura (vale anche per l'IVA per cassa). Lo stato del pagamento si aggiorna anche dalla fattura aperta (scheda *Pagamento*: *Segna come incassata*, *Registra acconto*, storico), raggiungibile dalla scheda del cliente.
+- **Note di credito nello scadenzario**: valgono in negativo (riducono il residuo del cliente, la scrivania e i solleciti) e si **compensano** con le fatture aperte dello stesso cliente o fornitore, senza movimenti di denaro (in prima nota due movimenti sul conto *Compensazioni* che si annullano); in alternativa si registra il rimborso.
 - **Menu Pagamenti**: registra incasso o acconto, incassi registrati, tutti, entrate, uscite, da saldare al..., solleciti, RIBA da emettere, bonifici da pagare; *Esporta file per home banking* e *Stampa distinta* sulla voce corrente o su tutte le voci visibili.
 - **Aliquote con scissione dei pagamenti** (22sp, 10sp, 5sp, 4sp) proposte da sole per la Pubblica Amministrazione.
 - **Autofatture e integrazioni** (TD16-TD29) dal menu Fatture elettr. o direttamente dalla fattura di acquisto, con tipo proposto, estremi della fattura originale e IVA da integrare.
@@ -169,7 +170,7 @@ Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con
 
 ## Verifiche
 
-- **218 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
+- **233 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
 - **Collaudo completo** (`cargo test -p openfatt collaudo -- --nocapture`): percorre tutte le funzioni (righe speciali, valuta, dichiarazione d'intento, NSO, produzione, distinte bancarie, LIPE, agenti, statistiche, ricorrenti, carte, negozio online, utenti e blocchi, fine anno, conservazione, interscambio, copie di sicurezza) e salva i file prodotti in `target/collaudo` con un rapporto.
 - I file prodotti sono **validi contro gli schemi ufficiali**: fatture elettroniche (`tools/valida-xsd.ps1`, schema VFPR12 1.2.3), bonifici e SDD CBI (`tools/valida-cbi.ps1`), Comunicazione LIPE (`tools/valida-lipe.ps1`).
 - Codici a barre riletti con un decodificatore indipendente (ZXing); firme verificate con il validatore di .NET.

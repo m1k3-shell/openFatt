@@ -34,6 +34,7 @@ pub struct Editor {
     /// Finestre di incasso e dello storico dei pagamenti aperte dal documento.
     pay: Option<super::payments::PayForm>,
     pay_history: Option<super::payments::History>,
+    pay_comp: Option<super::payments::CompForm>,
     /// L'utente può registrare incassi e pagamenti (permesso Contabilità).
     pub can_pay: bool,
 }
@@ -100,6 +101,7 @@ impl Editor {
             arrivals: Default::default(),
             pay: None,
             pay_history: None,
+            pay_comp: None,
             can_pay: true,
         }
     }
@@ -427,7 +429,7 @@ impl Editor {
                     ui.close_menu();
                     cx.nav.push(Nav::Labels(crate::printing::document_items(cx.store, &self.doc)));
                 }
-                if crate::printing::is_shipping_doc(self.doc.kind) && self.doc.id != 0 && ui.button("Etichette di spedizione...").clicked() {
+                if crate::printing::is_shipping_doc(self.doc.kind) && self.doc.party_id.is_some() && ui.button("Etichette di spedizione...").on_hover_text("Mittente, destinatario (o destinazione merce) e collo n di N").clicked() {
                     ui.close_menu();
                     cx.nav.push(Nav::Labels(vec![crate::printing::shipping_item(cx.store, &self.doc)]));
                 }
@@ -438,7 +440,7 @@ impl Editor {
                     self.tools.attachments = Some(super::linetools::Attachments::new("document", self.doc.id, self.doc.title()));
                 }
             }
-            if self.payable() && self.doc.due_dates.iter().any(|d| !d.is_paid()) && theme::ghost(ui, true, icon::HAND_COINS, if self.receivable() { "Incasso" } else { "Pagamento" }).on_hover_text("Stato del pagamento: saldo o acconto").clicked() {
+            if self.payable() && self.doc.due_dates.iter().any(|d| !d.is_paid()) && theme::ghost(ui, true, if self.doc.kind.is_credit() { icon::ARROWS_LEFT_RIGHT } else { icon::HAND_COINS }, if self.doc.kind.is_credit() { "Compensa" } else if self.receivable() { "Incasso" } else { "Pagamento" }).on_hover_text("Stato del pagamento: saldo, acconto o compensazione").clicked() {
                 self.tab = DocTab::Payment;
             }
             if !purchase && self.doc.kind.is_fiscal() && !locked && theme::ghost(ui, true, icon::PERCENT, "Rit. acconto").clicked() {
@@ -1811,6 +1813,15 @@ impl Editor {
         self.start_payment(cx.store, cx.msgs, full);
     }
 
+    /// Rimborso di una nota di credito (denaro restituito al cliente o dal fornitore).
+    fn open_refund(&mut self, cx: &mut Ctx) {
+        let dues: Vec<i64> = cx.store.dues_of_document(self.doc.id).unwrap_or_default().into_iter().filter(|d| d.residual() > Decimal::ZERO).map(|d| d.id).collect();
+        if !dues.is_empty() {
+            let party = self.doc.party.display_name();
+            self.pay = Some(super::payments::PayForm::for_party(cx.store, self.doc.party_id, &party, self.receivable(), &dues));
+        }
+    }
+
     /// Mostra la scheda Pagamento e apre la finestra di incasso (anche da fuori: scheda del
     /// cliente, collegamenti).
     pub fn start_payment(&mut self, store: &openfatt_store::Store, msgs: &mut super::Msgs, full: bool) {
@@ -1823,11 +1834,16 @@ impl Editor {
             msgs.warn("Il documento è in bozza: emetterlo prima di registrare incassi".to_string());
             return;
         }
-        let dues: Vec<i64> = store.dues_of_document(self.doc.id).unwrap_or_default().into_iter().filter(|d| d.residual() > Decimal::ZERO).map(|d| d.id).collect();
-        if dues.is_empty() {
-            msgs.warn("Il documento è già saldato".to_string());
+        let open: Vec<openfatt_store::DueRow> = store.dues_of_document(self.doc.id).unwrap_or_default().into_iter().filter(|d| d.residual() > Decimal::ZERO).collect();
+        if open.is_empty() {
+            msgs.warn(if self.doc.kind.is_credit() { "La nota di credito è già compensata o rimborsata" } else { "Il documento è già saldato" }.to_string());
             return;
         }
+        if self.doc.kind.is_credit() && full {
+            self.pay_comp = Some(super::payments::CompForm::new(store, open[0].clone(), &[]));
+            return;
+        }
+        let dues: Vec<i64> = open.iter().map(|d| d.id).collect();
         let party = self.doc.party.display_name();
         let r = self.receivable();
         self.pay = Some(if full {
@@ -1841,6 +1857,11 @@ impl Editor {
     /// mostrate dal documento.
     fn payment_windows(&mut self, ctx: &egui::Context, cx: &mut Ctx) {
         let before = cx.store.generation();
+        if let Some(c) = &mut self.pay_comp {
+            if super::payments::comp_window(ctx, cx, c) {
+                self.pay_comp = None;
+            }
+        }
         if let Some(f) = &mut self.pay {
             let gen = cx.store.generation();
             let (accounts, _) = super::memo(ctx, "accounts", gen, (), || cx.store.accounts().unwrap_or_default());
@@ -1873,11 +1894,16 @@ impl Editor {
         theme::card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(theme::medium(if r { "Stato dell'incasso" } else { "Stato del pagamento" }).size(16.0));
+                let credit = self.doc.kind.is_credit();
+                ui.label(theme::medium(if credit { "Nota di credito: compensazione o rimborso" } else if r { "Stato dell'incasso" } else { "Stato del pagamento" }).size(16.0));
                 let amount: Decimal = self.doc.due_dates.iter().map(|d| d.amount).sum();
                 let paid: Decimal = self.doc.due_dates.iter().map(|d| d.paid).sum();
                 let left: Decimal = self.doc.due_dates.iter().map(|d| d.residual()).sum();
                 if self.doc.due_dates.is_empty() {
+                } else if credit && left <= Decimal::ZERO {
+                    theme::pill(ui, "Chiusa (compensata o rimborsata)", Tone::Positive);
+                } else if credit {
+                    theme::pill(ui, &format!("Da compensare € {}", eur(left)), Tone::Warning);
                 } else if left <= Decimal::ZERO {
                     theme::pill(ui, if r { "Incassata" } else { "Pagata" }, Tone::Positive);
                 } else if !paid.is_zero() {
@@ -1932,6 +1958,16 @@ impl Editor {
             if !self.can_pay {
                 ui.label(theme::muted("Per registrare incassi serve il permesso sulla Contabilità."));
             }
+            if self.doc.kind.is_credit() {
+                ui.horizontal(|ui| {
+                    if theme::primary_enabled(ui, open, icon::ARROWS_LEFT_RIGHT, "Compensa con le fatture...").on_hover_text("Scala la nota dalle fatture aperte dello stesso soggetto, senza movimenti di denaro").clicked() {
+                        self.open_payment(cx, true);
+                    }
+                    if theme::button_enabled(ui, open, icon::HAND_COINS, "Rimborsa...").on_hover_text("L'importo viene restituito (contanti, bonifico...)").clicked() {
+                        self.open_refund(cx);
+                    }
+                });
+            } else {
             ui.horizontal(|ui| {
                 if theme::primary_enabled(ui, open, icon::CHECK_CIRCLE, if r { "Segna come incassata" } else { "Segna come pagata" })
                     .on_hover_text("Registra il saldo di tutto quello che resta: si sceglie data, modalità (contanti, assegno, bonifico...) e riferimento")
@@ -1943,6 +1979,7 @@ impl Editor {
                     self.open_payment(cx, false);
                 }
             });
+            }
             // incassi già registrati
             if self.doc.due_dates.iter().any(|d| !d.paid.is_zero()) {
                 let doc_id = self.doc.id;

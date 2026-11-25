@@ -1,8 +1,8 @@
 # Avvia l'app su una schermata, cattura la finestra in PNG e chiude il processo.
 # Uso: tools\screenshot.ps1 -Archive <file.gadb> -Screen <nome> -Out <file.png> [-Click "x,y"]
 # -Click invia uno o più clic ("x,y;x,y") alla sola finestra dell'app (coordinate dell'area client in pixel fisici);
-# -Type precompila la ricerca generale (variabile OPENFATT_SEARCH).
-param([string]$Archive, [string]$Screen = "", [string]$Out, [int]$Wait = 4, [string]$Click = "", [string]$Type = "", [string]$Clicks = "")
+# -Type precompila la ricerca generale (variabile OPENFATT_SEARCH); -Hover "x,y;x,y" sposta solo il mouse.
+param([string]$Archive, [string]$Screen = "", [string]$Out, [int]$Wait = 4, [string]$Click = "", [string]$Type = "", [string]$Clicks = "", [string]$Hover = "")
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -35,7 +35,20 @@ try {
   [void][W32]::SetForegroundWindow($h)
   Start-Sleep -Seconds $Wait
   # con archivi grandi la prima finestra trovata può essere provvisoria: si rilegge
-  $p.Refresh(); if ($p.MainWindowHandle -ne [IntPtr]::Zero) { $h = $p.MainWindowHandle }
+  # (si scarta la finestrella di servizio di winit, 15x15, che a volte risulta la principale)
+  $p.Refresh()
+  if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+    $rr = New-Object W32+RECT
+    [void][W32]::GetWindowRect($p.MainWindowHandle, [ref]$rr)
+    if (($rr.R - $rr.L) -gt 200) { $h = $p.MainWindowHandle }
+  }
+  # -Hover "x,y": solo il passaggio del mouse (pixel dell'area client), senza clic
+  foreach ($pt in ($Hover.Split(";") | Where-Object { $_ -ne "" })) {
+    $xy = $pt.Split(","); $lp = [IntPtr](([int]$xy[1] -shl 16) -bor ([int]$xy[0] -band 0xFFFF))
+    [void][W32]::PostMessage($h, 0x200, [IntPtr]0, $lp)
+    Start-Sleep -Milliseconds 120
+  }
+  if ($Hover -ne "") { Start-Sleep -Milliseconds 600 }
   foreach ($pt in ($Click.Split(";") | Where-Object { $_ -ne "" })) {
     $xy = $pt.Split(","); $lp = [IntPtr](([int]$xy[1] -shl 16) -bor ([int]$xy[0] -band 0xFFFF))
     [void][W32]::PostMessage($h, 0x200, [IntPtr]0, $lp)

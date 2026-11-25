@@ -39,11 +39,42 @@ pub struct DueRow {
     pub draft: bool,
     /// Data dell'ultimo incasso/pagamento registrato.
     pub paid_date: Option<NaiveDate>,
+    /// Chiusa (in tutto o in parte) con una compensazione fra nota di credito e fatture.
+    pub compensated: bool,
 }
 
 impl DueRow {
     pub fn residual(&self) -> Decimal {
         self.amount - self.paid - self.writeoff
+    }
+
+    /// Scadenza di una nota di credito: riduce quanto il soggetto deve (o quanto gli si deve).
+    pub fn is_credit(&self) -> bool {
+        self.kind.is_credit()
+    }
+
+    /// Lato del soggetto: true = cliente (vendite e loro note di credito), false = fornitore.
+    pub fn customer_side(&self) -> bool {
+        self.receivable != self.is_credit()
+    }
+
+    /// Segno contabile rispetto al lato del soggetto: le note di credito valgono in negativo.
+    pub fn sign(&self) -> Decimal {
+        if self.is_credit() {
+            Decimal::NEGATIVE_ONE
+        } else {
+            Decimal::ONE
+        }
+    }
+
+    /// Importo con il segno (le note di credito in negativo).
+    pub fn signed_amount(&self) -> Decimal {
+        self.amount * self.sign()
+    }
+
+    /// Residuo con il segno: le note di credito aperte riducono il saldo del soggetto.
+    pub fn signed_residual(&self) -> Decimal {
+        self.residual() * self.sign()
     }
 }
 
@@ -111,13 +142,25 @@ impl PaymentRow {
 
 /// Modalità e riferimento in una riga di testo.
 pub fn method_text(mp_code: &str, reference: &str) -> String {
-    let m = if mp_code.is_empty() { "Modalità non indicata".to_string() } else { codes::describe(codes::MODALITA_PAGAMENTO, mp_code).to_string() };
+    let m = if mp_code.is_empty() {
+        "Modalità non indicata".to_string()
+    } else if mp_code == COMPENSATION {
+        "Compensazione".to_string()
+    } else {
+        codes::describe(codes::MODALITA_PAGAMENTO, mp_code).to_string()
+    };
     if reference.trim().is_empty() {
         m
     } else {
         format!("{} {}", m, reference.trim())
     }
 }
+
+/// Modalità delle compensazioni fra nota di credito e fatture (nessun movimento di denaro).
+pub const COMPENSATION: &str = "COMP";
+
+/// Conto di prima nota delle compensazioni: i due movimenti si annullano.
+pub const COMPENSATION_ACCOUNT: &str = "Compensazioni";
 
 /// Modalità proposte per incassi e pagamenti, nell'ordine in cui si usano più spesso.
 pub const COMMON_METHODS: [&str; 9] = ["MP01", "MP02", "MP03", "MP05", "MP08", "MP12", "MP19", "MP07", "MP23"];
@@ -148,8 +191,14 @@ pub fn distribute(total: Decimal, residuals: &[Decimal]) -> Vec<Decimal> {
 const DUE_SELECT: &str = "SELECT s.id, s.document_id, d.kind, d.number, d.series, d.date, d.party_name, s.date, s.amount, s.paid, s.mp_code, s.writeoff, d.party_id,
         (SELECT bi.batch_id FROM bank_batch_items bi JOIN bank_batches b ON b.id = bi.batch_id
           WHERE bi.due_id = s.id AND b.status <> 'ANNULLATA' AND bi.status = '' ORDER BY b.id DESC LIMIT 1),
-        d.status, s.paid_date
+        d.status, s.paid_date,
+        EXISTS (SELECT 1 FROM payment_allocations a JOIN payments p ON p.id = a.payment_id WHERE a.due_id = s.id AND p.mp_code = 'COMP')
  FROM due_dates s JOIN documents d ON d.id = s.document_id";
+
+/// "Nota di credito 3 del 10/01/2026" -> "Nota di credito 3".
+fn short_label(l: &str) -> &str {
+    l.split(" del ").next().unwrap_or(l)
+}
 
 fn doc_label(kind: DocKind, number: Option<i64>, series: &str, date: NaiveDate) -> String {
     format!(
@@ -200,6 +249,7 @@ impl Store {
                 receivable,
                 draft: r.get::<_, String>(14)? == "BOZZA",
                 paid_date: r.get::<_, Option<String>>(15)?.map(|d| date_from_sql(&d)),
+                compensated: r.get::<_, i64>(16)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -214,6 +264,96 @@ impl Store {
         let args: Vec<&dyn ToSql> = ids.iter().map(|i| i as &dyn ToSql).collect();
         let found = self.query_dues(&format!("WHERE s.id IN ({})", marks), &args)?;
         Ok(ids.iter().filter_map(|id| found.iter().find(|d| d.id == *id).cloned()).collect())
+    }
+
+    /// Compensa una nota di credito con scadenze aperte dello stesso soggetto (fatture di
+    /// vendita per una nota di credito a un cliente, fatture di acquisto per una nota di un
+    /// fornitore). Non si muove denaro: in prima nota due movimenti sul conto
+    /// "Compensazioni" che si annullano, uno per la fattura e uno per la nota (vale anche per
+    /// l'IVA per cassa). Si annulla come ogni registrazione. Restituisce il numero della
+    /// registrazione.
+    ///
+    /// `credit_due_ids`: scadenze delle note di credito (di solito tutte quelle aperte di una
+    /// nota); l'importo compensato le chiude nell'ordine dato.
+    pub fn compensate(&self, credit_due_ids: &[i64], date: NaiveDate, allocations: &[Allocation], notes: &str) -> Result<i64> {
+        let credits = self.dues_by_id(credit_due_ids)?;
+        if credits.is_empty() || credits.len() != credit_due_ids.len() {
+            return Err(StoreError::NotFound("scadenza della nota di credito".into()));
+        }
+        let credit = credits[0].clone();
+        for c in &credits {
+            if !c.is_credit() {
+                return Err(StoreError::Invalid(format!("{} non è una nota di credito", c.doc_label)));
+            }
+            if c.draft {
+                return Err(StoreError::Invalid(format!("{} è ancora in bozza", c.doc_label)));
+            }
+            if c.party_id != credit.party_id || c.receivable != credit.receivable || (c.party_id.is_none() && c.party_name != credit.party_name) {
+                return Err(StoreError::Invalid("Le note di credito devono essere dello stesso soggetto".into()));
+            }
+        }
+        let capacity: Decimal = credits.iter().map(|c| c.residual()).sum();
+        let allocs: Vec<&Allocation> = allocations.iter().filter(|a| a.amount > Decimal::ZERO).collect();
+        if allocs.is_empty() {
+            return Err(StoreError::Invalid("Indicare quanto compensare su almeno una fattura".into()));
+        }
+        let total: Decimal = allocs.iter().map(|a| a.amount).sum();
+        if total > capacity {
+            return Err(StoreError::Invalid(format!("La compensazione ({}) supera il residuo della nota di credito ({})", total, capacity)));
+        }
+        let dues = self.dues_by_id(&allocs.iter().map(|a| a.due_id).collect::<Vec<_>>())?;
+        if dues.len() != allocs.len() {
+            return Err(StoreError::NotFound("scadenza".into()));
+        }
+        for (a, d) in allocs.iter().zip(&dues) {
+            if d.is_credit() || d.receivable == credit.receivable || d.customer_side() != credit.customer_side() {
+                return Err(StoreError::Invalid(format!("{} non si può compensare con la nota di credito", d.doc_label)));
+            }
+            if d.draft {
+                return Err(StoreError::Invalid(format!("{} è ancora in bozza", d.doc_label)));
+            }
+            if d.party_id != credit.party_id || (d.party_id.is_none() && d.party_name != credit.party_name) {
+                return Err(StoreError::Invalid("Si compensa solo con documenti dello stesso cliente o fornitore".into()));
+            }
+            if a.amount > d.residual() {
+                return Err(StoreError::Invalid(format!("{}: l'importo {} supera il residuo ({})", d.doc_label, a.amount, d.residual())));
+            }
+        }
+        let receivable = !credit.receivable;
+        let tx = self.begin()?;
+        self.conn().execute(
+            "INSERT INTO payments(date, party_id, party_name, receivable, mp_code, account, reference, notes, amount) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![date_to_sql(date), credit.party_id, credit.party_name, receivable as i64, COMPENSATION, COMPENSATION_ACCOUNT, credit.doc_label, notes.trim(), dec_to_sql(total)],
+        )?;
+        let pid = self.conn().last_insert_rowid();
+        // segno in prima nota: come un incasso (o pagamento) per le fatture, al contrario per la nota
+        let sign = if receivable { Decimal::ONE } else { Decimal::NEGATIVE_ONE };
+        let category = if credit.customer_side() { "Compensazioni clienti" } else { "Compensazioni fornitori" };
+        let mut touched: Vec<(&DueRow, Decimal)> = allocs.iter().zip(&dues).map(|(a, d)| (d, a.amount)).collect();
+        // l'importo chiude le scadenze della nota nell'ordine dato
+        let shares = distribute(total, &credits.iter().map(|c| c.residual()).collect::<Vec<_>>());
+        touched.extend(credits.iter().zip(shares).filter(|(_, a)| *a > Decimal::ZERO));
+        for (d, amount) in touched {
+            let is_note = d.is_credit();
+            self.conn().execute("INSERT INTO payment_allocations(payment_id, due_id, amount, writeoff) VALUES (?1, ?2, ?3, '0')", params![pid, d.id, dec_to_sql(amount)])?;
+            self.add_cash_entry(&CashEntry {
+                id: 0,
+                date,
+                description: if is_note { format!("Compensazione {} - {}", d.doc_label, d.party_name) } else { format!("Compensazione {} con {} - {}", d.doc_label, short_label(&credit.doc_label), d.party_name) },
+                account: COMPENSATION_ACCOUNT.into(),
+                amount: if is_note { -amount * sign } else { amount * sign },
+                document_id: Some(d.document_id),
+                due_date_id: Some(d.id),
+                party_id: d.party_id,
+                category: category.into(),
+                payment_id: Some(pid),
+                ..Default::default()
+            })?;
+            self.conn().execute("UPDATE due_dates SET paid = ?1, paid_date = ?2 WHERE id = ?3", params![dec_to_sql(d.paid + amount), date_to_sql(date), d.id])?;
+        }
+        self.audit("payment", pid, "compensate", &format!("{} {} su {} scadenze", total, credit.doc_label, allocs.len()))?;
+        tx.commit()?;
+        Ok(pid)
     }
 
     /// Scadenze di un documento (pagate o no), in ordine di data.
@@ -278,6 +418,9 @@ impl Store {
         }
         let first = &dues[0];
         for d in &dues {
+            if d.is_credit() != first.is_credit() {
+                return Err(StoreError::Invalid("Le note di credito si compensano con le fatture (Compensa), non si pagano insieme a loro".into()));
+            }
             if d.draft {
                 return Err(StoreError::Invalid(format!("{} è ancora in bozza: emetterlo prima di registrare incassi", d.doc_label)));
             }
@@ -391,6 +534,12 @@ impl Store {
         };
         let tx = self.begin()?;
         for (alloc_id, pid, amount) in allocs {
+            let method: Option<String> = self.conn().query_row("SELECT mp_code FROM payments WHERE id = ?1", [pid], |r| r.get(0)).optional()?;
+            if method.as_deref() == Some(COMPENSATION) {
+                // una compensazione si annulla tutta: fatture e nota tornano aperte insieme
+                self.cancel_payment(pid)?;
+                continue;
+            }
             self.conn().execute("DELETE FROM payment_allocations WHERE id = ?1", [alloc_id])?;
             let left: i64 = self.conn().query_row("SELECT COUNT(*) FROM payment_allocations WHERE payment_id = ?1", [pid], |r| r.get(0))?;
             if left == 0 {
@@ -565,7 +714,7 @@ impl Store {
     /// Conti usati finora (per suggerimenti nell'interfaccia).
     pub fn accounts(&self) -> Result<Vec<String>> {
         let mut st = self.conn().prepare("SELECT DISTINCT account FROM cash_entries ORDER BY account")?;
-        let mut v: Vec<String> = st.query_map([], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+        let mut v: Vec<String> = st.query_map([], |r| r.get(0))?.filter_map(|r| r.ok()).filter(|a: &String| a != COMPENSATION_ACCOUNT).collect();
         for d in ["Cassa", "Banca"] {
             if !v.iter().any(|a| a == d) {
                 v.push(d.to_string());

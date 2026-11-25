@@ -58,6 +58,7 @@ pub struct State {
     until: Option<NaiveDate>,
     search: String,
     pay: Option<super::payments::PayForm>,
+    comp: Option<super::payments::CompForm>,
     history: Option<super::payments::History>,
     confirm_cancel: Option<i64>,
     rec_from: NaiveDate,
@@ -84,6 +85,7 @@ impl Default for State {
             until: None,
             search: String::new(),
             pay: None,
+            comp: None,
             history: None,
             confirm_cancel: None,
             rec_from: NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(),
@@ -209,6 +211,12 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             st.due_grid.selected.clear();
         }
     }
+    if let Some(c) = &mut st.comp {
+        if super::payments::comp_window(&ctx, cx, c) {
+            st.comp = None;
+            st.due_grid.selected.clear();
+        }
+    }
     if let Some(h) = &mut st.history {
         if super::payments::history_window(&ctx, cx, h) {
             st.history = None;
@@ -236,8 +244,8 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         let q = search.trim().to_lowercase();
         all.iter()
             .filter(|d| match st.due_filter {
-                DueFilter::Receivable => d.receivable,
-                DueFilter::Payable => !d.receivable,
+                DueFilter::Receivable => d.customer_side(),
+                DueFilter::Payable => !d.customer_side(),
                 DueFilter::All => true,
             })
             .filter(|d| q.is_empty() || d.party_name.to_lowercase().contains(&q) || d.doc_label.to_lowercase().contains(&q))
@@ -248,6 +256,7 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     enum DueAction {
         Open(i64),
         Pay(i64),
+        Compensate(i64),
         History(i64),
     }
     let action = std::cell::Cell::new(None);
@@ -257,7 +266,7 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Col::new("date", "Scadenza", 90.0, |d: &DueRow| Val::Date(Some(d.date))).render(move |ui: &mut egui::Ui, d: &DueRow| {
             ui.label(RichText::new(d.date.format("%d/%m/%Y").to_string()).color(color(d)));
         }),
-        Col::text("doc", "Documento", 240.0, |d: &DueRow| d.doc_label.clone()).render(move |ui: &mut egui::Ui, d: &DueRow| {
+        Col::text("doc", "Documento", 290.0, |d: &DueRow| d.doc_label.clone()).render(move |ui: &mut egui::Ui, d: &DueRow| {
             if ui.link(&d.doc_label).clicked() {
                 act.set(Some(DueAction::Open(d.document_id)));
             }
@@ -266,22 +275,29 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             }
         }),
         Col::text("party", "Soggetto", 240.0, |d: &DueRow| d.party_name.clone()).group().opens(|d: &DueRow| d.party_id.map(Ref::Party)),
-        Col::text("dir", "Tipo", 80.0, |d: &DueRow| if d.receivable { "Entrata".to_string() } else { "Uscita".to_string() }).hidden().group(),
+        Col::text("dir", "Tipo", 80.0, |d: &DueRow| if d.customer_side() { "Cliente".to_string() } else { "Fornitore".to_string() }).hidden().group(),
         Col::text("kind", "Documento di", 140.0, |d: &DueRow| d.kind.label().to_string()).hidden().group(),
         Col::text("mp", "Modalità", 140.0, |d: &DueRow| codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code).to_string()).group().render(|ui: &mut egui::Ui, d: &DueRow| {
+            if d.is_credit() {
+                // la modalità della nota non conta: si compensa o si rimborsa
+                theme::pill(ui, "nota di credito", Tone::Positive).on_hover_text("Riduce il saldo del soggetto: si compensa con le fatture o si rimborsa");
+                return;
+            }
             ui.label(codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code));
             if d.batch_id.is_some() {
                 theme::pill(ui, "in distinta", Tone::Neutral).on_hover_text("Presentata in banca con una distinta (Pagamenti > Distinte emesse)");
             }
         }),
-        Col::money("amount", "Importo", 95.0, |d: &DueRow| d.amount).total(),
-        Col::money("paid", "Pagato", 95.0, |d: &DueRow| d.paid).total(),
+        Col::money("amount", "Importo", 95.0, |d: &DueRow| d.signed_amount()).total(),
+        Col::money("paid", "Pagato", 95.0, |d: &DueRow| d.paid * d.sign()).total(),
         Col::new("paid_date", "Ultimo pagamento", 100.0, |d: &DueRow| Val::Date(d.paid_date)).hidden(),
-        Col::money("res", "Residuo", 110.0, |d: &DueRow| d.residual()).total().render(move |ui: &mut egui::Ui, d: &DueRow| {
+        Col::money("res", "Residuo", 110.0, |d: &DueRow| d.signed_residual()).total().render(move |ui: &mut egui::Ui, d: &DueRow| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
-                ui.label(RichText::new(eur(d.residual())).color(color(d)));
-                if !d.writeoff.is_zero() {
+                ui.label(RichText::new(eur(d.signed_residual())).color(if d.is_credit() && d.residual() > Decimal::ZERO { theme::POSITIVE } else { color(d) }));
+                if d.is_credit() && d.residual().is_zero() {
+                    theme::pill(ui, if d.compensated { "compensata" } else { "rimborsata" }, Tone::Positive);
+                } else if !d.writeoff.is_zero() {
                     ui.label(RichText::new(format!("(abbuono {})", eur(d.writeoff))).small().color(GRAY));
                 } else if !d.paid.is_zero() && d.residual() > Decimal::ZERO {
                     theme::pill(ui, "acconto", Tone::Warning).on_hover_text(format!("Pagati € {}{}", eur(d.paid), d.paid_date.map(|x| format!(", ultimo il {}", x.format("%d/%m/%Y"))).unwrap_or_default()));
@@ -289,11 +305,18 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             });
         }),
         Col::new("late", "Giorni di ritardo", 90.0, move |d: &DueRow| Val::Num(Decimal::from((today - d.date).num_days().max(0)), 0)).hidden().right(),
-        Col::text("act", "", 150.0, |_: &DueRow| String::new()).render(move |ui: &mut egui::Ui, d: &DueRow| {
-            if d.residual() > Decimal::ZERO && !d.draft && ui.small_button(format!("{} {}", icon::HAND_COINS, if d.receivable { "Incassa" } else { "Paga" })).clicked() {
+        Col::text("act", "", 205.0, |_: &DueRow| String::new()).render(move |ui: &mut egui::Ui, d: &DueRow| {
+            if d.residual() > Decimal::ZERO && !d.draft && d.is_credit() {
+                if ui.small_button(format!("{} Compensa", icon::ARROWS_LEFT_RIGHT)).on_hover_text("Scala la nota di credito dalle fatture aperte dello stesso soggetto").clicked() {
+                    act.set(Some(DueAction::Compensate(d.id)));
+                }
+                if ui.small_button(icon::HAND_COINS).on_hover_text(if d.receivable { "Rimborso: il fornitore restituisce l'importo" } else { "Rimborso: l'importo viene restituito al cliente" }).clicked() {
+                    act.set(Some(DueAction::Pay(d.id)));
+                }
+            } else if d.residual() > Decimal::ZERO && !d.draft && ui.small_button(format!("{} {}", icon::HAND_COINS, if d.receivable { "Incassa" } else { "Paga" })).clicked() {
                 act.set(Some(DueAction::Pay(d.id)));
             }
-            if (!d.paid.is_zero() || !d.writeoff.is_zero() || d.residual() > Decimal::ZERO) && ui.small_button(icon::CLOCK_COUNTER_CLOCKWISE).on_hover_text("Pagamenti registrati, annullamento, sposta il residuo").clicked() {
+            if (!d.paid.is_zero() || !d.writeoff.is_zero() || (d.residual() > Decimal::ZERO && !d.is_credit())) && ui.small_button(icon::CLOCK_COUNTER_CLOCKWISE).on_hover_text("Pagamenti registrati, annullamento, sposta il residuo").clicked() {
                 act.set(Some(DueAction::History(d.id)));
             }
         }),
@@ -302,13 +325,20 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     let ticked: Vec<&DueRow> = list.iter().filter(|d| st.due_grid.selected.contains(&d.id)).collect();
     ui.horizontal(|ui| {
         let visible: Vec<&DueRow> = list.iter().filter(|d| st.due_grid.accepts(&cols, d)).collect();
-        let overdue: Decimal = visible.iter().filter(|d| d.date < today).map(|d| d.residual()).sum();
-        let total: Decimal = visible.iter().map(|d| d.residual()).sum();
+        // le note di credito aperte riducono il residuo
+        let overdue: Decimal = visible.iter().filter(|d| d.date < today && !d.is_credit()).map(|d| d.residual()).sum();
+        let total: Decimal = visible.iter().map(|d| d.signed_residual()).sum();
+        let credits: Decimal = visible.iter().filter(|d| d.is_credit()).map(|d| d.residual()).sum();
         let verb = if receivable_view { "Registra incasso" } else { "Registra pagamento" };
         let payable: Vec<&&DueRow> = ticked.iter().filter(|d| d.residual() > Decimal::ZERO && !d.draft).collect();
         let label = if payable.is_empty() { verb.to_string() } else { format!("{} su {} spuntate", verb, payable.len()) };
         if theme::primary(ui, icon::HAND_COINS, &label).on_hover_text("Un incasso (anche un acconto) su una o più fatture dello stesso cliente: si sceglie modalità, conto e riferimento, e quanto resta da saldare").clicked() {
-            if payable.is_empty() {
+            let credit = payable.iter().find(|d| d.is_credit());
+            if let Some(c) = credit {
+                // nota di credito spuntata con delle fatture: si compensano
+                let others: Vec<i64> = payable.iter().filter(|d| !d.is_credit()).map(|d| d.id).collect();
+                st.comp = Some(super::payments::CompForm::new(cx.store, (**c).clone(), &others));
+            } else if payable.is_empty() {
                 st.pay = Some(super::payments::PayForm::empty(receivable_view));
             } else {
                 let first = payable[0];
@@ -323,6 +353,9 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         }
         ui.add_space(8.0);
         ui.label(RichText::new(format!("Residuo totale € {}   ·   di cui scaduto € {}", eur(total), eur(overdue))).strong());
+        if !credits.is_zero() {
+            ui.label(theme::muted(format!("· note di credito da compensare € {}", eur(credits))));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             st.due_grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Scadenzario");
         });
@@ -338,6 +371,11 @@ pub fn show_dues(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Some(DueAction::Pay(id)) => {
             if let Some(d) = list.iter().find(|d| d.id == id) {
                 st.pay = Some(super::payments::PayForm::for_party(cx.store, d.party_id, &d.party_name, d.receivable, &[d.id]));
+            }
+        }
+        Some(DueAction::Compensate(id)) => {
+            if let Some(d) = list.iter().find(|d| d.id == id) {
+                st.comp = Some(super::payments::CompForm::new(cx.store, d.clone(), &[]));
             }
         }
         Some(DueAction::History(id)) => {
@@ -382,7 +420,7 @@ fn receipts(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Col::new("date", "Data", 90.0, |p: &PaymentRow| Val::Date(Some(p.date))),
         Col::text("dir", "Tipo", 80.0, |p: &PaymentRow| if p.receivable { "Incasso".to_string() } else { "Pagamento".to_string() }).group(),
         Col::text("party", "Soggetto", 220.0, |p: &PaymentRow| p.party_name.clone()).group().opens(|p: &PaymentRow| p.party_id.map(Ref::Party)),
-        Col::text("mp", "Modalità", 120.0, |p: &PaymentRow| if p.mp_code.is_empty() { "Non indicata".to_string() } else { codes::describe(codes::MODALITA_PAGAMENTO, &p.mp_code).to_string() }).group(),
+        Col::text("mp", "Modalità", 120.0, |p: &PaymentRow| if p.mp_code.is_empty() { "Non indicata".to_string() } else if p.mp_code == openfatt_store::COMPENSATION { "Compensazione".to_string() } else { codes::describe(codes::MODALITA_PAGAMENTO, &p.mp_code).to_string() }).group(),
         Col::text("ref", "Riferimento", 150.0, |p: &PaymentRow| p.reference.clone()),
         Col::text("account", "Conto", 90.0, |p: &PaymentRow| p.account.clone()).group(),
         Col::text("docs", "Documenti", 300.0, super::payments::docs_text).render(move |ui: &mut egui::Ui, p: &PaymentRow| {
@@ -402,8 +440,9 @@ fn receipts(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     ];
     ui.horizontal(|ui| {
         let visible: Vec<&PaymentRow> = list.iter().filter(|p| st.rec_grid.accepts(&cols, p)).collect();
-        let ins: Decimal = visible.iter().filter(|p| p.receivable).map(|p| p.total).sum();
-        let outs: Decimal = visible.iter().filter(|p| !p.receivable).map(|p| p.total).sum();
+        let money = |p: &&&PaymentRow| p.mp_code != openfatt_store::COMPENSATION;
+        let ins: Decimal = visible.iter().filter(money).filter(|p| p.receivable).map(|p| p.total).sum();
+        let outs: Decimal = visible.iter().filter(money).filter(|p| !p.receivable).map(|p| p.total).sum();
         ui.label(RichText::new(format!("{} registrazioni · incassati € {} · pagati € {}", visible.len(), eur(ins), eur(outs))).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             st.rec_grid.toolbar(ui, cx.store, cx.msgs, &cols, &list, "Incassi e pagamenti");

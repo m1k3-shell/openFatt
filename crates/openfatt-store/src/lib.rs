@@ -56,7 +56,7 @@ pub use yearend::{YearCheck, YearClosure};
 pub use agents::{Agent, CommissionRow, Settlement};
 pub use einvoices::{EInvoice, EInvoiceEvent, EInvoiceStatus, Direction};
 pub use bank::{BankBatch, BankKind, BankSettings, BatchItem, BatchStatus};
-pub use ledger::{default_account, distribute, method_text, AccountBalance, Allocation, DueRow, NewPayment, PaymentLine, PaymentRow, COMMON_METHODS};
+pub use ledger::{default_account, distribute, method_text, AccountBalance, Allocation, DueRow, NewPayment, PaymentLine, PaymentRow, COMMON_METHODS, COMPENSATION, COMPENSATION_ACCOUNT};
 pub use mail::{MailKind, MailLogEntry, MailStatus, ReminderCandidate};
 pub use inventory::{ga_core_count::CountRow, CountImport, InventoryApplied, InventoryLine, InventorySession, InventoryStatus, InventoryTotals};
 pub use parties::PartyFilter;

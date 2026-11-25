@@ -34,6 +34,8 @@ pub struct PayForm {
     /// Importo ricevuto o pagato: modificandolo si ripartisce dalla scadenza più vecchia.
     pub received: Decimal,
     pub lines: Vec<PayLine>,
+    /// Finestra di compensazione (cambiano solo le intestazioni).
+    pub compensation: bool,
 }
 
 impl PayForm {
@@ -69,11 +71,15 @@ impl PayForm {
             notes: String::new(),
             received: Decimal::ZERO,
             lines: Vec::new(),
+            compensation: false,
         }
     }
 
     fn load_party(&mut self, store: &Store, party_id: Option<i64>, party_name: &str, preselect: &[i64]) {
-        let dues = store.open_dues_of_party(party_id, party_name, self.receivable).unwrap_or_default();
+        let mut dues = store.open_dues_of_party(party_id, party_name, self.receivable).unwrap_or_default();
+        // note di credito (rimborso) e fatture non si pagano insieme: si compensano
+        let credits = dues.iter().any(|d| preselect.contains(&d.id) && d.is_credit());
+        dues.retain(|d| d.is_credit() == credits);
         // modalità proposta: quella della prima scadenza scelta (contanti, bonifico...)
         if let Some(d) = dues.iter().find(|d| preselect.contains(&d.id)).or(dues.first()) {
             if !d.mp_code.is_empty() {
@@ -95,13 +101,14 @@ impl PayForm {
         self.received = self.total();
     }
 
+    pub fn open_total(&self) -> Decimal {
+        self.lines.iter().map(|l| l.due.residual()).sum()
+    }
+
     pub fn total(&self) -> Decimal {
         self.lines.iter().map(|l| l.amount).sum()
     }
 
-    fn open_total(&self) -> Decimal {
-        self.lines.iter().map(|l| l.due.residual()).sum()
-    }
 
     /// Ripartisce l'importo ricevuto dalla scadenza più vecchia.
     fn spread(&mut self) {
@@ -296,7 +303,7 @@ fn lines_table(ui: &mut egui::Ui, f: &mut PayForm) {
     let mut changed_left = None;
     egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
         egui::Grid::new("pay_lines").num_columns(7).striped(true).spacing([12.0, 6.0]).min_col_width(20.0).show(ui, |ui| {
-            for t in ["", "Documento", "Scadenza", "Residuo", if f.receivable { "Incassato ora" } else { "Pagato ora" }, "Resterà da saldare", "Abbuono"] {
+            for t in ["", "Documento", "Scadenza", "Residuo", if f.compensation { "Compensato ora" } else if f.receivable { "Incassato ora" } else { "Pagato ora" }, "Resterà da saldare", "Abbuono"] {
                 ui.label(RichText::new(t).size(12.0).color(theme::MUTED));
             }
             ui.end_row();
@@ -337,6 +344,113 @@ fn lines_table(ui: &mut egui::Ui, f: &mut PayForm) {
     if let Some(i) = changed_left {
         f.set_left(i);
     }
+}
+
+/// Compensazione di una nota di credito con le fatture aperte dello stesso soggetto.
+pub struct CompForm {
+    /// Prima rata aperta della nota (intestazione, soggetto).
+    pub credit: DueRow,
+    /// Tutte le rate aperte della nota: si compensano insieme.
+    pub credits: Vec<DueRow>,
+    /// Fatture da compensare (le quote si scrivono come in un incasso).
+    pub form: PayForm,
+}
+
+impl CompForm {
+    /// `preselect`: fatture da proporre per prime; l'importo della nota si ripartisce dalla
+    /// prima (poi dalle più vecchie).
+    pub fn new(store: &Store, credit: DueRow, preselect: &[i64]) -> Self {
+        let mut credits: Vec<DueRow> = store.dues_of_document(credit.document_id).unwrap_or_default().into_iter().filter(|d| d.residual() > Decimal::ZERO).collect();
+        if credits.is_empty() {
+            credits.push(credit.clone());
+        }
+        let mut form = PayForm::empty(!credit.receivable);
+        form.compensation = true;
+        form.load_party(store, credit.party_id, &credit.party_name, preselect);
+        form.lines.retain(|l| !l.due.is_credit() && l.due.customer_side() == credit.customer_side());
+        let limit: Decimal = credits.iter().map(|c| c.residual()).sum();
+        form.received = limit.min(form.open_total());
+        form.spread();
+        CompForm { credit, credits, form }
+    }
+
+    fn limit(&self) -> Decimal {
+        self.credits.iter().map(|c| c.residual()).sum()
+    }
+}
+
+/// Finestra della compensazione. Restituisce true quando va chiusa.
+pub fn comp_window(ctx: &egui::Context, cx: &mut Ctx, c: &mut CompForm) -> bool {
+    let mut close = false;
+    let limit = c.limit();
+    egui::Window::new(format!("{}  Compensa la nota di credito", icon::ARROWS_LEFT_RIGHT))
+        .id(egui::Id::new("comp_form"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_width(860.0);
+            ui.horizontal(|ui| {
+                ui.label(theme::medium(short_label(&c.credit.doc_label)));
+                ui.label(theme::muted(format!("· {}", c.credit.party_name)));
+                theme::pill(ui, &format!("da compensare € {}", eur(limit)), Tone::Warning);
+            });
+            ui.label(theme::muted(format!(
+                "La nota di credito riduce quanto {} deve: si scala dalle fatture aperte, senza movimenti di cassa o banca.",
+                if c.credit.customer_side() { "il cliente" } else { "si deve al fornitore" }
+            )));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Data");
+                widgets::date_field(ui, "comp_date", &mut c.form.date);
+                ui.add_space(16.0);
+                ui.label(theme::medium("Importo da compensare"));
+                if widgets::dec_field(ui, "comp_amount", &mut c.form.received, 120.0, 2) {
+                    c.form.received = c.form.received.clamp(Decimal::ZERO, limit);
+                    c.form.spread();
+                }
+                if theme::ghost(ui, true, icon::CHECKS, "Tutta la nota").clicked() {
+                    c.form.received = limit.min(c.form.open_total());
+                    c.form.spread();
+                }
+            });
+            ui.add_space(8.0);
+            if c.form.lines.is_empty() {
+                ui.label(theme::muted("Nessuna fattura aperta con cui compensare: si può registrare il rimborso."));
+            } else {
+                lines_table(ui, &mut c.form);
+            }
+            ui.add_space(8.0);
+            theme::rule(ui);
+            ui.add_space(6.0);
+            let total = c.form.total();
+            let over = total > limit;
+            ui.horizontal(|ui| {
+                ui.label(theme::bold(format!("€ {}", eur(total))).size(18.0).color(theme::tint().main));
+                ui.label(theme::muted(format!("compensati · restano sulla nota € {}", eur((limit - total).max(Decimal::ZERO)))));
+                if over {
+                    theme::pill(ui, &format!("supera la nota di € {}", eur(total - limit)), Tone::Negative);
+                }
+            });
+            ui.add_space(6.0);
+            ui.add(egui::TextEdit::singleline(&mut c.form.notes).desired_width(f32::INFINITY).hint_text("Note (facoltative)"));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if theme::primary_enabled(ui, total > Decimal::ZERO && !over, icon::CHECK, &format!("Compensa € {}", eur(total))).clicked() {
+                    let allocs: Vec<Allocation> = c.form.lines.iter().filter(|l| l.amount > Decimal::ZERO).map(|l| Allocation { due_id: l.due.id, amount: l.amount, writeoff: false }).collect();
+                    if cx.msgs.check(cx.store.compensate(&c.credits.iter().map(|d| d.id).collect::<Vec<_>>(), c.form.date, &allocs, &c.form.notes), &format!("Compensati € {} con {}", eur(total), short_label(&c.credit.doc_label))).is_some() {
+                        close = true;
+                    }
+                }
+                if theme::button(ui, icon::X, "Annulla").clicked() {
+                    close = true;
+                }
+            });
+        });
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        close = true;
+    }
+    close
 }
 
 /// Storico dei pagamenti di un documento, con annullamento e spostamento del residuo.

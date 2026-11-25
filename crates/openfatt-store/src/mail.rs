@@ -198,7 +198,14 @@ impl Store {
     /// cliente, con il livello del prossimo sollecito. I più in ritardo prima.
     pub fn reminder_candidates(&self, today: NaiveDate, grace_days: u32, min_days_between: u32) -> Result<Vec<ReminderCandidate>> {
         let limit = today - chrono::Duration::days(grace_days as i64);
-        let dues: Vec<DueRow> = self.due_list(true, None)?.into_iter().filter(|d| d.receivable && d.date < limit && d.residual() > Decimal::ZERO).collect();
+        let open = self.due_list(true, None)?;
+        // note di credito ai clienti ancora aperte: riducono lo scaduto (non si sollecita chi
+        // ha un credito pari o maggiore)
+        let mut credits: BTreeMap<(Option<i64>, String), Decimal> = BTreeMap::new();
+        for d in open.iter().filter(|d| d.customer_side() && d.is_credit()) {
+            *credits.entry((d.party_id, if d.party_id.is_some() { String::new() } else { d.party_name.clone() })).or_default() += d.residual();
+        }
+        let dues: Vec<DueRow> = open.into_iter().filter(|d| d.receivable && !d.is_credit() && d.date < limit && d.residual() > Decimal::ZERO).collect();
         let mut groups: BTreeMap<(Option<i64>, String), Vec<DueRow>> = BTreeMap::new();
         for d in dues {
             let key = (d.party_id, if d.party_id.is_some() { String::new() } else { d.party_name.clone() });
@@ -215,7 +222,12 @@ impl Store {
             }
         }
         let mut out = Vec::new();
-        for ((party_id, _), dues) in groups {
+        for (key, dues) in groups {
+            let party_id = key.0;
+            let overdue: Decimal = dues.iter().map(|d| d.residual()).sum::<Decimal>() - credits.get(&key).copied().unwrap_or_default();
+            if overdue <= Decimal::ZERO {
+                continue;
+            }
             let party = match party_id {
                 Some(id) => self.party(id)?,
                 None => None,
@@ -230,7 +242,7 @@ impl Store {
                 party_name: party.as_ref().map(|p| p.display_name()).unwrap_or_else(|| dues[0].party_name.clone()),
                 email: party.as_ref().map(|p| p.email.trim().to_string()).unwrap_or_default(),
                 pec: party.as_ref().map(|p| p.pec.trim().to_string()).unwrap_or_default(),
-                overdue_total: dues.iter().map(|d| d.residual()).sum(),
+                overdue_total: overdue,
                 oldest_due: oldest,
                 days_late: (today - oldest).num_days(),
                 last_reminder: last,

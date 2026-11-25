@@ -113,20 +113,21 @@ fn tool_button_open(ui: &mut Ui, sec: Section, ic: &str, text: &str, current: bo
     let label = if dropdown { format!("{} {}", text, icon::CARET_DOWN) } else { text.to_string() };
     let tw = ui.fonts(|f| f.layout_no_wrap(label.clone(), font.clone(), INK).size().x);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new((tw + 16.0).max(54.0), 56.0), Sense::click());
-    let h = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered() || open, theme::anim(0.14));
+    // passaggio del mouse: fondo acceso subito e spento subito, senza scie né icone che si
+    // muovono (scorrendo la barra l'effetto animato risultava fastidioso)
+    let hot = resp.hovered() || open;
     if current {
         ui.ctx().data_mut(|d| d.insert_temp(here_id(), (rect, sec)));
     }
     let p = ui.painter();
     let t = sec.tint();
-    if h > 0.0 && !current {
-        p.rect_filled(rect.shrink(1.0), 9, theme::mix(Color32::WHITE, t.tint, h));
+    if hot && !current {
+        p.rect_filled(rect.shrink(1.0), 9, t.tint);
     }
-    let lift = 2.5 * h;
-    p.text(egui::pos2(rect.center().x, rect.top() + 21.0 - lift), egui::Align2::CENTER_CENTER, ic, FontId::new(25.0, FontFamily::Proportional), t.main);
+    p.text(egui::pos2(rect.center().x, rect.top() + 21.0), egui::Align2::CENTER_CENTER, ic, FontId::new(25.0, FontFamily::Proportional), t.main);
     p.text(egui::pos2(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, label, font, if current || open { t.dark } else { INK });
     if badge > 0 {
-        let c = egui::pos2(rect.center().x + 15.0, rect.top() + 10.0 - lift);
+        let c = egui::pos2(rect.center().x + 15.0, rect.top() + 10.0);
         let t = badge.to_string();
         let w = (t.len() as f32 * 6.0 + 8.0).max(15.0);
         p.rect_filled(egui::Rect::from_center_size(c, Vec2::new(w, 15.0)), 8, NEGATIVE);

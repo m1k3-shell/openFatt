@@ -784,19 +784,20 @@ fn related_window(ctx: &egui::Context, cx: &mut Ctx, r: &mut Related) -> bool {
             let list_rc = r.dues.get(gen, &id, || cx.store.due_list_with_drafts(false, None).unwrap_or_default().into_iter().filter(|d| d.party_id == Some(id)).collect());
             let list: Vec<&DueRow> = list_rc.iter().collect();
             let today = chrono::Local::now().date_naive();
-            let overdue: rust_decimal::Decimal = list.iter().filter(|d| d.date < today).map(|d| d.residual()).sum();
-            let open: rust_decimal::Decimal = list.iter().map(|d| d.residual()).sum();
+            // le note di credito aperte riducono il saldo
+            let overdue: rust_decimal::Decimal = list.iter().filter(|d| d.date < today && !d.is_credit()).map(|d| d.residual()).sum();
+            let open: rust_decimal::Decimal = list.iter().map(|d| d.signed_residual()).sum();
             let pay = std::cell::Cell::new(None);
             let pay_ref = &pay;
             let cols: Vec<Col<&DueRow>> = vec![
                 Col::new("date", "Scadenza", 90.0, |d: &&DueRow| Val::Date(Some(d.date))),
                 Col::text("doc", "Documento", 300.0, |d: &&DueRow| d.doc_label.clone()),
                 Col::text("mp", "Modalità", 170.0, |d: &&DueRow| codes::describe(codes::MODALITA_PAGAMENTO, &d.mp_code).to_string()),
-                Col::money("amount", "Importo", 110.0, |d: &&DueRow| d.amount).total(),
-                Col::money("paid", "Pagato", 110.0, |d: &&DueRow| d.paid).total(),
-                Col::money("res", "Da saldare", 110.0, |d: &&DueRow| d.residual()).total(),
+                Col::money("amount", "Importo", 110.0, |d: &&DueRow| d.signed_amount()).total(),
+                Col::money("paid", "Pagato", 110.0, |d: &&DueRow| d.paid * d.sign()).total(),
+                Col::money("res", "Da saldare", 110.0, |d: &&DueRow| d.signed_residual()).total(),
                 Col::text("act", "", 110.0, |_: &&DueRow| String::new()).render(move |ui: &mut egui::Ui, d: &&DueRow| {
-                    if d.residual() > rust_decimal::Decimal::ZERO && !d.draft && ui.small_button(format!("{} {}", icon::HAND_COINS, if d.receivable { "Incassa" } else { "Paga" })).on_hover_text("Apre il documento sulla sezione Pagamento: saldo o acconto").clicked() {
+                    if d.residual() > rust_decimal::Decimal::ZERO && !d.draft && ui.small_button(if d.is_credit() { format!("{} Compensa", icon::ARROWS_LEFT_RIGHT) } else { format!("{} {}", icon::HAND_COINS, if d.receivable { "Incassa" } else { "Paga" }) }).on_hover_text(if d.is_credit() { "Apre la nota di credito per compensarla con le fatture" } else { "Apre il documento sulla sezione Pagamento: saldo o acconto" }).clicked() {
                         pay_ref.set(Some(d.document_id));
                     }
                 }),

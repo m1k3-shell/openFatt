@@ -877,3 +877,133 @@ fn pagamenti_registrati_prima_dell_aggiornamento_diventano_registrazioni() {
     drop(s);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn nota_di_credito_negativa_e_compensata_con_la_fattura() {
+    let (s, c, _p, v) = setup();
+    let docs = three_invoices(&s, &c, &v);
+    let mut nc = Document::new(DocKind::CreditNote);
+    nc.date = d(2026, 1, 20);
+    nc.party_id = Some(c.id);
+    nc.lines.push(DocLine { description: "Reso".into(), qty: dec!(1), unit_price: dec!(50), vat: v.clone(), ..Default::default() });
+    let nc = s.save_document(&nc).unwrap();
+    let nc = s.issue_document(nc.id).unwrap();
+    let credit = s.dues_of_document(nc.id).unwrap().remove(0);
+    assert!(credit.is_credit() && credit.customer_side());
+    assert_eq!(credit.signed_residual(), dec!(-61));
+    // saldo del cliente: 3 x 122 meno la nota di credito
+    let all = s.due_list(true, None).unwrap();
+    assert_eq!(all.iter().filter(|d| d.customer_side()).map(|d| d.signed_residual()).sum::<Decimal>(), dec!(305));
+    // la nota non si paga insieme alle fatture
+    let inv_due = s.dues_of_document(docs[0].id).unwrap().remove(0);
+    let mixed = NewPayment { date: d(2026, 2, 1), mp_code: "MP05".into(), account: "Banca".into(), reference: String::new(), notes: String::new(), allocations: vec![alloc(inv_due.id, dec!(10), false), alloc(credit.id, dec!(10), false)] };
+    assert!(s.register_payment(&mixed).is_err());
+    // compensazione oltre il residuo della nota: rifiutata
+    assert!(s.compensate(&[credit.id], d(2026, 2, 1), &[alloc(inv_due.id, dec!(62), false)], "").is_err());
+    // un'altra nota di credito non si compensa con la nota
+    assert!(s.compensate(&[credit.id], d(2026, 2, 1), &[alloc(credit.id, dec!(1), false)], "").is_err());
+    let pid = s.compensate(&[credit.id], d(2026, 2, 1), &[alloc(inv_due.id, dec!(61), false)], "").unwrap();
+    let after = s.dues_by_id(&[inv_due.id, credit.id]).unwrap();
+    assert_eq!(after[0].residual(), dec!(61));
+    assert!(after[1].residual().is_zero());
+    assert!(after[1].compensated && after[0].compensated);
+    // prima nota: due movimenti sul conto Compensazioni che si annullano
+    let cash = s.cash_entries(None, None, Some(COMPENSATION_ACCOUNT)).unwrap();
+    assert_eq!(cash.len(), 2);
+    assert_eq!(cash.iter().map(|e| e.amount).sum::<Decimal>(), dec!(0));
+    assert_eq!(cash.iter().find(|e| e.document_id == Some(docs[0].id)).unwrap().amount, dec!(61));
+    let p = s.payments_of_document(nc.id).unwrap();
+    assert_eq!(p[0].method_text(), "Compensazione Nota di credito 4 del 20/01/2026");
+    // annullando la compensazione tutto torna aperto
+    s.cancel_payment(pid).unwrap();
+    let back = s.dues_by_id(&[inv_due.id, credit.id]).unwrap();
+    assert_eq!(back[0].residual(), dec!(122));
+    assert_eq!(back[1].residual(), dec!(61));
+    assert!(!back[1].compensated);
+    assert!(s.cash_entries(None, None, Some(COMPENSATION_ACCOUNT)).unwrap().is_empty());
+}
+
+fn issued_doc(s: &Store, kind: DocKind, party: &Party, date: NaiveDate, amount: Decimal, v: &VatRef, ext: &str) -> Document {
+    let mut doc = Document::new(kind);
+    doc.date = date;
+    doc.party_id = Some(party.id);
+    doc.external_number = ext.into();
+    doc.lines.push(DocLine { description: "Voce".into(), qty: dec!(1), unit_price: amount, vat: v.clone(), ..Default::default() });
+    let doc = s.save_document(&doc).unwrap();
+    s.issue_document(doc.id).unwrap()
+}
+
+#[test]
+fn lato_del_soggetto_come_prima_per_ogni_tipo() {
+    let (s, c, _p, v) = setup();
+    for kind in [DocKind::Invoice, DocKind::CreditNote, DocKind::PurchaseInvoice, DocKind::PurchaseCreditNote, DocKind::DownPaymentInvoice] {
+        let doc = issued_doc(&s, kind, &c, d(2026, 2, 1), dec!(10), &v, if kind.is_purchase() { "X-1" } else { "" });
+        for due in s.dues_of_document(doc.id).unwrap() {
+            assert_eq!(due.customer_side(), !kind.is_purchase(), "{:?}", kind);
+            assert_eq!(due.customer_side(), due.receivable != due.is_credit(), "{:?}", kind);
+        }
+    }
+}
+
+#[test]
+fn compensazione_con_il_fornitore_e_annullamento_da_distinta() {
+    let (s, c, _p, v) = setup();
+    // fornitore: fattura di acquisto 122 e sua nota di credito 24,40
+    let pi = issued_doc(&s, DocKind::PurchaseInvoice, &c, d(2026, 2, 1), dec!(100), &v, "F-10");
+    let pnc = issued_doc(&s, DocKind::PurchaseCreditNote, &c, d(2026, 2, 5), dec!(20), &v, "NC-3");
+    let inv_due = s.dues_of_document(pi.id).unwrap().remove(0);
+    let credit = s.dues_of_document(pnc.id).unwrap().remove(0);
+    assert!(!credit.customer_side() && credit.is_credit());
+    assert_eq!(credit.signed_residual(), dec!(-24.4));
+    let pid = s.compensate(&[credit.id], d(2026, 2, 10), &[alloc(inv_due.id, dec!(24.4), false)], "").unwrap();
+    // il debito verso il fornitore scende; in prima nota uscita e entrata che si annullano
+    assert_eq!(s.dues_by_id(&[inv_due.id]).unwrap()[0].residual(), dec!(97.6));
+    let cash = s.cash_entries(None, None, Some(COMPENSATION_ACCOUNT)).unwrap();
+    assert_eq!(cash.iter().find(|e| e.document_id == Some(pi.id)).unwrap().amount, dec!(-24.4));
+    assert_eq!(cash.iter().map(|e| e.amount).sum::<Decimal>(), dec!(0));
+    // il conto delle compensazioni non si propone per i pagamenti
+    assert!(!s.accounts().unwrap().iter().any(|a| a == COMPENSATION_ACCOUNT));
+    assert_eq!(s.payments(None, None).unwrap()[0].id, pid);
+    // annullare i pagamenti della fattura (es. distinta insoluta) annulla tutta la compensazione
+    s.unpay_due(inv_due.id).unwrap();
+    let back = s.dues_by_id(&[inv_due.id, credit.id]).unwrap();
+    assert_eq!(back[0].residual(), dec!(122));
+    assert_eq!(back[1].residual(), dec!(24.4));
+    assert!(s.payments(None, None).unwrap().is_empty());
+    assert!(s.cash_entries(None, None, Some(COMPENSATION_ACCOUNT)).unwrap().is_empty());
+}
+
+#[test]
+fn solleciti_al_netto_delle_note_di_credito() {
+    let (s, c, _p, v) = setup();
+    issued_doc(&s, DocKind::Invoice, &c, d(2026, 1, 10), dec!(100), &v, "");
+    let today = d(2026, 6, 1);
+    assert_eq!(s.reminder_candidates(today, 5, 7).unwrap()[0].overdue_total, dec!(122));
+    // nota di credito di 50 + IVA: lo scaduto da sollecitare scende
+    issued_doc(&s, DocKind::CreditNote, &c, d(2026, 1, 20), dec!(50), &v, "");
+    assert_eq!(s.reminder_candidates(today, 5, 7).unwrap()[0].overdue_total, dec!(61));
+    // credito pari al debito: nessun sollecito
+    issued_doc(&s, DocKind::CreditNote, &c, d(2026, 1, 21), dec!(50), &v, "");
+    assert!(s.reminder_candidates(today, 5, 7).unwrap().is_empty());
+}
+
+#[test]
+fn nota_di_credito_a_rate_compensata_per_intero() {
+    let (s, c, _p, v) = setup();
+    let pay = s.payment_methods().unwrap().into_iter().find(|p| p.name.starts_with("RiBa")).unwrap();
+    let inv = issued_doc(&s, DocKind::Invoice, &c, d(2026, 1, 10), dec!(1000), &v, "");
+    let mut nc = Document::new(DocKind::CreditNote);
+    nc.date = d(2026, 1, 15);
+    nc.party_id = Some(c.id);
+    nc.payment_id = Some(pay.id);
+    nc.lines.push(DocLine { description: "Storno".into(), qty: dec!(1), unit_price: dec!(100), vat: v.clone(), ..Default::default() });
+    let nc = s.save_document(&nc).unwrap();
+    let nc = s.issue_document(nc.id).unwrap();
+    let credits: Vec<i64> = s.dues_of_document(nc.id).unwrap().iter().map(|d| d.id).collect();
+    assert_eq!(credits.len(), 2);
+    let inv_due = s.dues_of_document(inv.id).unwrap()[0].id;
+    s.compensate(&credits, d(2026, 2, 1), &[alloc(inv_due, dec!(122), false)], "").unwrap();
+    assert!(s.dues_of_document(nc.id).unwrap().iter().all(|d| d.residual().is_zero() && d.compensated));
+    assert_eq!(s.dues_by_id(&[inv_due]).unwrap()[0].residual(), dec!(1098));
+    assert_eq!(s.cash_entries(None, None, Some(COMPENSATION_ACCOUNT)).unwrap().iter().map(|e| e.amount).sum::<Decimal>(), dec!(0));
+}
