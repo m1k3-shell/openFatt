@@ -303,6 +303,32 @@ impl Store {
         Ok(())
     }
 
+    /// Preferenze personali dell'utente collegato (aspetto dell'interfaccia, scrivania,
+    /// post-it): ogni utente ha le sue; senza utenti valgono per tutto l'archivio.
+    pub fn user_pref<T: DeserializeOwned + Default>(&self, name: &str) -> Result<T> {
+        self.get_setting(&self.pref_key(name))
+    }
+
+    /// Salva una preferenza personale. Non entra nel registro delle modifiche: è
+    /// l'aspetto del programma, non un dato dell'azienda.
+    pub fn set_user_pref<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
+        let s = serde_json::to_string(value)?;
+        self.conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![self.pref_key(name), s],
+        )?;
+        Ok(())
+    }
+
+    fn pref_key(&self, name: &str) -> String {
+        let u = self.current_user();
+        if u.is_empty() {
+            format!("pref:{}", name)
+        } else {
+            format!("pref:{}:{}", name, u.to_lowercase())
+        }
+    }
+
     pub fn company(&self) -> Result<model::Company> {
         self.get_setting("company")
     }

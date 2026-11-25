@@ -1,6 +1,7 @@
 //! Schermate e componenti dell'interfaccia.
 
 pub mod agenda;
+pub mod appearance;
 pub mod agents;
 pub mod backup;
 pub mod bank;
@@ -272,6 +273,8 @@ pub enum Nav {
     Motion(bool),
     /// Elenco dei DDT con la finestra della fatturazione differita aperta.
     DeferredInvoicing,
+    /// Finestra "Aspetto dell'interfaccia" (colori, barra delle sezioni, finestre).
+    Appearance,
 }
 
 pub struct Ctx<'a> {

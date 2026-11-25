@@ -70,6 +70,7 @@ pub struct OpenFattApp {
     msgs: Msgs,
     nav: Vec<Nav>,
     home: ui::home::State,
+    appearance: ui::appearance::State,
     parties: ui::parties::State,
     products: ui::products::State,
     pricelists: ui::pricelists::State,
@@ -122,6 +123,7 @@ impl OpenFattApp {
             msgs: Msgs::default(),
             nav: Vec::new(),
             home: Default::default(),
+            appearance: Default::default(),
             parties: Default::default(),
             products: Default::default(),
             pricelists: Default::default(),
@@ -283,6 +285,14 @@ impl OpenFattApp {
                         Some(Screen::Settings)
                     }
                     "strumenti" => Some(Screen::Tools),
+                    "aspetto" => {
+                        app.appearance.open = true;
+                        Some(Screen::Home)
+                    }
+                    "home-demo" | "home-personalizza" => {
+                        app.home = ui::home::State::demo(s == "home-personalizza");
+                        Some(Screen::Home)
+                    }
                     _ => None,
                 };
                 if let Some(sc) = screen {
@@ -400,6 +410,11 @@ impl OpenFattApp {
 
     /// Chiude l'archivio aperto: copia di sicurezza del giorno e fine della sessione.
     fn close_store(&mut self) {
+        // scrivania e aspetto modificati negli ultimi istanti
+        if let Some(s) = self.store.as_ref().filter(|_| !self.needs_login) {
+            self.home.flush(s);
+            self.appearance.flush(Some(s));
+        }
         if let Some(s) = self.store.take() {
             let _ = s.end_session();
             if let Some(p) = config::auto_backup(&s, 15) {
@@ -669,6 +684,7 @@ impl OpenFattApp {
                     self.docs.deferred = Some(ui::deferred::Window::new(None));
                     self.nav.push(Nav::Go(Screen::Documents(ui::DocGroup::DeliveryNotes)));
                 }
+                Nav::Appearance => self.appearance.open = true,
                 Nav::Motion(on) => {
                     self.cfg.still = !on;
                     self.cfg.save();
@@ -839,6 +855,7 @@ impl eframe::App for OpenFattApp {
         if self.scripted.pending() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+        restore_window(ctx);
         self.closing_flow(ctx);
         self.updates.poll();
         if self.store.is_some() && !self.needs_login {
@@ -886,6 +903,8 @@ impl eframe::App for OpenFattApp {
                 return;
             }
         }
+        // colori e barra scelti dall'utente collegato
+        self.appearance.sync(ctx, self.store.as_ref().filter(|_| !self.needs_login));
         if self.store.is_none() {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::GROUND).inner_margin(24)).show(ctx, |ui| self.welcome(ui));
         } else {
@@ -894,8 +913,9 @@ impl eframe::App for OpenFattApp {
             let editor = self.editor.as_ref().map(|e| (format!("{} {}", e.doc.kind.label(), e.doc.number_label()), e.dirty, e.doc.kind));
             // colori della sezione corrente (barra del titolo, pulsanti, selezioni)
             theme::set_section(ctx, ui::shell::section_of(self.screen, self.editor.as_ref().map(|e| e.doc.kind)));
+            let dock = self.appearance.prefs.visible_dock();
             egui::TopBottomPanel::top("toolbar").exact_height(62.0).frame(egui::Frame::new().fill(theme::SURFACE).inner_margin(egui::Margin::symmetric(6, 0))).show(ctx, |ui| {
-                ui::shell::tool_bar(ui, store, &self.cfg.recent, &mut self.search, self.pec_busy.is_some(), self.screen, editor, &self.badges, &mut self.nav);
+                ui::shell::tool_bar(ui, store, &self.cfg.recent, &mut self.search, self.pec_busy.is_some(), self.screen, editor, &self.badges, &dock, &mut self.nav);
             });
             let can_update = self.user.as_ref().is_none_or(|u| u.can_write(openfatt_store::Area::Settings));
             match self.updates.banner(ctx, can_update) {
@@ -971,6 +991,7 @@ impl eframe::App for OpenFattApp {
                 let can_view = self.user.as_ref().is_none_or(|u| u.can_read(openfatt_store::Area::Registry));
                 let can_edit_stock = self.user.as_ref().is_none_or(|u| u.can_write(openfatt_store::Area::Stock));
                 self.cards.show(ui.ctx(), &mut cx, can_view, can_edit_stock);
+                ui::appearance::window(ui.ctx(), &mut cx, &mut self.appearance);
                 });
             });
         }
@@ -1041,5 +1062,24 @@ impl eframe::App for OpenFattApp {
             };
             self.nav.push(Nav::NewDocument(kind));
         }
+    }
+}
+
+/// Alla prima occasione controlla la finestra: se il programma era stato chiuso mentre era
+/// ridotta a icona, la posizione salvata è fuori schermo (-32000) e la misura quasi nulla, e
+/// la finestra si riaprirebbe minuscola. In quel caso torna alla misura normale.
+fn restore_window(ctx: &egui::Context) {
+    let id = egui::Id::new("finestra_controllata");
+    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+        return;
+    }
+    let vp = ctx.input(|i| i.viewport().clone());
+    let Some(inner) = vp.inner_rect else { return };
+    ctx.data_mut(|d| d.insert_temp(id, true));
+    let off = vp.outer_rect.map(|r| r.min.x < -10000.0 || r.min.y < -10000.0).unwrap_or(false);
+    if inner.width() < 600.0 || inner.height() < 400.0 || off {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1360.0, 860.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(60.0, 40.0)));
     }
 }

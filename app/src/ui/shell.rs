@@ -225,7 +225,7 @@ pub fn section_of(s: Screen, editing: Option<DocKind>) -> Section {
 
 /// Unica barra in alto: le sezioni del programma come pulsanti con icona, sempre visibili.
 #[allow(clippy::too_many_arguments)]
-pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Search, pec_busy: bool, screen: Screen, editor: Option<(String, bool, DocKind)>, b: &Badges, nav: &mut Vec<Nav>) {
+pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Search, pec_busy: bool, screen: Screen, editor: Option<(String, bool, DocKind)>, b: &Badges, dock: &[&'static str], nav: &mut Vec<Nav>) {
     // il documento aperto non accende nessun pulsante della barra
     let cur = if screen == Screen::Editor { None } else { Some(section_of(screen, None)) };
     let is = |s: Section| cur == Some(s);
@@ -287,173 +287,212 @@ pub fn tool_bar(ui: &mut Ui, store: &Store, recent: &[PathBuf], search: &mut Sea
         ui.spacing_mut().item_spacing.x = 2.0;
         let back = ui.painter().add(egui::Shape::Noop);
         let marker = ui.painter().add(egui::Shape::Noop);
-        if tool_button(ui, Section::Start, icon::HOUSE, "Start", is(Section::Start), 0, false).clicked() {
-            nav.push(Nav::Go(Screen::Home));
-        }
-        if tool_button(ui, Section::Counter, icon::CASH_REGISTER, "Banco", is(Section::Counter), 0, false).on_hover_text("Vendita al banco (F9)").clicked() {
-            nav.push(Nav::Go(Screen::Counter));
-        }
-        if tool_button(ui, Section::Customers, icon::USERS, "Clienti", is(Section::Customers), 0, false).clicked() {
-            nav.push(Nav::Go(Screen::Parties(PartyRole::Customer)));
-        }
-        if tool_button(ui, Section::Suppliers, icon::TRUCK, "Fornitori", is(Section::Suppliers), 0, false).clicked() {
-            nav.push(Nav::Go(Screen::Parties(PartyRole::Supplier)));
-        }
-        if tool_button(ui, Section::Products, icon::PACKAGE, "Prodotti", is(Section::Products), 0, false).clicked() {
-            nav.push(Nav::Go(Screen::Products));
-        }
-        tool_menu(ui, Section::Sales, icon::FILES, "Documenti", is(Section::Sales) || is(Section::Purchases), 0, |ui| {
-            for g in DocGroup::SALES.iter().filter(|g| **g != DocGroup::SelfInvoices) {
-                if menu_item(ui, icon::FILE_TEXT, g.label(), "") {
-                    nav.push(Nav::Go(Screen::Documents(*g)));
+        // pulsanti nell'ordine scelto dall'utente (finestra Aspetto)
+        let mut drawn = 0;
+        for code in dock {
+            match *code {
+                "start" => {
+                if tool_button(ui, Section::Start, icon::HOUSE, "Start", is(Section::Start), 0, false).clicked() {
+                    nav.push(Nav::Go(Screen::Home));
                 }
-            }
-            menu_sep(ui);
-            theme::with_section(Section::Purchases, || {
-                for g in DocGroup::PURCHASES {
-                    if menu_item(ui, icon::SHOPPING_CART, g.label(), "") {
-                        nav.push(Nav::Go(Screen::Documents(g)));
+                }
+                "banco" => {
+                if tool_button(ui, Section::Counter, icon::CASH_REGISTER, "Banco", is(Section::Counter), 0, false).on_hover_text("Vendita al banco (F9)").clicked() {
+                    nav.push(Nav::Go(Screen::Counter));
+                }
+                }
+                "clienti" => {
+                if tool_button(ui, Section::Customers, icon::USERS, "Clienti", is(Section::Customers), 0, false).clicked() {
+                    nav.push(Nav::Go(Screen::Parties(PartyRole::Customer)));
+                }
+                }
+                "fornitori" => {
+                if tool_button(ui, Section::Suppliers, icon::TRUCK, "Fornitori", is(Section::Suppliers), 0, false).clicked() {
+                    nav.push(Nav::Go(Screen::Parties(PartyRole::Supplier)));
+                }
+                }
+                "prodotti" => {
+                if tool_button(ui, Section::Products, icon::PACKAGE, "Prodotti", is(Section::Products), 0, false).clicked() {
+                    nav.push(Nav::Go(Screen::Products));
+                }
+                }
+                "documenti" => {
+                tool_menu(ui, Section::Sales, icon::FILES, "Documenti", is(Section::Sales) || is(Section::Purchases), 0, |ui| {
+                    for g in DocGroup::SALES.iter().filter(|g| **g != DocGroup::SelfInvoices) {
+                        if menu_item(ui, icon::FILE_TEXT, g.label(), "") {
+                            nav.push(Nav::Go(Screen::Documents(*g)));
+                        }
                     }
+                    menu_sep(ui);
+                    theme::with_section(Section::Purchases, || {
+                        for g in DocGroup::PURCHASES {
+                            if menu_item(ui, icon::SHOPPING_CART, g.label(), "") {
+                                nav.push(Nav::Go(Screen::Documents(g)));
+                            }
+                        }
+                    });
+                    menu_sep(ui);
+                    if menu_item(ui, icon::CALENDAR_CHECK, "Fatturazione differita DDT...", "") {
+                        nav.push(Nav::DeferredInvoicing);
+                    }
+                    let n = if b.recurring_due > 0 { b.recurring_due.to_string() } else { String::new() };
+                    if menu_item(ui, icon::REPEAT, "Documenti ricorrenti", &n) {
+                        nav.push(Nav::Go(Screen::Extra(Extra::Recurring)));
+                    }
+                });
                 }
-            });
-            menu_sep(ui);
-            if menu_item(ui, icon::CALENDAR_CHECK, "Fatturazione differita DDT...", "") {
-                nav.push(Nav::DeferredInvoicing);
-            }
-            let n = if b.recurring_due > 0 { b.recurring_due.to_string() } else { String::new() };
-            if menu_item(ui, icon::REPEAT, "Documenti ricorrenti", &n) {
-                nav.push(Nav::Go(Screen::Extra(Extra::Recurring)));
-            }
-        });
-        tool_menu(ui, Section::EInvoice, icon::PAPER_PLANE_TILT, "Fatture elettr.", is(Section::EInvoice), b.rejected, |ui| {
-            if menu_item(ui, icon::PAPER_PLANE_TILT, "Fatture inviate", &if b.to_send > 0 { format!("{} da inviare", b.to_send) } else { String::new() }) {
-                nav.push(Nav::Go(Screen::EInvoicesOut));
-            }
-            if menu_item(ui, icon::TRAY_ARROW_DOWN, "Fatture ricevute", &if b.received > 0 { format!("{} da registrare", b.received) } else { String::new() }) {
-                nav.push(Nav::Go(Screen::EInvoicesIn));
-            }
-            if menu_item(ui, icon::ARROWS_COUNTER_CLOCKWISE, "Autofatture e integrazioni", "") {
-                nav.push(Nav::Go(Screen::Documents(DocGroup::SelfInvoices)));
-            }
-            menu_sep(ui);
-            if menu_item(ui, icon::ENVELOPE_SIMPLE, if pec_busy { "Ricezione in corso..." } else { "Ricevi dalla PEC" }, "F5") {
-                nav.push(Nav::PecFetch);
-            }
-            if menu_item(ui, icon::ARCHIVE, "Conservazione e ordini NSO", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Conservation)));
-            }
-        });
-        tool_menu(ui, Section::Payments, icon::CURRENCY_CIRCLE_DOLLAR, "Pagamenti", is(Section::Payments), 0, |ui| {
-            if menu_item(ui, icon::HAND_COINS, "Registra incasso o acconto...", "") {
-                nav.push(Nav::Payments(PayView::Register));
-            }
-            if menu_item(ui, icon::RECEIPT, "Incassi registrati", "") {
-                nav.push(Nav::Payments(PayView::Receipts));
-            }
-            menu_sep(ui);
-            for (ic, t, v) in [(icon::ARROWS_DOWN_UP, "Tutti", PayView::All), (icon::ARROW_UP, "Entrate", PayView::In), (icon::ARROW_DOWN, "Uscite", PayView::Out)] {
-                if menu_item(ui, ic, t, "") {
-                    nav.push(Nav::Payments(v));
+                "fatture_elettroniche" => {
+                tool_menu(ui, Section::EInvoice, icon::PAPER_PLANE_TILT, "Fatture elettr.", is(Section::EInvoice), b.rejected, |ui| {
+                    if menu_item(ui, icon::PAPER_PLANE_TILT, "Fatture inviate", &if b.to_send > 0 { format!("{} da inviare", b.to_send) } else { String::new() }) {
+                        nav.push(Nav::Go(Screen::EInvoicesOut));
+                    }
+                    if menu_item(ui, icon::TRAY_ARROW_DOWN, "Fatture ricevute", &if b.received > 0 { format!("{} da registrare", b.received) } else { String::new() }) {
+                        nav.push(Nav::Go(Screen::EInvoicesIn));
+                    }
+                    if menu_item(ui, icon::ARROWS_COUNTER_CLOCKWISE, "Autofatture e integrazioni", "") {
+                        nav.push(Nav::Go(Screen::Documents(DocGroup::SelfInvoices)));
+                    }
+                    menu_sep(ui);
+                    if menu_item(ui, icon::ENVELOPE_SIMPLE, if pec_busy { "Ricezione in corso..." } else { "Ricevi dalla PEC" }, "F5") {
+                        nav.push(Nav::PecFetch);
+                    }
+                    if menu_item(ui, icon::ARCHIVE, "Conservazione e ordini NSO", "") {
+                        nav.push(Nav::Go(Screen::Extra(Extra::Conservation)));
+                    }
+                });
                 }
+                "pagamenti" => {
+                tool_menu(ui, Section::Payments, icon::CURRENCY_CIRCLE_DOLLAR, "Pagamenti", is(Section::Payments), 0, |ui| {
+                    if menu_item(ui, icon::HAND_COINS, "Registra incasso o acconto...", "") {
+                        nav.push(Nav::Payments(PayView::Register));
+                    }
+                    if menu_item(ui, icon::RECEIPT, "Incassi registrati", "") {
+                        nav.push(Nav::Payments(PayView::Receipts));
+                    }
+                    menu_sep(ui);
+                    for (ic, t, v) in [(icon::ARROWS_DOWN_UP, "Tutti", PayView::All), (icon::ARROW_UP, "Entrate", PayView::In), (icon::ARROW_DOWN, "Uscite", PayView::Out)] {
+                        if menu_item(ui, ic, t, "") {
+                            nav.push(Nav::Payments(v));
+                        }
+                    }
+                    menu_sep(ui);
+                    if menu_item(ui, icon::CALENDAR_CHECK, "Da saldare al...", "") {
+                        nav.push(Nav::Payments(PayView::Until));
+                    }
+                    if menu_item(ui, icon::ENVELOPE_SIMPLE, "Invio solleciti", "") {
+                        nav.push(Nav::Reminders);
+                    }
+                    if menu_item(ui, icon::BANK, "RIBA da emettere", "") {
+                        nav.push(Nav::BankTab(super::bank::Tab::Riba));
+                    }
+                    if menu_item(ui, icon::BANK, "Addebiti SDD da emettere", "") {
+                        nav.push(Nav::BankTab(super::bank::Tab::Sdd));
+                    }
+                    if menu_item(ui, icon::BANK, "Bonifici da pagare", "") {
+                        nav.push(Nav::BankTab(super::bank::Tab::Sct));
+                    }
+                    if menu_item(ui, icon::LIST_CHECKS, "Distinte emesse", "") {
+                        nav.push(Nav::BankTab(super::bank::Tab::Batches));
+                    }
+                    menu_sep(ui);
+                    if menu_item(ui, icon::GEAR_SIX, "Impostazioni banche e risorse...", "") {
+                        nav.push(Nav::BankSettings);
+                    }
+                });
+                }
+                "magazzino" => {
+                tool_menu(ui, Section::Stock, icon::WAREHOUSE, "Magazzino", is(Section::Stock), 0, |ui| {
+                    if menu_item(ui, icon::STACK, "Giacenze e movimenti", "") {
+                        nav.push(Nav::Go(Screen::Stock));
+                    }
+                    if menu_item(ui, icon::LIST_CHECKS, "Inventario", "") {
+                        nav.push(Nav::Go(Screen::Inventory));
+                    }
+                    if menu_item(ui, icon::FACTORY, "Produzione", "") {
+                        nav.push(Nav::Go(Screen::Documents(DocGroup::Production)));
+                    }
+                });
+                }
+                "agenda" => {
+                if tool_button(ui, Section::Agenda, icon::CALENDAR_BLANK, "Agenda", is(Section::Agenda), b.agenda_today, false).clicked() {
+                    nav.push(Nav::Go(Screen::Extra(Extra::Agenda)));
+                }
+                }
+                "analisi" => {
+                tool_menu(ui, Section::Analysis, icon::CHART_LINE_UP, "Analisi", is(Section::Analysis), 0, |ui| {
+                    if menu_item(ui, icon::CHART_LINE_UP, "Statistiche e flussi", "") {
+                        nav.push(Nav::Go(Screen::Extra(Extra::Stats)));
+                    }
+                    if menu_item(ui, icon::HANDSHAKE, "Agenti e provvigioni", "") {
+                        nav.push(Nav::Go(Screen::Extra(Extra::Agents)));
+                    }
+                });
+                }
+                "strumenti" => {
+                    if drawn > 0 {
+                        tool_sep(ui);
+                    }
+                tool_menu(ui, Section::Tools, icon::WRENCH, "Strumenti", is(Section::Tools), 0, |ui| {
+                    if menu_item(ui, icon::PERCENT, "Registri e liquidazione IVA", "") {
+                        nav.push(Nav::Go(Screen::Vat));
+                    }
+                    if menu_item(ui, icon::WALLET, "Prima nota", "") {
+                        nav.push(Nav::Go(Screen::Cash));
+                    }
+                    if menu_item(ui, icon::CHART_BAR, "Corrispettivi", "") {
+                        nav.push(Nav::CounterTab("corrispettivi"));
+                    }
+                    if menu_item(ui, icon::TAG, "Listini prezzi", "") {
+                        nav.push(Nav::Go(Screen::PriceLists));
+                    }
+                    menu_sep(ui);
+                    if menu_item(ui, icon::GIFT, "Carte fedeltà e buoni", "") {
+                        nav.push(Nav::Go(Screen::Extra(Extra::Cards)));
+                    }
+                    if menu_item(ui, icon::STOREFRONT, "Negozio online", "") {
+                        nav.push(Nav::Go(Screen::Extra(Extra::Shop)));
+                    }
+                    if menu_item(ui, icon::CALENDAR_X, "Operazioni di fine anno", "") {
+                        nav.push(Nav::Go(Screen::Extra(Extra::YearEnd)));
+                    }
+                });
+                }
+                "opzioni" => {
+                if tool_button(ui, Section::Options, icon::GEAR_SIX, "Opzioni", is(Section::Options), 0, false).clicked() {
+                    nav.push(Nav::Go(Screen::Settings));
+                }
+                }
+                "archivi" => {
+                tool_menu(ui, Section::Archives, icon::FOLDER_OPEN, "Archivi", is(Section::Archives), 0, |ui| {
+                    if menu_item(ui, icon::FOLDER_OPEN, "Apri un altro archivio...", "") {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("Archivio openFatt", &["gadb"]).pick_file() {
+                            nav.push(Nav::OpenArchive(p));
+                        }
+                    }
+                    let others: Vec<&PathBuf> = recent.iter().filter(|r| r.as_path() != store.path() && r.exists()).take(4).collect();
+                    for r in others {
+                        let n = r.file_stem().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                        if menu_item(ui, icon::DATABASE, &n, "") {
+                            nav.push(Nav::OpenArchive(r.clone()));
+                        }
+                    }
+                    menu_sep(ui);
+                    if menu_item(ui, icon::SHIELD_CHECK, "Copie di sicurezza", "") {
+                        nav.push(Nav::Go(Screen::Backup));
+                    }
+                    if menu_item(ui, icon::DATABASE, "Importazioni ed esportazioni", "") {
+                        nav.push(Nav::Go(Screen::Tools));
+                    }
+                    if menu_item(ui, icon::SIGN_OUT, "Chiudi archivio", "") {
+                        nav.push(Nav::CloseArchive);
+                    }
+                });
+                }
+                _ => continue,
             }
-            menu_sep(ui);
-            if menu_item(ui, icon::CALENDAR_CHECK, "Da saldare al...", "") {
-                nav.push(Nav::Payments(PayView::Until));
-            }
-            if menu_item(ui, icon::ENVELOPE_SIMPLE, "Invio solleciti", "") {
-                nav.push(Nav::Reminders);
-            }
-            if menu_item(ui, icon::BANK, "RIBA da emettere", "") {
-                nav.push(Nav::BankTab(super::bank::Tab::Riba));
-            }
-            if menu_item(ui, icon::BANK, "Addebiti SDD da emettere", "") {
-                nav.push(Nav::BankTab(super::bank::Tab::Sdd));
-            }
-            if menu_item(ui, icon::BANK, "Bonifici da pagare", "") {
-                nav.push(Nav::BankTab(super::bank::Tab::Sct));
-            }
-            if menu_item(ui, icon::LIST_CHECKS, "Distinte emesse", "") {
-                nav.push(Nav::BankTab(super::bank::Tab::Batches));
-            }
-            menu_sep(ui);
-            if menu_item(ui, icon::GEAR_SIX, "Impostazioni banche e risorse...", "") {
-                nav.push(Nav::BankSettings);
-            }
-        });
-        tool_menu(ui, Section::Stock, icon::WAREHOUSE, "Magazzino", is(Section::Stock), 0, |ui| {
-            if menu_item(ui, icon::STACK, "Giacenze e movimenti", "") {
-                nav.push(Nav::Go(Screen::Stock));
-            }
-            if menu_item(ui, icon::LIST_CHECKS, "Inventario", "") {
-                nav.push(Nav::Go(Screen::Inventory));
-            }
-            if menu_item(ui, icon::FACTORY, "Produzione", "") {
-                nav.push(Nav::Go(Screen::Documents(DocGroup::Production)));
-            }
-        });
-        if tool_button(ui, Section::Agenda, icon::CALENDAR_BLANK, "Agenda", is(Section::Agenda), b.agenda_today, false).clicked() {
-            nav.push(Nav::Go(Screen::Extra(Extra::Agenda)));
+            drawn += 1;
         }
-        tool_menu(ui, Section::Analysis, icon::CHART_LINE_UP, "Analisi", is(Section::Analysis), 0, |ui| {
-            if menu_item(ui, icon::CHART_LINE_UP, "Statistiche e flussi", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Stats)));
-            }
-            if menu_item(ui, icon::HANDSHAKE, "Agenti e provvigioni", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Agents)));
-            }
-        });
-        tool_sep(ui);
-        tool_menu(ui, Section::Tools, icon::WRENCH, "Strumenti", is(Section::Tools), 0, |ui| {
-            if menu_item(ui, icon::PERCENT, "Registri e liquidazione IVA", "") {
-                nav.push(Nav::Go(Screen::Vat));
-            }
-            if menu_item(ui, icon::WALLET, "Prima nota", "") {
-                nav.push(Nav::Go(Screen::Cash));
-            }
-            if menu_item(ui, icon::CHART_BAR, "Corrispettivi", "") {
-                nav.push(Nav::CounterTab("corrispettivi"));
-            }
-            if menu_item(ui, icon::TAG, "Listini prezzi", "") {
-                nav.push(Nav::Go(Screen::PriceLists));
-            }
-            menu_sep(ui);
-            if menu_item(ui, icon::GIFT, "Carte fedeltà e buoni", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Cards)));
-            }
-            if menu_item(ui, icon::STOREFRONT, "Negozio online", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::Shop)));
-            }
-            if menu_item(ui, icon::CALENDAR_X, "Operazioni di fine anno", "") {
-                nav.push(Nav::Go(Screen::Extra(Extra::YearEnd)));
-            }
-        });
-        if tool_button(ui, Section::Options, icon::GEAR_SIX, "Opzioni", is(Section::Options), 0, false).clicked() {
-            nav.push(Nav::Go(Screen::Settings));
-        }
-        tool_menu(ui, Section::Archives, icon::FOLDER_OPEN, "Archivi", is(Section::Archives), 0, |ui| {
-            if menu_item(ui, icon::FOLDER_OPEN, "Apri un altro archivio...", "") {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Archivio openFatt", &["gadb"]).pick_file() {
-                    nav.push(Nav::OpenArchive(p));
-                }
-            }
-            let others: Vec<&PathBuf> = recent.iter().filter(|r| r.as_path() != store.path() && r.exists()).take(4).collect();
-            for r in others {
-                let n = r.file_stem().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                if menu_item(ui, icon::DATABASE, &n, "") {
-                    nav.push(Nav::OpenArchive(r.clone()));
-                }
-            }
-            menu_sep(ui);
-            if menu_item(ui, icon::SHIELD_CHECK, "Copie di sicurezza", "") {
-                nav.push(Nav::Go(Screen::Backup));
-            }
-            if menu_item(ui, icon::DATABASE, "Importazioni ed esportazioni", "") {
-                nav.push(Nav::Go(Screen::Tools));
-            }
-            if menu_item(ui, icon::SIGN_OUT, "Chiudi archivio", "") {
-                nav.push(Nav::CloseArchive);
-            }
-        });
+
         if let Some((label, dirty, kind)) = editor.filter(|_| screen != Screen::Editor) {
             tool_sep(ui);
             let t = if dirty { "Doc. aperto *" } else { "Doc. aperto" };

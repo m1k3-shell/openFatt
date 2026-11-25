@@ -1,8 +1,8 @@
 # Avvia l'app su una schermata, cattura la finestra in PNG e chiude il processo.
 # Uso: tools\screenshot.ps1 -Archive <file.gadb> -Screen <nome> -Out <file.png> [-Click "x,y"]
 # -Click invia uno o più clic ("x,y;x,y") alla sola finestra dell'app (coordinate dell'area client in pixel fisici);
-# -Type precompila la ricerca generale (variabile OPENFATT_SEARCH); -Hover "x,y;x,y" sposta solo il mouse.
-param([string]$Archive, [string]$Screen = "", [string]$Out, [int]$Wait = 4, [string]$Click = "", [string]$Type = "", [string]$Clicks = "", [string]$Hover = "")
+# -After N attende N secondi dopo i clic; -Maximize ingrandisce la finestra a tutto schermo; -Type precompila la ricerca generale (variabile OPENFATT_SEARCH); -Hover "x,y;x,y" sposta solo il mouse.
+param([string]$Archive, [string]$Screen = "", [string]$Out, [int]$Wait = 4, [string]$Click = "", [string]$Type = "", [string]$Clicks = "", [string]$Hover = "", [switch]$Maximize, [int]$After = 0)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -31,7 +31,7 @@ try {
   $h = [IntPtr]::Zero
   for ($i = 0; $i -lt 40 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 250; $p.Refresh(); $h = $p.MainWindowHandle }
   if ($h -eq [IntPtr]::Zero) { throw "finestra non trovata" }
-  [void][W32]::ShowWindow($h, 9)
+  [void][W32]::ShowWindow($h, $(if ($Maximize) { 3 } else { 9 }))
   [void][W32]::SetForegroundWindow($h)
   Start-Sleep -Seconds $Wait
   # con archivi grandi la prima finestra trovata può essere provvisoria: si rilegge
@@ -58,6 +58,8 @@ try {
     [void][W32]::PostMessage($h, 0x202, [IntPtr]0, $lp)
     Start-Sleep -Seconds 1
   }
+  # -After: attesa dopo i clic (salvataggi differiti del programma)
+  if ($After -gt 0) { Start-Sleep -Seconds $After }
   $r = New-Object W32+RECT
   [void][W32]::GetWindowRect($h, [ref]$r)
   $w = $r.R - $r.L; $hh = $r.B - $r.T

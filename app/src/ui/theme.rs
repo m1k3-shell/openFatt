@@ -67,8 +67,83 @@ pub struct Tint {
     pub hover: Color32,
 }
 
+/// Colori scelti dall'utente per le sezioni (finestra "Aspetto"); `None` = predefinito.
+static OVERRIDES: std::sync::RwLock<[Option<Color32>; 15]> = std::sync::RwLock::new([None; 15]);
+
 impl Section {
+    pub const ALL: [Section; 15] = [
+        Section::Start,
+        Section::Counter,
+        Section::Customers,
+        Section::Suppliers,
+        Section::Products,
+        Section::Sales,
+        Section::Purchases,
+        Section::EInvoice,
+        Section::Payments,
+        Section::Stock,
+        Section::Agenda,
+        Section::Analysis,
+        Section::Tools,
+        Section::Options,
+        Section::Archives,
+    ];
+
+    /// Codice stabile (per salvare i colori scelti).
+    pub fn code(self) -> &'static str {
+        match self {
+            Section::Start => "start",
+            Section::Customers => "clienti",
+            Section::Suppliers => "fornitori",
+            Section::Products => "prodotti",
+            Section::Sales => "vendite",
+            Section::Purchases => "acquisti",
+            Section::EInvoice => "fatture_elettroniche",
+            Section::Payments => "pagamenti",
+            Section::Stock => "magazzino",
+            Section::Counter => "banco",
+            Section::Agenda => "agenda",
+            Section::Analysis => "analisi",
+            Section::Tools => "strumenti",
+            Section::Options => "opzioni",
+            Section::Archives => "archivi",
+        }
+    }
+
+    pub fn from_code(c: &str) -> Option<Section> {
+        Section::ALL.into_iter().find(|s| s.code() == c)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Start => "Start",
+            Section::Customers => "Clienti",
+            Section::Suppliers => "Fornitori",
+            Section::Products => "Prodotti",
+            Section::Sales => "Documenti di vendita",
+            Section::Purchases => "Documenti di acquisto",
+            Section::EInvoice => "Fatture elettroniche",
+            Section::Payments => "Pagamenti",
+            Section::Stock => "Magazzino",
+            Section::Counter => "Banco",
+            Section::Agenda => "Agenda",
+            Section::Analysis => "Analisi",
+            Section::Tools => "Strumenti",
+            Section::Options => "Opzioni",
+            Section::Archives => "Archivi",
+        }
+    }
+
+    /// Colore della sezione: quello scelto dall'utente o il predefinito.
     pub fn main(self) -> Color32 {
+        if let Some(c) = OVERRIDES.read().ok().and_then(|o| o[self as usize]) {
+            return c;
+        }
+        self.default_main()
+    }
+
+    /// Colore predefinito della sezione.
+    pub fn default_main(self) -> Color32 {
         let (r, g, b) = match self {
             Section::Start => (0x36, 0x4f, 0xc7),
             Section::Customers => (0x0c, 0x85, 0x99),
@@ -111,6 +186,49 @@ impl Section {
             Section::Archives => icon::FOLDER_OPEN,
         }
     }
+}
+
+/// Imposta i colori scelti dall'utente (le sezioni non elencate tornano al predefinito)
+/// e fa ridisegnare lo stile della sezione corrente.
+pub fn set_colors(ctx: &egui::Context, colors: &[(Section, Color32)]) {
+    let mut next = [None; 15];
+    for (s, c) in colors {
+        next[*s as usize] = Some(readable(*c));
+    }
+    let changed = OVERRIDES.read().map(|o| *o != next).unwrap_or(true);
+    if let Ok(mut o) = OVERRIDES.write() {
+        *o = next;
+    }
+    if changed {
+        ctx.data_mut(|d| d.remove::<Section>(egui::Id::new("theme_section")));
+        ctx.request_repaint();
+    }
+}
+
+/// Luminanza relativa (WCAG) di un colore.
+fn luminance(c: Color32) -> f32 {
+    let f = |x: u8| {
+        let v = x as f32 / 255.0;
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+}
+
+/// Scurisce un colore troppo chiaro finché il testo bianco sopra resta leggibile
+/// (contrasto almeno 4:1, come serve a pulsanti e righe selezionate).
+pub fn readable(c: Color32) -> Color32 {
+    let mut c = Color32::from_rgb(c.r(), c.g(), c.b());
+    for _ in 0..40 {
+        if luminance(c) <= 0.21 {
+            break;
+        }
+        c = mix(c, Color32::BLACK, 0.06);
+    }
+    c
 }
 
 /// Miscela di due colori (`t` = quota del secondo).

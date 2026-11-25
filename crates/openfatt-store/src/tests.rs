@@ -1007,3 +1007,24 @@ fn nota_di_credito_a_rate_compensata_per_intero() {
     assert_eq!(s.dues_by_id(&[inv_due]).unwrap()[0].residual(), dec!(1098));
     assert_eq!(s.cash_entries(None, None, Some(COMPENSATION_ACCOUNT)).unwrap().iter().map(|e| e.amount).sum::<Decimal>(), dec!(0));
 }
+
+#[test]
+fn preferenze_personali_per_utente_e_fuori_dal_registro() {
+    let (s, _c, _p, _v) = setup();
+    #[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+    struct Pref {
+        cards: Vec<String>,
+    }
+    let before = s.audit_log(1000).unwrap().len();
+    s.set_user_pref("scrivania", &Pref { cards: vec!["da_fare".into()] }).unwrap();
+    assert_eq!(s.user_pref::<Pref>("scrivania").unwrap().cards, vec!["da_fare".to_string()]);
+    assert_eq!(s.audit_log(1000).unwrap().len(), before, "le preferenze non vanno nel registro");
+    // un altro utente non vede le preferenze del primo
+    *s.user.borrow_mut() = "Mario".into();
+    assert_eq!(s.user_pref::<Pref>("scrivania").unwrap(), Pref::default());
+    s.set_user_pref("scrivania", &Pref { cards: vec!["post_it".into()] }).unwrap();
+    *s.user.borrow_mut() = "mario".into();
+    assert_eq!(s.user_pref::<Pref>("scrivania").unwrap().cards, vec!["post_it".to_string()]);
+    *s.user.borrow_mut() = String::new();
+    assert_eq!(s.user_pref::<Pref>("scrivania").unwrap().cards, vec!["da_fare".to_string()]);
+}
