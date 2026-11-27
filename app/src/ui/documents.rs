@@ -31,6 +31,12 @@ pub struct State {
     agents: super::Cache<(), Vec<openfatt_store::Agent>>,
     /// Finestra della fatturazione differita dei DDT.
     pub deferred: Option<super::deferred::Window>,
+    /// Stato di fatturazione dei DDT (fattura che li ha ripresi).
+    billing: super::Cache<(), std::collections::HashMap<i64, openfatt_store::DdtBillingInfo>>,
+    /// Note interne in modifica: (documento, titolo, testo).
+    note_edit: Option<(i64, String, String)>,
+    /// L'utente può modificare i documenti di questo elenco (note interne).
+    pub can_write: bool,
 }
 
 fn grid_name(g: DocGroup) -> &'static str {
@@ -75,6 +81,9 @@ impl Default for State {
             progress: Default::default(),
             agents: Default::default(),
             deferred: None,
+            billing: Default::default(),
+            note_edit: None,
+            can_write: true,
         }
     }
 }
@@ -251,6 +260,12 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
         let prog: &std::collections::HashMap<i64, openfatt_store::OrderProgress> = &prog_rc;
         let open_req: std::cell::Cell<Option<i64>> = std::cell::Cell::new(None);
         let open_ref = &open_req;
+        // note interne da scrivere (clic sulla cella della colonna Note)
+        let note_req: std::cell::Cell<Option<i64>> = std::cell::Cell::new(None);
+        let note_ref = if st.can_write { Some(&note_req) } else { None };
+        let ddt = group == DocGroup::DeliveryNotes;
+        let billing_rc = st.billing.get(cx.store.generation(), &(), || if ddt { cx.store.delivery_billing().unwrap_or_default() } else { Default::default() });
+        let billing: &std::collections::HashMap<i64, openfatt_store::DdtBillingInfo> = &billing_rc;
         let today = chrono::Local::now().date_naive();
         let agents_rc = st.agents.get(cx.store.generation(), &(), || cx.store.agents(true).unwrap_or_default());
         let agents: &Vec<openfatt_store::Agent> = &agents_rc;
@@ -319,7 +334,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
                         }
                     }
                 }));
-                v.push(Col::text("comment", "Commento", 240.0, |d: &&DocSummary| d.comment.clone()));
+                v.push(notes_col("comment", "Note interne", 240.0, note_ref));
                 v.push(Col::new("expected", "Concl. prevista", 110.0, |d: &&DocSummary| Val::Date(d.expected_date)).render(move |ui: &mut egui::Ui, d: &&DocSummary| {
                     if let Some(x) = d.expected_date {
                         let late = x < today && matches!(effective(d), openfatt_core::model::OrderStatus::Partial | openfatt_core::model::OrderStatus::Confirmed);
@@ -359,6 +374,39 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
             if orders {
                 status_col = status_col.hidden();
             }
+            // DDT: fatturato (con la fattura), da fatturare o merce che non si fattura
+            if ddt {
+                status_col = Col::text("status", "Stato", 230.0, move |d: &&DocSummary| ddt_state_text(d, billing)).group().render(move |ui: &mut egui::Ui, d: &&DocSummary| {
+                    match d.status {
+                        DocStatus::Draft => {
+                            theme::pill(ui, d.status.label(), Tone::Warning);
+                        }
+                        DocStatus::Cancelled => {
+                            theme::pill(ui, d.status.label(), Tone::Negative);
+                        }
+                        DocStatus::Issued => match billing.get(&d.id) {
+                            Some(b) => match b.state {
+                                openfatt_store::DdtBilling::ToInvoice => {
+                                    ui.label(RichText::new(b.text()).color(theme::WARNING));
+                                }
+                                openfatt_store::DdtBilling::NotForSale => {}
+                                openfatt_store::DdtBilling::Invoiced | openfatt_store::DdtBilling::Partial => {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    if b.state == openfatt_store::DdtBilling::Partial {
+                                        ui.label(RichText::new("In parte:").color(theme::WARNING));
+                                    }
+                                    for (id, t) in &b.documents {
+                                        if ui.link(t).on_hover_text("Apri il documento").clicked() {
+                                            open_ref.set(Some(*id));
+                                        }
+                                    }
+                                }
+                            },
+                            None => {}
+                        },
+                    }
+                });
+            }
             v.push(status_col);
             let mut fe_col = Col::text("fe", if fiscal_group && !purchase { "Fattura elettronica" } else { "Note" }, if fiscal_group { 260.0 } else { 180.0 }, |d: &&DocSummary| d.fe_status.clone().unwrap_or_default())
                 .group()
@@ -372,7 +420,15 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
             if orders || !(fiscal_group || purchase) {
                 fe_col = fe_col.hidden();
             }
-            v.push(fe_col);
+            if fiscal_group || purchase || orders {
+                v.push(fe_col);
+                if !orders {
+                    v.push(notes_col("notes", "Note interne", 220.0, note_ref).hidden());
+                }
+            } else {
+                // preventivi, DDT, proforma...: al posto della colonna della fattura elettronica
+                v.push(notes_col("notes", "Note interne", 260.0, note_ref));
+            }
             v
         };
         // la produzione non ha cliente né importi
@@ -380,7 +436,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
         let gi = match st.grids.iter().position(|(g, _)| *g == group) {
             Some(i) => i,
             None => {
-                st.grids.push((group, Grid::new(grid_name(group))));
+                // DDT: colonne cambiate (Stato più larga, Note interne), larghezze da capo
+                st.grids.push((group, Grid::new(grid_name(group)).widths_rev(if group == DocGroup::DeliveryNotes { 2 } else { 0 })));
                 st.grids.len() - 1
             }
         };
@@ -558,7 +615,103 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, group: DocGroup) {
         if let Some(id) = ev.opened {
             cx.nav.push(Nav::OpenDocument(id));
         }
+        if let Some(id) = note_req.get() {
+            if let Some(d) = list.iter().find(|d| d.id == id) {
+                let title = format!("{} {} del {}{}", d.kind.label(), if d.number_label.is_empty() { "in bozza".to_string() } else { d.number_label.clone() }, d.date.format("%d/%m/%Y"), if d.party_name.is_empty() { String::new() } else { format!(" · {}", d.party_name) });
+                st.note_edit = Some((id, title, d.comment.clone()));
+            }
+        }
     });
+    note_window(ui.ctx(), cx, st);
+}
+
+/// Colonna delle note ad uso interno: si scrivono con un clic sulla cella (`req` = None
+/// per chi ha i documenti in sola lettura).
+fn notes_col<'a>(id: &'static str, title: &'static str, width: f32, req: Option<&'a std::cell::Cell<Option<i64>>>) -> Col<'a, &'a DocSummary> {
+    Col::text(id, title, width, |d: &&DocSummary| d.comment.clone()).render(move |ui: &mut egui::Ui, d: &&DocSummary| {
+        let size = Vec2::new(ui.available_width().max(40.0), ui.available_height().max(18.0));
+        let (rect, resp) = ui.allocate_exact_size(size, if req.is_some() { egui::Sense::click() } else { egui::Sense::hover() });
+        let hover = resp.hovered() && req.is_some();
+        let p = ui.painter_at(rect);
+        let font = egui::FontId::proportional(13.0);
+        if d.comment.is_empty() {
+            if hover {
+                p.text(rect.left_center(), egui::Align2::LEFT_CENTER, format!("{}  Scrivi una nota", icon::PENCIL_SIMPLE), font, MUTED);
+            }
+        } else {
+            let first = d.comment.lines().next().unwrap_or_default();
+            p.text(rect.left_center(), egui::Align2::LEFT_CENTER, first, font.clone(), theme::INK);
+            if hover {
+                let r = egui::Rect::from_min_size(egui::pos2(rect.right() - 22.0, rect.top()), Vec2::new(22.0, rect.height()));
+                p.rect_filled(r, 0, theme::SURFACE);
+                p.text(r.center(), egui::Align2::CENTER_CENTER, icon::PENCIL_SIMPLE, font, theme::tint().main);
+            }
+        }
+        let Some(req) = req else {
+            if !d.comment.is_empty() {
+                resp.on_hover_text(d.comment.as_str());
+            }
+            return;
+        };
+        let resp = resp.on_hover_cursor(egui::CursorIcon::Text);
+        let resp = if d.comment.is_empty() { resp.on_hover_text("Clic per scrivere una nota ad uso interno") } else { resp.on_hover_text(format!("{}\n\nClic per modificare", d.comment)) };
+        if resp.clicked() {
+            req.set(Some(d.id));
+        }
+    })
+}
+
+/// Testo della colonna Stato dei DDT (per ordinare, raggruppare ed esportare).
+fn ddt_state_text(d: &DocSummary, billing: &std::collections::HashMap<i64, openfatt_store::DdtBillingInfo>) -> String {
+    match d.status {
+        DocStatus::Issued => billing.get(&d.id).map(|b| b.text()).unwrap_or_default(),
+        s => s.label().to_string(),
+    }
+}
+
+/// Finestra per scrivere le note ad uso interno di un documento (anche emesso).
+fn note_window(ctx: &egui::Context, cx: &mut Ctx, st: &mut State) {
+    let Some((id, title, text)) = st.note_edit.as_mut() else { return };
+    let mut close = false;
+    let mut save = false;
+    egui::Window::new(format!("{}  Note ad uso interno", icon::NOTE_PENCIL))
+        .id(egui::Id::new("note_documento"))
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(ctx.screen_rect().center())
+        .pivot(egui::Align2::CENTER_CENTER)
+        .show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(theme::medium(title.as_str()));
+            ui.label(RichText::new("Non vanno in stampa né nella fattura elettronica; si possono cambiare anche a documento emesso.").size(12.5).color(MUTED));
+            ui.add_space(6.0);
+            let r = ui.add(egui::TextEdit::multiline(text).desired_rows(5).desired_width(f32::INFINITY).hint_text("Scrivi qui la nota..."));
+            if !r.has_focus() && ui.memory(|m| m.focused().is_none()) {
+                r.request_focus();
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if theme::primary(ui, icon::CHECK, "Salva").clicked() || ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                if theme::button(ui, "", "Annulla").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+                ui.label(RichText::new("Ctrl+Invio per salvare").size(12.0).color(MUTED));
+            });
+        });
+    if save {
+        match cx.store.set_internal_notes(*id, text) {
+            Ok(()) => {
+                cx.msgs.ok("Nota salvata");
+                close = true;
+            }
+            Err(e) => cx.msgs.err(format!("Impossibile salvare la nota: {}", e)),
+        }
+    }
+    if close {
+        st.note_edit = None;
+    }
 }
 
 /// Testo del pulsante "Nuovo/Nuova ..." con l'articolo giusto.

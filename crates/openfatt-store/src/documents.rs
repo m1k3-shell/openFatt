@@ -869,6 +869,17 @@ impl Store {
     }
 
     /// Quantità già evasa di una riga (somma delle righe derivate non annullate).
+    /// Note ad uso interno del documento (non vanno in stampa né nella fattura
+    /// elettronica): si possono cambiare anche a documento emesso, dall'elenco.
+    pub fn set_internal_notes(&self, id: i64, notes: &str) -> Result<()> {
+        let n = self.conn().execute("UPDATE documents SET data = json_set(data, '$.internal_notes', ?2) WHERE id = ?1", rusqlite::params![id, notes.trim()])?;
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("documento {}", id)));
+        }
+        self.audit("document", id, "notes", "note interne")?;
+        Ok(())
+    }
+
     pub fn fulfilled_qty(&self, line_id: i64) -> Result<Decimal> {
         let mut st = self.conn().prepare(
             "SELECT l.qty FROM doc_lines l JOIN documents d ON d.id = l.document_id WHERE l.source_line_id = ?1 AND d.status <> 'ANNULLATO'",

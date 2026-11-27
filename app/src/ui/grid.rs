@@ -293,6 +293,9 @@ pub struct Grid {
     pub keep_selection: bool,
     /// Righe scelte con fondo chiaro invece che pieno (elenchi con azioni nelle righe).
     pub soft_selection: bool,
+    /// Revisione delle larghezze: egui le ricorda per posizione, quindi quando le colonne
+    /// di un elenco cambiano si alza per ripartire dalle larghezze iniziali.
+    widths_rev: u8,
 }
 
 struct Cached {
@@ -312,6 +315,12 @@ pub struct Events {
 impl Grid {
     pub fn new(name: &'static str) -> Self {
         Grid { name, ..Default::default() }
+    }
+
+    /// Nuova revisione delle larghezze delle colonne (vedi `widths_rev`).
+    pub fn widths_rev(mut self, rev: u8) -> Self {
+        self.widths_rev = rev;
+        self
     }
 
     /// Righe scelte con fondo chiaro (vedi `soft_selection`).
@@ -794,7 +803,7 @@ impl Grid {
             ui.visuals_mut().selection.stroke.color = egui::Color32::WHITE;
         }
         let mut tb = TableBuilder::new(ui)
-            .id_salt(("grid", self.name))
+            .id_salt(("grid", self.name, self.widths_rev))
             .striped(false)
             .resizable(true)
             .sense(egui::Sense::click())

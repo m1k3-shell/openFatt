@@ -42,7 +42,7 @@ use rust_decimal::Decimal;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub use documents::{DocSummary, DocFilter, DdtSource, OrderProgress};
-pub use invoicing::{can_deduct_down_payments, creditable_kinds, deducted_down_payment, reference_number, DeferredRun, DownPayment, PendingDdt};
+pub use invoicing::{can_deduct_down_payments, creditable_kinds, deducted_down_payment, not_for_sale, reference_number, DdtBilling, DdtBillingInfo, DeferredRun, DownPayment, PendingDdt};
 pub use extras::{add_months, copy_line, intent_amount, period_text, Attachment, IntentUsage, LastPrice, ProductImport, Recurrence};
 pub use annual::{region_of, AnnualVat, Quadro, Rigo, REGIONS};
 pub use agenda::{AgendaItem, AgendaKind, Card, CardKind, CardMove, LoyaltySettings};

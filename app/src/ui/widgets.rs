@@ -107,28 +107,101 @@ pub fn payment_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<i64>, payme
 }
 
 /// Selettore di cliente/fornitore con ricerca. Restituisce il soggetto scelto.
+///
+/// L'elenco a tendina contiene tutti i soggetti (scorre anche con migliaia di nomi: si
+/// disegnano solo le righe visibili) e si restringe scrivendo nome, P.IVA o città;
+/// Invio sceglie il primo, le frecce scorrono l'elenco.
 pub fn party_picker(ui: &mut egui::Ui, store: &openfatt_store::Store, id: &str, current: &str, role: Option<PartyRole>, width: f32) -> Option<Party> {
+    let popup_id = ui.make_persistent_id((id, "popup"));
     let search_id = ui.make_persistent_id((id, "search"));
-    let mut search: String = ui.data_mut(|d| d.get_temp(search_id)).unwrap_or_default();
+    let cursor_id = ui.make_persistent_id((id, "cursor"));
+    let open = ui.memory(|m| m.is_popup_open(popup_id));
+    // pulsante come una casella a tendina
+    let text = if current.is_empty() { RichText::new("scegli...").color(GRAY) } else { RichText::new(truncate(current, 50)) };
+    let resp = ui.add(egui::Button::new(text).min_size(egui::vec2(width, 0.0)).shortcut_text(if open { super::theme::icon::CARET_UP } else { super::theme::icon::CARET_DOWN }));
+    if resp.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+        ui.data_mut(|d| {
+            d.insert_temp(search_id, String::new());
+            d.insert_temp(cursor_id, 0usize);
+        });
+    }
     let mut chosen = None;
-    egui::ComboBox::from_id_salt(id)
-        .width(width)
-        .height(420.0)
-        .selected_text(if current.is_empty() { RichText::new("scegli...").color(GRAY) } else { RichText::new(truncate(current, 50)) })
-        .show_ui(ui, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut search).hint_text("cerca nome, P.IVA, città...").desired_width(width - 20.0)).request_focus();
-            let list = store.parties(&openfatt_store::PartyFilter { role, search: search.clone(), include_inactive: false }).unwrap_or_default();
-            for p in list.iter().take(80) {
-                let label = format!("{}  ·  {} {}", p.display_name(), p.city, if p.vat_number.is_empty() { &p.tax_code } else { &p.vat_number });
-                if ui.selectable_label(false, label).clicked() {
+    egui::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+        let w = width.max(420.0);
+        ui.set_width(w);
+        let mut search: String = ui.data_mut(|d| d.get_temp(search_id)).unwrap_or_default();
+        let mut cursor: usize = ui.data_mut(|d| d.get_temp(cursor_id)).unwrap_or(0);
+        let te = ui.add(egui::TextEdit::singleline(&mut search).hint_text("cerca nome, P.IVA, città...").desired_width(w - 8.0));
+        if !te.has_focus() {
+            te.request_focus();
+        }
+        if te.changed() {
+            cursor = 0;
+        }
+        // l'elenco si rilegge solo quando cambiano la ricerca o l'archivio
+        let settled = super::settled(ui.ctx(), (id, "party_search"), &search);
+        let role_key = role.map(|r| format!("{:?}", r)).unwrap_or_default();
+        let (list, _) = super::memo(ui.ctx(), (id, "party_list"), store.generation(), (settled.clone(), role_key), || {
+            store.parties(&openfatt_store::PartyFilter { role, search: settled.clone(), include_inactive: false }).unwrap_or_default()
+        });
+        let n = list.len();
+        let (down, up, enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        if down && cursor + 1 < n {
+            cursor += 1;
+        }
+        if up && cursor > 0 {
+            cursor -= 1;
+        }
+        if enter && n > 0 {
+            chosen = list.get(cursor.min(n - 1)).cloned();
+        }
+        if esc {
+            ui.memory_mut(|m| m.close_popup());
+        }
+        ui.label(RichText::new(match n {
+            0 => "Nessun risultato".to_string(),
+            1 => "1 soggetto".to_string(),
+            n if settled.trim().is_empty() => format!("{} soggetti: scrivi per restringere l'elenco", n),
+            n => format!("{} soggetti trovati", n),
+        }).size(12.0).color(GRAY));
+        let row_h = 22.0;
+        let mut area = egui::ScrollArea::vertical().id_salt((id, "party_scroll")).max_height(420.0).auto_shrink([false, true]);
+        if down || up {
+            // tiene la riga scelta con le frecce dentro l'area visibile
+            area = area.vertical_scroll_offset((cursor as f32 * (row_h + ui.spacing().item_spacing.y) - 160.0).max(0.0));
+        }
+        area.show_rows(ui, row_h, n, |ui, range| {
+            for i in range {
+                let p = &list[i];
+                let fiscal = if p.vat_number.is_empty() { &p.tax_code } else { &p.vat_number };
+                let (rect, r) = ui.allocate_exact_size(egui::vec2(w - 16.0, row_h), egui::Sense::click());
+                if i == cursor {
+                    ui.painter().rect_filled(rect, 4, ui.visuals().selection.bg_fill);
+                }
+                let painter = ui.painter_at(rect);
+                let font = egui::FontId::proportional(14.0);
+                let g = painter.layout_no_wrap(p.display_name(), font.clone(), super::theme::INK);
+                let name_w = g.size().x;
+                painter.galley(egui::pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0), g, super::theme::INK);
+                let rest = format!("{}  {}", p.city, fiscal);
+                painter.text(egui::pos2(rect.left() + 8.0 + name_w + 14.0, rect.center().y), egui::Align2::LEFT_CENTER, rest.trim(), egui::FontId::proportional(12.5), GRAY);
+                if r.clicked() {
                     chosen = Some(p.clone());
                 }
-            }
-            if list.is_empty() {
-                ui.label(RichText::new("Nessun risultato").color(GRAY));
+                if r.hovered() {
+                    cursor = i;
+                }
             }
         });
-    ui.data_mut(|d| d.insert_temp(search_id, search));
+        ui.data_mut(|d| {
+            d.insert_temp(search_id, search);
+            d.insert_temp(cursor_id, cursor);
+        });
+    });
+    if chosen.is_some() {
+        ui.memory_mut(|m| m.close_popup());
+    }
     chosen
 }
 

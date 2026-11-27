@@ -6,7 +6,7 @@
 //! - fattura di saldo che detrae una o più fatture d'acconto: riferimento alla fattura
 //!   d'acconto e importi in negativo, per aliquota.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -62,8 +62,64 @@ pub struct DownPayment {
     pub residual: Decimal,
 }
 
+/// Stato di fatturazione di un DDT emesso (colonna "Stato" dell'elenco dei DDT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DdtBilling {
+    /// Nessuna riga ancora fatturata: "Seguirà documento di vendita".
+    ToInvoice,
+    /// Fatturato solo in parte.
+    Partial,
+    /// Tutte le righe sono state riprese in fattura.
+    Invoiced,
+    /// Merce che non si fattura (conto lavorazione, visione, riparazione, reso...).
+    NotForSale,
+}
+
+/// Fatturazione di un DDT: stato e documenti che ne hanno ripreso le righe.
+#[derive(Debug, Clone)]
+pub struct DdtBillingInfo {
+    pub state: DdtBilling,
+    /// (id del documento, "Fatt. 295 del 25/11/2026"), in ordine di data.
+    pub documents: Vec<(i64, String)>,
+}
+
+impl DdtBillingInfo {
+    /// Testo per l'elenco: vuoto per la merce che non si fattura.
+    pub fn text(&self) -> String {
+        let docs = self.documents.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", ");
+        match self.state {
+            DdtBilling::Invoiced => docs,
+            DdtBilling::Partial => format!("In parte: {}", docs),
+            DdtBilling::ToInvoice => "Seguirà doc. di vendita".into(),
+            DdtBilling::NotForSale => String::new(),
+        }
+    }
+}
+
+/// Etichetta breve del documento che ha ripreso le righe di un DDT.
+fn billing_label(kind: DocKind, number: Option<i64>, series: &str, date: NaiveDate, draft: bool) -> String {
+    let what = match kind {
+        DocKind::Invoice | DocKind::AccompanyingInvoice => "Fatt.",
+        k => k.label(),
+    };
+    // il numero di una bozza è provvisorio
+    let number = if draft { None } else { number };
+    match number {
+        Some(n) if series.is_empty() => format!("{} {} del {}", what, n, date.format("%d/%m/%Y")),
+        Some(n) => format!("{} {}/{} del {}", what, n, series, date.format("%d/%m/%Y")),
+        None => format!("{} in bozza del {}", what, date.format("%d/%m/%Y")),
+    }
+}
+
+/// La causale del trasporto indica merce che non si fattura. Si confrontano gli inizi
+/// delle parole ("c/lavorazione" sì, "trasporto compreso" no).
+pub fn not_for_sale(reason: &str) -> bool {
+    let low = reason.to_lowercase();
+    low.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).any(|w| NOT_SOLD.iter().any(|s| w.starts_with(s)))
+}
+
 /// Causali di trasporto che di solito non vanno in fattura.
-const NOT_SOLD: &[&str] = &["visione", "riparazion", "lavorazion", "comodato", "reso", "resa", "deposito", "prova", "sostituzion", "garanzia", "noleggio"];
+const NOT_SOLD: &[&str] = &["visione", "riparazion", "lavorazion", "comodato", "reso", "resa", "deposito", "prova", "approvazion", "sostituzion", "garanzia", "noleggio"];
 
 /// Documenti che una nota di credito di vendita può stornare.
 pub const CREDITABLE_SALES: &[DocKind] = &[DocKind::Invoice, DocKind::AccompanyingInvoice, DocKind::DebitNote, DocKind::DownPaymentInvoice, DocKind::Fee];
@@ -142,13 +198,57 @@ impl Store {
                 party_name: doc.party.display_name(),
                 payment_id: doc.payment_id,
                 payment_name: doc.payment.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
-                suggested: !NOT_SOLD.iter().any(|w| low.contains(w)),
+                suggested: !not_for_sale(&low),
                 reason,
                 amount,
                 partial,
             });
         }
         out.sort_by(|a, b| a.party_name.to_lowercase().cmp(&b.party_name.to_lowercase()).then(a.date.cmp(&b.date)).then(a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    /// Stato di fatturazione dei DDT: fatturati (con il numero della fattura), in parte,
+    /// da fatturare, oppure merce che non si fattura (conto lavorazione, visione...).
+    pub fn delivery_billing(&self) -> Result<HashMap<i64, DdtBillingInfo>> {
+        let code = DocKind::DeliveryNote.code();
+        let progress = self.order_progress(&[DocKind::DeliveryNote])?;
+        // documenti che hanno ripreso le righe dei DDT
+        let mut docs: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+        {
+            let mut st = self.conn().prepare(
+                "SELECT DISTINCT l.source_doc_id, d.id, d.kind, d.number, d.series, d.date, d.status
+                 FROM doc_lines l JOIN documents d ON d.id = l.document_id JOIN documents o ON o.id = l.source_doc_id
+                 WHERE o.kind = ?1 AND d.status <> 'ANNULLATO' AND l.source_line_id IS NOT NULL
+                 ORDER BY d.date, d.number, d.id",
+            )?;
+            let rows = st.query_map([code], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?)))?;
+            for row in rows {
+                let (src, id, kind, number, series, date, status) = row?;
+                let kind = DocKind::from_code(&kind).unwrap_or_default();
+                let date = crate::date_from_sql(&date);
+                let list = docs.entry(src).or_default();
+                if !list.iter().any(|(x, _)| *x == id) {
+                    list.push((id, billing_label(kind, number, &series, date, status == DocStatus::Draft.code())));
+                }
+            }
+        }
+        let mut out = HashMap::new();
+        let mut st = self.conn().prepare("SELECT id, COALESCE(json_extract(data, '$.transport.reason'), '') FROM documents WHERE kind = ?1 AND status <> 'BOZZA'")?;
+        let rows = st.query_map([code], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, reason) = row?;
+            let p = progress.get(&id);
+            let documents = docs.remove(&id).unwrap_or_default();
+            let state = match p {
+                Some(p) if p.all && p.any => DdtBilling::Invoiced,
+                Some(p) if p.any => DdtBilling::Partial,
+                _ if !documents.is_empty() => DdtBilling::Partial,
+                _ if not_for_sale(&reason) => DdtBilling::NotForSale,
+                _ => DdtBilling::ToInvoice,
+            };
+            out.insert(id, DdtBillingInfo { state, documents });
+        }
         Ok(out)
     }
 
@@ -506,6 +606,68 @@ mod tests {
         let left = s.pending_delivery_notes(None, d(2026, 11, 30), None).unwrap();
         assert_eq!(left.len(), 2);
         assert!(left.iter().any(|x| x.id == vis.id));
+    }
+
+    #[test]
+    fn stato_di_fatturazione_dei_ddt() {
+        let (s, a, b, p, v) = setup();
+        let sold = issued(&s, DocKind::DeliveryNote, &a, d(2026, 11, 3), vec![line(&p, dec!(2), &v)], "Vendita");
+        let part = issued(&s, DocKind::DeliveryNote, &a, d(2026, 11, 4), vec![line(&p, dec!(4), &v)], "");
+        let work = issued(&s, DocKind::DeliveryNote, &b, d(2026, 11, 5), vec![line(&p, dec!(1), &v)], "Conto lavorazione");
+        let open = issued(&s, DocKind::DeliveryNote, &b, d(2026, 11, 6), vec![line(&p, dec!(1), &v)], "Vendita");
+        let run = s.deferred_invoices(&[sold.id], d(2026, 11, 25), true).unwrap();
+        let inv = &run.created[0];
+        let mut pinv = s.transform(&[part.id], DocKind::Invoice).unwrap();
+        let i = pinv.lines.iter().position(|l| l.kind == LineKind::Item).unwrap();
+        pinv.lines[i].qty = dec!(1);
+        pinv.date = d(2026, 11, 26);
+        let pinv = s.save_document(&pinv).unwrap();
+        let bill = s.delivery_billing().unwrap();
+        assert_eq!(bill[&sold.id].state, DdtBilling::Invoiced);
+        assert_eq!(bill[&sold.id].text(), format!("Fatt. {} del 25/11/2026", inv.number.unwrap()));
+        assert_eq!(bill[&sold.id].documents[0].0, inv.id);
+        assert_eq!(bill[&part.id].state, DdtBilling::Partial);
+        assert_eq!(bill[&part.id].text(), "In parte: Fatt. in bozza del 26/11/2026");
+        assert_eq!(bill[&work.id].state, DdtBilling::NotForSale);
+        assert_eq!(bill[&work.id].text(), "");
+        assert_eq!(bill[&open.id].state, DdtBilling::ToInvoice);
+        assert_eq!(bill[&open.id].text(), "Seguirà doc. di vendita");
+        // fattura annullata: il DDT torna da fatturare
+        s.delete_document(pinv.id).unwrap();
+        assert_eq!(s.delivery_billing().unwrap()[&part.id].state, DdtBilling::ToInvoice);
+        // la nota di credito sulla fattura non cambia lo stato del DDT
+        let mut nc = Document::new(DocKind::CreditNote);
+        nc.party_id = Some(a.id);
+        nc.date = d(2026, 11, 27);
+        s.credit_invoice(&mut nc, inv.id, None).unwrap();
+        s.save_document(&nc).unwrap();
+        let bill = s.delivery_billing().unwrap();
+        assert_eq!(bill[&sold.id].state, DdtBilling::Invoiced);
+        assert_eq!(bill[&sold.id].documents.len(), 1);
+    }
+
+    #[test]
+    fn causali_che_non_si_fatturano() {
+        for r in ["Conto lavorazione", "c/lavorazione", "C/VISIONE", "Reso", "Riparazione", "Conto deposito", "Conto approvazione"] {
+            assert!(not_for_sale(r), "{}", r);
+        }
+        for r in ["Vendita", "", "Vendita, trasporto compreso", "Vendita con presa in carico", "Spese di trasporto"] {
+            assert!(!not_for_sale(r), "{}", r);
+        }
+    }
+
+    #[test]
+    fn note_interne_modificabili_anche_a_documento_emesso() {
+        let (s, a, _, p, v) = setup();
+        let ddt = issued(&s, DocKind::DeliveryNote, &a, d(2026, 11, 3), vec![line(&p, dec!(2), &v)], "");
+        s.set_internal_notes(ddt.id, "Consegnare al magazzino 2").unwrap();
+        let list = s.documents(&DocFilter { kinds: vec![DocKind::DeliveryNote], ..Default::default() }).unwrap();
+        assert_eq!(list[0].comment, "Consegnare al magazzino 2");
+        let back = s.document(ddt.id).unwrap();
+        assert_eq!(back.internal_notes, "Consegnare al magazzino 2");
+        assert_eq!(back.status, DocStatus::Issued);
+        assert_eq!(back.lines.len(), ddt.lines.len());
+        assert!(s.set_internal_notes(999_999, "x").is_err());
     }
 
     #[test]

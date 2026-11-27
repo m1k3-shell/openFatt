@@ -967,7 +967,10 @@ impl eframe::App for OpenFattApp {
                     Screen::Parties(role) => ui::parties::show(ui, &mut cx, &mut self.parties, role),
                     Screen::Products => ui::products::show(ui, &mut cx, &mut self.products),
                     Screen::PriceLists => ui::pricelists::show(ui, &mut cx, &mut self.pricelists),
-                    Screen::Documents(g) => ui::documents::show(ui, &mut cx, &mut self.docs, g),
+                    Screen::Documents(g) => {
+                        self.docs.can_write = self.user.as_ref().is_none_or(|u| u.can_write(ui::screen_area(Screen::Documents(g))));
+                        ui::documents::show(ui, &mut cx, &mut self.docs, g)
+                    }
                     Screen::Counter => ui::counter::show(ui, &mut cx, &mut self.counter),
                     Screen::Editor => match &mut self.editor {
                         Some(e) => e.show(ui, &mut cx),
