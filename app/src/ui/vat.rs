@@ -22,6 +22,7 @@ pub enum Tab {
     Purchases,
     Retail,
     Annual,
+    Withholdings,
 }
 
 impl Tab {
@@ -31,6 +32,7 @@ impl Tab {
             "acquisti" => Tab::Purchases,
             "corrispettivi" => Tab::Retail,
             "annuale" => Tab::Annual,
+            "ritenute" => Tab::Withholdings,
             _ => Tab::Liquidation,
         }
     }
@@ -46,12 +48,13 @@ pub struct State {
     settings: Option<VatSettings>,
     show_settings: bool,
     problems: Option<Vec<String>>,
+    withholdings: super::withholdings::State,
 }
 
 impl Default for State {
     fn default() -> Self {
         State {
-            register_grid: Grid::new("registro-iva"), tab: Tab::Liquidation, year: 0, index: 0, periodicity: None, inputs: None, settings: None, show_settings: false, problems: None }
+            register_grid: Grid::new("registro-iva"), tab: Tab::Liquidation, year: 0, index: 0, periodicity: None, inputs: None, settings: None, show_settings: false, problems: None, withholdings: Default::default() }
     }
 }
 
@@ -110,7 +113,7 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         ui.add_space(10.0);
     }
     ui.horizontal(|ui| {
-        for (t, label) in [(Tab::Liquidation, "Liquidazione"), (Tab::Sales, "Registro vendite"), (Tab::Purchases, "Registro acquisti"), (Tab::Retail, "Registro corrispettivi"), (Tab::Annual, "Dichiarazione annuale")] {
+        for (t, label) in [(Tab::Liquidation, "Liquidazione"), (Tab::Sales, "Registro vendite"), (Tab::Purchases, "Registro acquisti"), (Tab::Retail, "Registro corrispettivi"), (Tab::Annual, "Dichiarazione annuale"), (Tab::Withholdings, "Ritenute")] {
             ui.selectable_value(&mut st.tab, t, label);
         }
     });
@@ -140,6 +143,10 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Tab::Retail => retail_view(ui, cx, period),
         Tab::Annual => {
             egui::ScrollArea::vertical().id_salt("vat_annual").auto_shrink([false, false]).show(ui, |ui| annual_view(ui, cx, st.year));
+        }
+        Tab::Withholdings => {
+            let year = st.year;
+            egui::ScrollArea::vertical().id_salt("vat_wh").auto_shrink([false, false]).show(ui, |ui| super::withholdings::view(ui, cx, &mut st.withholdings, year));
         }
     }
 }

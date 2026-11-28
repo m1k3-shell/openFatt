@@ -4,6 +4,7 @@
 pub mod barcode;
 pub mod freeform;
 pub mod labels;
+pub mod receipt;
 pub mod table;
 pub mod writer;
 
@@ -484,6 +485,9 @@ pub fn from_document(company: &Company, doc: &Document, totals: &Totals) -> Prin
             }
             if !t.appearance.is_empty() {
                 info.push(("Aspetto beni".into(), t.appearance.clone()));
+            }
+            if !t.tracking.trim().is_empty() {
+                info.push(("N. spedizione".into(), t.tracking.trim().to_string()));
             }
             if !t.port.is_empty() {
                 info.push(("Porto".into(), t.port.clone()));

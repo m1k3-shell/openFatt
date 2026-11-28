@@ -471,6 +471,19 @@ impl Store {
         if doc.lines.iter().any(|l| l.vat.split) {
             doc.vat_liability = "S".into();
         }
+        // regime dell'azienda (forfettario, IVA per cassa) anche sui documenti creati
+        // dall'archivio: trasformazioni, fatturazione differita, ricorrenti, importazioni,
+        // fatture ricevute. Non sui documenti importati da altri programmi.
+        if doc.id == 0 && !doc.legacy_fe {
+            let regime = self.regime();
+            let purchase = matches!(doc.kind, DocKind::PurchaseInvoice | DocKind::PurchaseCreditNote);
+            if regime != crate::Regime::Ordinary && (doc.status == DocStatus::Draft || purchase) {
+                let status = doc.status;
+                doc.status = DocStatus::Draft;
+                crate::apply_regime(regime, &mut doc, &self.vat_codes()?);
+                doc.status = status;
+            }
+        }
         let tx = self.begin()?;
         self.assign_line_ids(&mut doc)?;
         self.number_draft(&mut doc)?;
@@ -547,7 +560,8 @@ impl Store {
             return Ok(());
         }
         self.conn().execute("DELETE FROM due_dates WHERE document_id = ?1", [doc.id])?;
-        if doc.party_id.is_none() || !doc.kind.has_due_dates() || self.is_recurring_template(doc.id)? {
+        // fattura di una vendita al banco: già incassata alla cassa
+        if doc.party_id.is_none() || !doc.kind.has_due_dates() || doc.from_receipt_id.is_some() || self.is_recurring_template(doc.id)? {
             return Ok(());
         }
         if let Some(totals) = totals.filter(|t| !t.net_to_pay.is_zero()) {
@@ -587,7 +601,7 @@ impl Store {
             None => Some(calc::compute(doc).map_err(|e| StoreError::Invalid(e.0))?),
         };
         // scadenze
-        if let Some(totals) = totals.filter(|t| doc.kind.has_due_dates() && !t.net_to_pay.is_zero()) {
+        if let Some(totals) = totals.filter(|t| doc.kind.has_due_dates() && !t.net_to_pay.is_zero() && doc.from_receipt_id.is_none()) {
             if !self.dues_frozen(doc.id)? {
                 let payment = doc.payment.clone().unwrap_or_default();
                 let dues = calc::due_dates(doc.date, totals.net_to_pay, &payment);
@@ -601,7 +615,8 @@ impl Store {
         }
         // magazzino
         let warehouse = self.resolve_warehouse(&doc.warehouse)?;
-        let effect = doc.kind.stock_effect();
+        // la merce di una vendita al banco poi fatturata è già stata scaricata dallo scontrino
+        let effect = if doc.from_receipt_id.is_some() { 0 } else { doc.kind.stock_effect() };
         if effect != 0 {
             let mut source_kinds: HashMap<i64, Option<DocKind>> = HashMap::new();
             for (pos, l) in doc.lines.iter().enumerate().filter(|(_, l)| l.kind == LineKind::Item) {
@@ -856,6 +871,9 @@ impl Store {
         d.due_dates.clear();
         d.created_at = None;
         d.external_number.clear();
+        // la copia non è la fattura di quello scontrino
+        d.from_receipt = None;
+        d.from_receipt_id = None;
         for l in d.lines.iter_mut() {
             l.id = 0;
             l.source_line_id = None;

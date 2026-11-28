@@ -37,6 +37,13 @@ pub struct Editor {
     pay_comp: Option<super::payments::CompForm>,
     /// L'utente può registrare incassi e pagamenti (permesso Contabilità).
     pub can_pay: bool,
+    /// Regime fiscale dell'azienda (forfettario, IVA per cassa...).
+    regime: openfatt_store::Regime,
+    /// Massimale Enasarco del preponente: (soggetto, anno, generazione) e situazione.
+    enasarco: Option<((Option<i64>, i32, u64), openfatt_store::EnasarcoUsage)>,
+    /// Cliente bloccato o oltre il fido: avviso da confermare prima di emettere.
+    credit_ask: Option<String>,
+    credit_ok: bool,
 }
 
 /// Colonne facoltative delle righe, ricordate nell'archivio.
@@ -77,7 +84,12 @@ fn group_of(k: DocKind) -> DocGroup {
 }
 
 impl Editor {
-    pub fn new(store: &openfatt_store::Store, doc: Document) -> Self {
+    pub fn new(store: &openfatt_store::Store, mut doc: Document) -> Self {
+        let regime = store.regime();
+        let vats = store.vat_codes().unwrap_or_default();
+        if doc.id == 0 {
+            openfatt_store::apply_regime(regime, &mut doc, &vats);
+        }
         let lock = if doc.id != 0 { store.document_lock_reason(doc.id).ok().flatten() } else { None };
         let fe_status = if doc.id != 0 { store.einvoice_for_document(doc.id).ok().flatten().map(|e| e.status.label().to_string()) } else { None };
         let fulfillment = if doc.id != 0 { store.fulfillment_state(&doc).unwrap_or((false, false)) } else { (false, false) };
@@ -87,7 +99,7 @@ impl Editor {
             doc,
             dirty: false,
             lock,
-            vats: store.vat_codes().unwrap_or_default(),
+            vats,
             payments: store.payment_methods().unwrap_or_default(),
             quick_code: String::new(),
             confirm_close: false,
@@ -103,6 +115,10 @@ impl Editor {
             pay_history: None,
             pay_comp: None,
             can_pay: true,
+            regime,
+            enasarco: None,
+            credit_ask: None,
+            credit_ok: false,
         }
     }
 
@@ -125,6 +141,12 @@ impl Editor {
     }
 
     fn default_vat(&self) -> VatRef {
+        // forfettari: le vendite sono senza IVA (N2.2)
+        if self.regime == openfatt_store::Regime::Flat && self.doc.kind.is_sale() && self.doc.kind != DocKind::SelfInvoice {
+            if let Some(v) = openfatt_store::flat_vat(&self.vats) {
+                return v;
+            }
+        }
         if let Some(id) = self.doc.party.default_vat_id {
             if let Some(v) = self.vats.iter().find(|v| v.id == id) {
                 return self.pa_vat(VatRef::from_code(v));
@@ -300,10 +322,29 @@ impl Editor {
         if self.doc.payment_id.is_none() {
             self.doc.payment_id = p.default_payment_id;
         }
-        if p.is_pa && self.doc.kind.is_fiscal() && self.doc.vat_liability == "I" {
+        if p.is_pa && self.doc.kind.is_fiscal() && matches!(self.doc.vat_liability.as_str(), "I" | "D") && self.regime != openfatt_store::Regime::Flat {
             self.doc.vat_liability = "S".into();
         } else if !p.is_pa && self.doc.vat_liability == "S" {
             self.doc.vat_liability = "I".into();
+        }
+        // ritenute abituali del cliente (professionista, agente di commercio)
+        if changed_party && self.doc.status == DocStatus::Draft && self.doc.kind.is_sale() && self.doc.kind.is_fiscal() && self.doc.withholdings.is_empty() && !p.withholding_profile.is_empty() && self.regime != openfatt_store::Regime::Flat {
+            match store.withholdings_for(&p.withholding_profile, Some(p.id), self.doc.date, (self.doc.id != 0).then_some(self.doc.id)) {
+                Ok(w) if !w.is_empty() => {
+                    self.doc.withholdings = w;
+                    for l in self.doc.lines.iter_mut().filter(|l| l.kind == LineKind::Item) {
+                        l.withholding = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => msgs.err(e.to_string()),
+            }
+        }
+        // cliente bloccato o oltre il fido
+        if changed_party && self.doc.kind.is_sale() && self.doc.status == DocStatus::Draft {
+            if let Ok(Some(w)) = store.credit_warning(&p, Decimal::ZERO, (self.doc.id != 0).then_some(self.doc.id)) {
+                msgs.warn(w);
+            }
         }
         if self.doc.agent_id.is_none() && self.doc.kind.is_sale() {
             self.doc.agent_id = p.agent_id;
@@ -314,7 +355,12 @@ impl Editor {
                 self.doc.intent_protocol = i.protocol.clone();
             }
         }
+        // destinazione abituale (sede con "destinazione proposta")
+        if changed_party && self.doc.kind.has_transport() && self.doc.status == DocStatus::Draft {
+            self.doc.destination = p.sites.iter().find(|s| s.default_destination).map(|s| s.destination_text()).unwrap_or_default();
+        }
         self.doc.party = p;
+        openfatt_store::apply_regime(self.regime, &mut self.doc, &self.vats);
         self.dirty = true;
         if changed_party {
             self.doc.price_list_id = None;
@@ -396,6 +442,16 @@ impl Editor {
     fn issue(&mut self, cx: &mut Ctx) {
         if self.doc.kind.is_credit() && !self.doc.related.iter().any(|r| r.kind == "FATTURA" && !r.number.trim().is_empty()) {
             cx.msgs.warn("Nota di credito senza la fattura stornata: indicarla con \"Storna fattura...\" o nei Riferimenti");
+        }
+        // cliente bloccato o fido superato: si emette solo dopo conferma
+        if self.doc.kind.is_sale() && !self.doc.kind.is_credit() && !self.credit_ok && self.doc.status == DocStatus::Draft {
+            let amount = calc::compute(&self.doc).map(|t| t.net_to_pay).unwrap_or_default();
+            let amount = if self.doc.kind.has_due_dates() { amount } else { Decimal::ZERO };
+            let live = self.doc.party_id.and_then(|id| cx.store.party(id).ok().flatten()).unwrap_or_else(|| self.doc.party.clone());
+            if let Ok(Some(w)) = cx.store.credit_warning(&live, amount, (self.doc.id != 0).then_some(self.doc.id)) {
+                self.credit_ask = Some(w);
+                return;
+            }
         }
         let frozen = self.in_batch || self.doc.due_dates.iter().any(|d| !d.paid.is_zero() || !d.writeoff.is_zero());
         if !frozen && !self.save(cx) {
@@ -500,6 +556,29 @@ impl Editor {
                     match crate::mailer::for_document(cx.store, &self.doc) {
                         Ok(c) => cx.nav.push(Nav::Mail(vec![c])),
                         Err(e) => cx.msgs.err(e),
+                    }
+                }
+                if !purchase && self.doc.id != 0 && !self.dirty && self.doc.status != DocStatus::Cancelled && ui.button(format!("{}  Invia con WhatsApp...", icon::CHAT_CIRCLE)).on_hover_text("Apre la chat del cliente con il messaggio pronto e la cartella con il PDF da trascinare").clicked() {
+                    ui.close_menu();
+                    let live = self.doc.party_id.and_then(|id| cx.store.party(id).ok().flatten());
+                    let phone = crate::whatsapp::phone_of(&self.doc.party).or_else(|| live.as_ref().and_then(crate::whatsapp::phone_of));
+                    match phone {
+                        None => cx.msgs.warn("Il cliente non ha un numero di cellulare o di telefono nell'anagrafica"),
+                        Some(phone) => {
+                            let name = format!("{} {}.pdf", self.doc.kind.label(), self.doc.number_label().replace(['/', '\\'], "-"));
+                            match services::document_pdf(cx.store, &self.doc).and_then(|pdf| services::temp_file(&name, &pdf)) {
+                                Ok(path) => {
+                                    let company = cx.store.company().map(|c| c.display_name()).unwrap_or_default();
+                                    let total = calc::compute(&self.doc).map(|t| eur(t.total)).unwrap_or_default();
+                                    if let Some(dir) = path.parent() {
+                                        services::open_path(dir);
+                                    }
+                                    services::open_path(std::path::Path::new(&crate::whatsapp::link(&phone, &crate::whatsapp::message(&company, &self.doc, &total))));
+                                    cx.msgs.ok(format!("Chat aperta: trascinare nella conversazione il file {}", name));
+                                }
+                                Err(e) => cx.msgs.err(e),
+                            }
+                        }
                     }
                 }
                 if ui.button(format!("{}  Salva PDF in una cartella...", icon::DOWNLOAD_SIMPLE)).clicked() {
@@ -809,6 +888,9 @@ impl Editor {
             ui.end_row();
             ui.label("Sconto documento %");
             changed |= ui.add(egui::TextEdit::singleline(&mut self.doc.discount).desired_width(90.0).hint_text("es. 5 o 3+2")).changed();
+            ui.end_row();
+            ui.label("Commessa interna");
+            changed |= ui.add(egui::TextEdit::singleline(&mut self.doc.project).desired_width(240.0).hint_text("lavoro, cantiere, progetto")).on_hover_text("Raggruppa ricavi e costi in Statistiche > per commessa. Non va in fattura").changed();
             ui.end_row();
             if self.doc.kind.stock_effect() != 0 && warehouses.len() > 1 {
                 ui.label("Magazzino");
@@ -1504,8 +1586,26 @@ impl Editor {
         });
     }
 
-    fn fiscal_section(&mut self, ui: &mut egui::Ui) {
+    fn fiscal_section(&mut self, ui: &mut egui::Ui, store: &openfatt_store::Store) {
         let mut changed = false;
+        // situazione del massimale Enasarco del preponente (si rilegge se cambiano
+        // soggetto, anno o archivio)
+        let has_ena = self.doc.withholdings.iter().any(|w| w.kind == "RT04");
+        if has_ena && self.doc.kind.is_sale() {
+            let key = (self.doc.party_id, chrono::Datelike::year(&self.doc.date), store.generation());
+            if self.enasarco.as_ref().map(|(k, _)| *k != key).unwrap_or(true) {
+                if let Some(pid) = self.doc.party_id {
+                    if let Ok(u) = store.enasarco_usage(pid, key.1, (self.doc.id != 0).then_some(self.doc.id)) {
+                        self.enasarco = Some((key, u));
+                    }
+                }
+            }
+        }
+        if self.regime == openfatt_store::Regime::Flat && self.doc.kind.is_sale() {
+            ui.label(RichText::new("Regime forfettario: righe senza IVA (N2.2), bollo automatico oltre 77,47 €, nessuna ritenuta.").color(GRAY));
+        } else if self.regime == openfatt_store::Regime::CashVat && self.doc.vat_liability == "D" {
+            ui.label(RichText::new("IVA per cassa: esigibilità differita, la dicitura dell'art. 32-bis è nella causale.").color(GRAY));
+        }
         egui::CollapsingHeader::new("Ritenute, cassa previdenziale e bollo").default_open(self.doc.pension_fund.is_some() || !self.doc.withholdings.is_empty()).show(ui, |ui| {
             // cassa
             let mut has_pf = self.doc.pension_fund.is_some();
@@ -1545,18 +1645,52 @@ impl Editor {
                         remove = Some(i);
                     }
                 });
+                if w.kind == "RT04" {
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        match &self.enasarco {
+                            Some((_, u)) => {
+                                let text = match (u.cap, u.residual) {
+                                    (Some(cap), Some(res)) => format!("Massimale Enasarco {}: € {} · già assoggettati € {} · residuo € {}{}", u.year, eur(cap), eur(u.used), eur(res), if u.year_known { "" } else { " (valori dell'anno precedente: aggiornarli in Opzioni > Enasarco)" }),
+                                    _ => "Enasarco senza massimale (società di capitali)".to_string(),
+                                };
+                                ui.label(RichText::new(text).color(if u.year_known { GRAY } else { ORANGE }));
+                                if w.max_base != u.residual && ui.small_button("Usa il residuo").on_hover_text("Limita l'imponibile del contributo al residuo del massimale").clicked() {
+                                    w.max_base = u.residual;
+                                    changed = true;
+                                }
+                            }
+                            None => {
+                                ui.label(RichText::new("Scegliere il preponente per il massimale").color(GRAY));
+                            }
+                        }
+                    });
+                }
             }
             if let Some(i) = remove {
                 self.doc.withholdings.remove(i);
                 changed = true;
             }
-            if self.doc.withholdings.len() < 2 && ui.button("\u{E3D4} Ritenuta d'acconto").clicked() {
-                self.doc.withholdings.push(Withholding::default());
-                for l in self.doc.lines.iter_mut().filter(|l| l.kind == LineKind::Item) {
-                    l.withholding = true;
+            ui.horizontal(|ui| {
+                let mut add: Vec<Withholding> = Vec::new();
+                if self.doc.withholdings.len() < 3 && ui.button("\u{E3D4} Ritenuta d'acconto").clicked() {
+                    add.push(Withholding::default());
                 }
-                changed = true;
-            }
+                if self.doc.kind.is_sale() && !self.doc.withholdings.iter().any(|w| w.kind == "RT04") && ui.button("\u{E3D4} Contributo Enasarco").on_hover_text("Agente di commercio: contributo a carico dell'agente trattenuto dal preponente, entro il massimale annuo").clicked() {
+                    match store.enasarco_withholding(self.doc.party_id, self.doc.date, (self.doc.id != 0).then_some(self.doc.id)) {
+                        Ok(w) => add.push(w),
+                        Err(_) => add.push(Withholding { kind: "RT04".into(), rate: Decimal::new(85, 1), payment_reason: "Q".into(), ..Default::default() }),
+                    }
+                }
+                if !add.is_empty() {
+                    self.doc.withholdings.extend(add);
+                    for l in self.doc.lines.iter_mut().filter(|l| l.kind == LineKind::Item) {
+                        l.withholding = true;
+                    }
+                    self.enasarco = None;
+                    changed = true;
+                }
+            });
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label("Imposta di bollo");
@@ -1629,8 +1763,8 @@ impl Editor {
                     t.start = nd;
                     changed = true;
                 }
-                ui.label("");
-                ui.label("");
+                ui.label("N. spedizione");
+                changed |= ui.add(egui::TextEdit::singleline(&mut t.tracking).desired_width(140.0).hint_text("lettera di vettura")).on_hover_text("Numero assegnato dal corriere: va in stampa e sull'etichetta").changed();
                 ui.end_row();
             });
         });
@@ -2062,6 +2196,17 @@ impl Editor {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, cx: &mut Ctx) {
+        if let Some(w) = self.credit_ask.clone() {
+            match widgets::confirm(ui.ctx(), "Cliente da verificare", &format!("{}.\n\nEmettere comunque il documento?", w)) {
+                Some(true) => {
+                    self.credit_ask = None;
+                    self.credit_ok = true;
+                    self.issue(cx);
+                }
+                Some(false) => self.credit_ask = None,
+                None => {}
+            }
+        }
         if self.confirm_close {
             match widgets::confirm(ui.ctx(), "Modifiche non salvate", "Chiudere il documento senza salvare le modifiche?") {
                 Some(true) => {
@@ -2136,7 +2281,7 @@ impl Editor {
                                             }
                                         });
                                         ui.add_space(4.0);
-                                        self.fiscal_section(ui);
+                                        self.fiscal_section(ui, cx.store);
                                     });
                                     // incassi e acconti: anche sui documenti bloccati (emessi, già trasmessi)
                                     ui.add_space(10.0);
@@ -2158,7 +2303,22 @@ impl Editor {
                         }
                         DocTab::Addresses => {
                             ui.add_enabled_ui(!locked, |ui| {
-                                ui.label("Destinazione (se diversa dalla sede)");
+                                ui.horizontal(|ui| {
+                                    ui.label("Destinazione (se diversa dalla sede)");
+                                    let sites: Vec<PartySite> = self.doc.party.sites.clone();
+                                    if !sites.is_empty() {
+                                        ui.menu_button(format!("{}  Sedi del cliente", icon::MAP_PIN), |ui| {
+                                            for s in &sites {
+                                                let t = s.destination_text();
+                                                if ui.button(format!("{}: {}", s.kind.label(), t.replace('\n', ", "))).clicked() {
+                                                    self.doc.destination = t;
+                                                    self.dirty = true;
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
                                 if ui.add(egui::TextEdit::multiline(&mut self.doc.destination).desired_rows(4).desired_width(520.0)).changed() {
                                     self.dirty = true;
                                 }

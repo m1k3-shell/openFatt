@@ -849,7 +849,8 @@ fn residuo_spostato_a_una_nuova_scadenza() {
 fn pagamenti_registrati_prima_dell_aggiornamento_diventano_registrazioni() {
     let path = std::env::temp_dir().join(format!("openfatt-pagamenti-{}.gadb", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let last = crate::migrations::MIGRATIONS.len();
+    // versione prima della migrazione che introduce le registrazioni degli incassi
+    let last = crate::migrations::MIGRATIONS.iter().position(|m| m.contains("CREATE TABLE payments(")).unwrap() + 1;
     {
         // archivio fermo alla versione precedente, con un incasso registrato allora
         let conn = rusqlite::Connection::open(&path).unwrap();

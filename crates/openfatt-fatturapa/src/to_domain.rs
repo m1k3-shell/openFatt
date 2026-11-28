@@ -73,6 +73,7 @@ pub fn purchase_document(f: &FatturaElettronica, body: usize) -> Option<Document
             rate: r.aliquota_ritenuta,
             base_percent: Decimal::ONE_HUNDRED,
             payment_reason: r.causale_pagamento.clone(),
+            max_base: None,
         });
     }
     if let Some(c) = d.dati_cassa_previdenziale.first() {

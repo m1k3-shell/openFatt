@@ -10,11 +10,12 @@ use super::{Ctx, Nav};
 pub struct State {
     year: i32,
     note: String,
+    settings: Option<openfatt_store::ConservationSettings>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { year: chrono::Local::now().date_naive().year() - 1, note: String::new() }
+        State { year: chrono::Local::now().date_naive().year() - 1, note: String::new(), settings: None }
     }
 }
 
@@ -43,6 +44,48 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     }
                 }
             });
+            ui.horizontal(|ui| {
+                if ui.button("Verifica pacchetto...").on_hover_text("Ricontrolla le impronte SHA-256 di un pacchetto già salvato").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("ZIP", &["zip"]).pick_file() {
+                        match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| openfatt_store::verify_conservation_package(&b).map_err(|e| e.to_string())) {
+                            Ok(c) if c.problems.is_empty() => cx.msgs.ok(format!("Pacchetto integro: {} file su {} con l'impronta dell'indice", c.ok, c.files)),
+                            Ok(c) => cx.msgs.err(format!("Pacchetto alterato o incompleto: {}", c.problems.join("; "))),
+                            Err(e) => cx.msgs.err(e),
+                        }
+                    }
+                }
+                if ui.button("Responsabile e conservatore...").clicked() {
+                    st.settings = Some(cx.store.conservation_settings().unwrap_or_default());
+                }
+            });
+            if let Some(s) = st.settings.as_mut() {
+                let mut close = false;
+                egui::Grid::new("cons_set").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                    for (label, v, hint) in [
+                        ("Responsabile della conservazione", &mut s.responsible, "nome e cognome"),
+                        ("Delegato", &mut s.delegate, ""),
+                        ("Conservatore", &mut s.conservator, "Agenzia delle Entrate o conservatore scelto"),
+                        ("Contratto / adesione", &mut s.contract, "riferimento"),
+                        ("Copie conservate in", &mut s.storage, "es. NAS ufficio e disco esterno"),
+                    ] {
+                        ui.label(label);
+                        ui.add(egui::TextEdit::singleline(v).desired_width(260.0).hint_text(hint));
+                        ui.end_row();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Salva").clicked() && cx.msgs.check(cx.store.set_conservation_settings(s), "Dati della conservazione salvati").is_some() {
+                        close = true;
+                    }
+                    if ui.button("Chiudi").clicked() {
+                        close = true;
+                    }
+                });
+                ui.label(RichText::new("Compaiono nell'indice del pacchetto e nella bozza del manuale della conservazione inclusa nel pacchetto.").small().color(GRAY));
+                if close {
+                    st.settings = None;
+                }
+            }
             ui.add_space(6.0);
             for r in cx.store.conservation_records().unwrap_or_default().iter().take(12) {
                 ui.horizontal(|ui| {

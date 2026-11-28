@@ -194,6 +194,23 @@ impl OpenFattApp {
                     "fe-ricevute" => Some(Screen::EInvoicesIn),
                     "scadenzario" => Some(Screen::Dues),
                     "primanota" => Some(Screen::Cash),
+                    x if x.starts_with("primanota-estratto:") => {
+                        app.ledger.acc = ui::accounting::State::with_statement(app.store.as_ref().unwrap(), std::path::Path::new(x.trim_start_matches("primanota-estratto:")), "Banca");
+                        Some(Screen::Cash)
+                    }
+                    "primanota-piano" => {
+                        app.ledger.acc = ui::accounting::State::with_chart(app.store.as_ref().unwrap());
+                        Some(Screen::Cash)
+                    }
+                    "primanota-f24" => {
+                        let t = chrono::Local::now().date_naive();
+                        app.ledger.acc = ui::accounting::State::with_f24(app.store.as_ref().unwrap(), chrono::Datelike::year(&t), chrono::Datelike::month(&t));
+                        Some(Screen::Cash)
+                    }
+                    "magazzino-riordino" => {
+                        app.stock = ui::stock::State::with_reorder(app.store.as_ref().unwrap());
+                        Some(Screen::Stock)
+                    }
                     "magazzino" => Some(Screen::Stock),
                     "inventario" => {
                         app.inventory = ui::inventory::State::latest(app.store.as_ref().unwrap());
@@ -437,6 +454,14 @@ impl OpenFattApp {
                     let _ = s.start_session(&host);
                 }
                 self.backups.on_archive_open(&s);
+                // report programmati arrivati a scadenza
+                let (files, errs) = crate::reports::run_scheduled(&s, chrono::Local::now().date_naive());
+                if !files.is_empty() {
+                    self.msgs.ok(format!("Report programmati preparati: {}", files.len()));
+                }
+                for e in errs {
+                    self.msgs.warn(format!("Report programmato non preparato - {}", e));
+                }
                 self.store = Some(s);
                 self.cfg.touch(&path);
                 self.screen = Screen::Home;

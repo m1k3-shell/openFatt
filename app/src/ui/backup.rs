@@ -223,6 +223,29 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, m: &mut Manager) {
         }
         ui.label(theme::muted("Il ripristino crea sempre un archivio nuovo: quello attuale non viene toccato."));
     });
+    ui.horizontal(|ui| {
+        if theme::button(ui, icon::ARROW_SQUARE_OUT, "Trasferisci su un altro computer...").on_hover_text("Copia verificata dell'archivio, impostazioni delle copie e istruzioni in una cartella (chiavetta, disco esterno)").clicked() {
+            if let Some(dir) = rfd::FileDialog::new().set_title("Cartella dove preparare il trasferimento").pick_folder() {
+                let (stem, _) = m.identity();
+                match crate::backups::export_transfer(cx.store, &dir, &stem) {
+                    Ok(p) => {
+                        cx.msgs.ok(format!("Trasferimento pronto in {}: seguire il file LEGGIMI sul computer nuovo", dir.display()));
+                        let _ = p;
+                        crate::services::open_path(&dir);
+                    }
+                    Err(e) => cx.msgs.err(e),
+                }
+            }
+        }
+        if theme::button(ui, icon::DOWNLOAD_SIMPLE, "Importa impostazioni...").on_hover_text("Destinazioni delle copie portate da un altro computer (le password vanno reinserite)").clicked() {
+            if let Some(f) = rfd::FileDialog::new().add_filter("Impostazioni", &["json"]).pick_file() {
+                match m.import_settings(&f) {
+                    Ok(n) => cx.msgs.ok(format!("{} destinazioni importate: reinserire le password", n)),
+                    Err(e) => cx.msgs.err(e),
+                }
+            }
+        }
+    });
 
     if let Some(d) = open_copies {
         let (tx, rx) = channel();

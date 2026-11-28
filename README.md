@@ -11,7 +11,10 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 ## Funzioni
 
 **Anagrafiche e articoli**
-- Clienti e fornitori con controllo di P.IVA, codice fiscale, codice destinatario e IBAN; referenti; condizioni di pagamento, listino e sconti abituali; agente; dichiarazioni d'intento con plafond; carta fedeltà; allegati.
+- Clienti e fornitori con controllo di P.IVA, codice fiscale, codice destinatario e IBAN; referenti con ruolo; condizioni di pagamento, listino e sconti abituali; agente; dichiarazioni d'intento con plafond; carta fedeltà; allegati.
+- **Sedi tipizzate** (legale, operativa, amministrativa, destinazioni della merce): la destinazione proposta compare da sola nei DDT, le altre si scelgono dal documento.
+- **Fido e clienti bloccati**: esposizione (scadenze aperte meno note di credito) e scaduto nella scheda; scegliendo il cliente e all'emissione il programma avvisa e chiede conferma se il cliente è bloccato o il fido è superato.
+- **Ritenute abituali del cliente** (ritenuta d'acconto 20%, agente di commercio): proposte nelle nuove fatture e parcelle.
 - Articoli e servizi: listini multipli, scaglioni, condizioni per cliente; varianti (taglia/colore) con codici a barre; lotti e scadenze; numeri di serie; foto e allegati; pezzi per confezione; contributo ambientale (RAEE, pile...); **gruppi di articoli** (kit) e **prodotti con distinta base**.
 - Importazione di listini **Metel** (materiale elettrico), di articoli dalla **fattura elettronica del fornitore**, CSV ed Easyfatt-XML.
 - Elenchi con colonne a scelta, ordinamento, raggruppamenti con subtotali, totali, selezione multipla, modifica di più schede insieme, esportazione in Excel.
@@ -24,6 +27,9 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 - **Note ad uso interno dall'elenco**: nella colonna *Note interne* di DDT, preventivi, ordini e fatture si scrive con un clic sulla cella, anche a documento emesso (non vanno in stampa né nella fattura elettronica).
 - **Nota di credito sulla fattura da stornare**: *Storna fattura...* elenca le fatture emesse del cliente; si storna tutta la fattura, solo alcune righe o si cita soltanto (rettifica di prezzo o sconto). La fattura va nei riferimenti (DatiFattureCollegate, anche se nasce da DDT), in testa alle righe ("Storno fattura n. ... del ...") e nella causale. Lo stesso da *Includi doc.* e dalla trasformazione fattura → nota di credito. Emettendo una nota senza fattura collegata il programma avvisa.
 - **Fatture d'acconto e saldo**: nella fattura di saldo *Detrai acconti...* spunta una o più fatture d'acconto del cliente: per ognuna il riferimento alla fattura d'acconto e una riga con l'imponibile in negativo per aliquota (con ritenuta e cassa come nell'acconto). Si propone solo quanto resta da detrarre; annullando il saldo l'acconto torna disponibile. Dall'elenco delle fatture d'acconto si crea direttamente la *Fattura di saldo*. Nelle statistiche il saldo conta per l'intero lavoro; le provvigioni dell'agente maturano sulla fattura d'acconto e sul saldo si toglie quella già riconosciuta, con la stessa aliquota.
+- **Scontrino → fattura**: dall'elenco delle vendite al banco *Fattura* crea la fattura con le stesse righe e la stessa data, gli estremi del documento commerciale in AltriDatiGestionali (`N.DOC.COMM`, FAQ AdE n. 45 del 21/12/2018), senza secondo scarico né nuove scadenze; la vendita esce dai corrispettivi del giorno, così l'IVA si conta una volta.
+- **Commessa interna** sui documenti di vendita e di acquisto: in *Statistiche* ricavi, costi e margine per commessa.
+- **Numero di spedizione** (lettera di vettura) nei dati di trasporto, in stampa e sull'etichetta.
 - Righe: subtotali, **righe calcolate** (percentuale delle righe precedenti), **calcolo inverso** (dal totale al prezzo, o sconto sul documento per arrivare a un totale), sconto merce, confezioni, gruppi che si espandono nei componenti, **ultimi prezzi praticati**, copia di righe da un altro documento, riordino.
 - **Documenti ricorrenti** (canoni, abbonamenti) con il periodo nelle descrizioni.
 - **Valuta estera** con cambio e controvalore in euro; agenti e provvigioni per documento, articolo o categoria.
@@ -33,6 +39,8 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 - FatturaPA 1.2.3 con oltre 40 controlli preventivi (codici di errore dello SdI), invio e ricezione via PEC, notifiche e stati, fatture passive (anche `.p7m`), PDF leggibile, firma digitale CAdES-BES con smart card, token o file `.pfx`.
 - **Ordini NSO** della Pubblica Amministrazione (UBL): importazione e tripletta dell'ordine in fattura.
 - Dichiarazione d'intento in fattura (`AltriDatiGestionali` INTENTO), bollo virtuale, ritenute, cassa previdenziale, scissione dei pagamenti.
+- **Fatture da gestire secondo l'esito SdI**, in cima alle fatture inviate, con la scadenza: da inviare (12 giorni dall'operazione), nessun esito dopo 5 giorni, scartata (correggere e reinviare con stesso numero e data entro 5 giorni, circ. 13/E/2018), non recapitata (copia di cortesia al cliente già pronta), consegnata alla PA (15 giorni per l'esito), rifiutata dalla PA (nota di credito che la storna).
+- **Conservazione**: responsabile, delegato e conservatore nell'indice del pacchetto, bozza del manuale della conservazione inclusa, *Verifica pacchetto* che ricontrolla le impronte di un pacchetto salvato.
 - **Pacchetto per la conservazione** a norma (fatture, ricevute SdI, indice con impronte SHA-256) da consegnare al conservatore.
 
 **Banco**
@@ -41,20 +49,30 @@ Scritto in Rust, applicazione desktop nativa per Windows. Licenza **AGPL-3.0-or-
 
 **Magazzino**
 - Più magazzini, trasferimenti, impegni e merce in arrivo, scorte minime, inventario fisico con Excel, **produzione** da distinta base, tracciabilità di lotti e seriali.
+- **Riordino sotto scorta**: disponibile previsto (giacenza − impegnato + in arrivo) contro la scorta minima, quantità al multiplo d'ordine, un ordine a fornitore in bozza per fornitore, con codice e prezzo del fornitore scelto.
 
 **Contabilità**
 - Scadenzario con incassi parziali e **solleciti** a tre livelli, prima nota.
+- **Regime forfettario** (RF19): nuove vendite senza IVA con natura N2.2, bollo automatico, nessuna ritenuta, dicitura dell'art. 1 c. 67 L. 190/2014 sulle parcelle. **IVA per cassa** (RF17): esigibilità differita sulle vendite a clienti che agiscono nell'esercizio d'impresa, arte o professione (verso i privati l'IVA resta esigibile subito) e sugli acquisti, con la dicitura dell'art. 32-bis DL 83/2012; vale anche per i documenti creati da trasformazioni, fatturazione differita, ricorrenti e fatture ricevute (la scissione dei pagamenti prevale).
+- **Contributo Enasarco** dell'agente di commercio (RT04, 8,5% a carico dell'agente) con il **massimale annuo per preponente**: il residuo si calcola sulle fatture emesse dell'anno e limita il contributo; tabella per anno modificabile (2025 e 2026 già inseriti), mono o plurimandatario, società di capitali senza massimale.
+- **Riepilogo delle ritenute per percipiente** nell'anno del pagamento (compensi pagati a professionisti e agenti, oppure ritenute subite) per le certificazioni e il commercialista, in Excel.
+- **Piano dei conti** della prima nota (conti finanziari e voci di entrata e uscita, gruppi) con la **transcodifica** dei conti e dei codici IVA del programma dello studio; **esportazione** di prima nota e registri IVA in CSV; entrate e uscite per voce.
+- **Saldi iniziali** dei conti e **giroconti** (due movimenti collegati, fuori da entrate e uscite).
+- **Riconciliazione bancaria** dall'estratto conto camt.053 (ISO 20022) o CSV dell'home banking: le righe già in prima nota si riconoscono, gli incassi e i pagamenti si abbinano alle scadenze aperte (importo, nome, numero del documento), il resto si registra con la voce scelta; reimportare lo stesso estratto non crea doppioni.
+- **Versamenti F24**: ritenute operate sui compensi pagati nel mese (1040, 1038) e IVA del periodo, con scadenza; registro dei versamenti con il movimento di prima nota.
 - Distinte **Ri.Ba.**, addebiti **SDD** e **bonifici** SEPA nei formati CBI per l'home banking.
 - Registri IVA, **liquidazione** mensile o trimestrale e file della **Comunicazione LIPE**.
 - **Prospetto per la dichiarazione IVA annuale** da dare al commercialista: quadri VE, VF, VJ, VL e VT (anche per regione) calcolati da registri e liquidazioni secondo le istruzioni ufficiali del modello IVA, in PDF ed Excel, con l'elenco delle voci da verificare a mano.
-- **Operazioni di fine anno**: controlli, inventario valorizzato al 31/12, copia di sicurezza e blocco dell'anno.
+- **Operazioni di fine anno**: controlli, inventario valorizzato al 31/12, copia di sicurezza e blocco dell'anno. **Archivio pulito** per ripartire: anagrafiche, articoli, listini e impostazioni senza documenti, con giacenze (anche per variante, lotto e seriale) e saldi come valori iniziali.
 
 **Analisi e organizzazione**
-- **Statistiche** per cliente, articolo, categoria, agente, mese, fornitore con margini; confronto con l'anno precedente; **flussi di cassa** previsti a 12 mesi.
+- **Statistiche** per cliente, articolo, categoria, agente, mese, fornitore e commessa con margini, **analisi ABC** (classi A 80%, B 95%, C); confronto con l'anno precedente; **flussi di cassa** previsti a 12 mesi.
+- **Report programmati**: prima nota e registri IVA per lo studio, vendite per cliente o articolo, scadenze aperte, preparati da soli ogni settimana o mese nella cartella scelta all'apertura dell'archivio.
 - **Agenti e provvigioni** sul fatturato o sull'incassato, insoluti, liquidazioni, estratto conto PDF/Excel.
 - **Agenda** con appuntamenti, telefonate, attività e scadenze di pagamento.
 - **Email** dei documenti in PDF e comunicazioni (SMTP, PEC o programma di posta).
-- Stampe con tre modelli, logo e colore aziendale; etichette con codici a barre (A4 o rotolo).
+- Stampe con tre modelli, logo e colore aziendale; etichette con codici a barre (A4 o rotolo). **Copie** con la loro dicitura (es. DDT per destinatario, mittente e vettore) e **stampa su rotolo** da 80 o 58 mm per le stampanti termiche.
+- **WhatsApp**: dal documento si apre la chat del cliente (collegamento pubblico wa.me) con il messaggio pronto e la cartella del PDF da trascinare.
 - **Editor grafico dei modelli di stampa**: ogni elemento (dati dell'azienda e del cliente, numero, data, righe, totali, scadenze, testi fissi, logo, riquadri) si sposta e si ridimensiona col mouse, in millimetri; le righe continuano nelle pagine seguenti. **Moduli prestampati**: si carica la scansione del modulo come sfondo, si posizionano i campi sopra le caselle e si stampano solo i dati, con la correzione dell'allineamento della stampante.
 
 **Lavoro quotidiano**
@@ -174,7 +192,7 @@ Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con
 
 ## Verifiche
 
-- **242 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo.
+- **263 test automatici** (`cargo test --workspace`), tra cui gli esempi numerici dell'Elenco controlli SdI, la rilettura degli esempi ufficiali FatturaPA e delle notifiche SdI, il percorso completo sull'archivio dimostrativo, il ciclo SdI simulato con le notifiche ufficiali di esempio (scarto, mancata consegna, rifiuto della PA), la riconciliazione da estratti conto camt.053 sintetici.
 - **Collaudo completo** (`cargo test -p openfatt collaudo -- --nocapture`): percorre tutte le funzioni (righe speciali, valuta, dichiarazione d'intento, NSO, produzione, distinte bancarie, LIPE, agenti, statistiche, ricorrenti, carte, negozio online, utenti e blocchi, fine anno, conservazione, interscambio, copie di sicurezza) e salva i file prodotti in `target/collaudo` con un rapporto.
 - I file prodotti sono **validi contro gli schemi ufficiali**: fatture elettroniche (`tools/valida-xsd.ps1`, schema VFPR12 1.2.3), bonifici e SDD CBI (`tools/valida-cbi.ps1`), Comunicazione LIPE (`tools/valida-lipe.ps1`).
 - Codici a barre riletti con un decodificatore indipendente (ZXing); firme verificate con il validatore di .NET.
@@ -189,6 +207,8 @@ Al primo avvio si crea un archivio vuoto oppure un **archivio dimostrativo** con
 - Più postazioni su una vera cartella di rete (provato con due connessioni sullo stesso file).
 - Importazione da Easyfatt su archivi reali diversi dai due dimostrativi e da versioni di Easyfatt con motore Firebird diverso dal 2.5.
 - Stampa dei moduli prestampati su una stampante e un modulo reali (va regolata la correzione dell'allineamento).
+- Ritenute dei compensi pagati solo in parte: il riepilogo per percipiente e le proposte F24 considerano i documenti pagati per intero (quelli in parte compaiono tra i "da pagare"); i versamenti per gli acconti si correggono a mano nella finestra F24.
+- Riconciliazione con estratti conto camt.053 o CSV di banche reali (provata con file costruiti secondo lo standard ISO 20022), invio con WhatsApp, stampa su una stampante termica reale.
 - Copie su un cloud WebDAV reale (provate con un server di prova che simula guasti) e caricamento effettivo da parte di OneDrive, Google Drive o Dropbox.
 - Caricamento dei file delle distinte in un portale bancario reale (InBank o altri): i file seguono gli standard CBI ma non sono stati provati con una banca.
 

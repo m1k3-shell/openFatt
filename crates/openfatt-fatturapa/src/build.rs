@@ -334,7 +334,8 @@ pub fn build(company: &Company, doc: &Document, totals: &Totals, opt: &BuildOpti
         numero: truncate(&basic_latin(&doc.number_label()), 20),
         ..Default::default()
     };
-    for w in &totals.withholdings {
+    // un contributo azzerato dal massimale (Enasarco) non si indica
+    for w in totals.withholdings.iter().filter(|w| !w.amount.is_zero()) {
         dgd.dati_ritenuta.push(DatiRitenuta {
             tipo_ritenuta: w.kind.clone(),
             importo_ritenuta: w.amount,
@@ -353,7 +354,7 @@ pub fn build(company: &Company, doc: &Document, totals: &Totals, opt: &BuildOpti
                 importo_contributo_cassa: pf.amount,
                 imponibile_cassa: Some(pf.base),
                 aliquota_iva: pf.vat.rate,
-                ritenuta: pf.subject_to_withholding && !totals.withholdings.is_empty(),
+                ritenuta: pf.subject_to_withholding && totals.withholdings.iter().any(|w| !w.amount.is_zero()),
                 natura: pf.vat.natura.clone().filter(|n| !n.is_empty() && pf.vat.rate.is_zero()),
                 riferimento_amministrazione: None,
             });
@@ -448,6 +449,17 @@ pub fn build(company: &Company, doc: &Document, totals: &Totals, opt: &BuildOpti
                 riferimento_data: decl.and_then(|d| d.date),
             });
         }
+        // fattura di una vendita certificata con documento commerciale (FAQ AdE n. 45 del
+        // 21/12/2018): estremi del documento commerciale sulla prima riga
+        if let (Some(r), true) = (&doc.from_receipt, linee.is_empty()) {
+            let id = [r.z_number.trim(), r.receipt_number.trim()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("-");
+            altri.push(AltriDatiGestionali {
+                tipo_dato: "N.DOC.COMM".into(),
+                riferimento_testo: Some(truncate(&basic_latin(if id.is_empty() { r.rt_serial.trim() } else { &id }), 60)).filter(|s| !s.is_empty()),
+                riferimento_numero: r.receipt_number.trim().parse::<i64>().ok().map(Decimal::from),
+                riferimento_data: r.date,
+            });
+        }
         // documento in valuta: controvalore in euro della riga (FAQ AdE sulla valuta estera)
         if doc.is_foreign_currency() && linee.is_empty() {
             altri.push(AltriDatiGestionali {
@@ -482,7 +494,7 @@ pub fn build(company: &Company, doc: &Document, totals: &Totals, opt: &BuildOpti
             sconto_maggiorazione: line_discounts(lc),
             prezzo_totale: lc.total,
             aliquota_iva: lc.vat.rate,
-            ritenuta: lc.withholding && !totals.withholdings.is_empty(),
+            ritenuta: lc.withholding && totals.withholdings.iter().any(|w| !w.amount.is_zero()),
             natura,
             riferimento_amministrazione: None,
             altri_dati_gestionali: altri,

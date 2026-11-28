@@ -7,6 +7,7 @@
 //! Le funzioni sono pure: ricevono i dati già raccolti e restituiscono il testo del file,
 //! oppure l'elenco dei problemi da correggere (nessun file parziale).
 
+pub mod camt;
 pub mod riba;
 pub mod sepa;
 

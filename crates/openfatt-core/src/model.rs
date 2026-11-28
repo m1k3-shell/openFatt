@@ -200,7 +200,83 @@ pub struct Party {
     pub intents: Vec<IntentDeclaration>,
     /// Carta fedeltà
     pub loyalty_card: String,
+    /// Ritenute proposte nei documenti di vendita: "" nessuna, "rt20" ritenuta d'acconto
+    /// del 20%, "agente" agente di commercio (23% sul 50% e contributo Enasarco).
+    pub withholding_profile: String,
+    /// Sedi: legale, operativa, amministrativa, destinazioni della merce.
+    pub sites: Vec<PartySite>,
+    /// Fido: esposizione massima concessa (scadenze aperte meno note di credito).
+    pub credit_limit: Option<Decimal>,
+    /// Cliente bloccato (insolvente): niente nuovi documenti di vendita senza conferma.
+    pub blocked: bool,
+    pub block_reason: String,
     pub version: i64,
+}
+
+/// Tipo di sede di un cliente o fornitore.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum SiteKind {
+    Legal,
+    Operational,
+    Administrative,
+    #[default]
+    Destination,
+    Other,
+}
+
+impl SiteKind {
+    pub const ALL: [SiteKind; 5] = [SiteKind::Legal, SiteKind::Operational, SiteKind::Administrative, SiteKind::Destination, SiteKind::Other];
+    pub fn label(self) -> &'static str {
+        match self {
+            SiteKind::Legal => "Sede legale",
+            SiteKind::Operational => "Sede operativa",
+            SiteKind::Administrative => "Sede amministrativa",
+            SiteKind::Destination => "Destinazione merce",
+            SiteKind::Other => "Altra sede",
+        }
+    }
+}
+
+/// Sede di un cliente o fornitore.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct PartySite {
+    pub kind: SiteKind,
+    /// Nome della sede (es. "Magazzino di Verona").
+    pub name: String,
+    pub address: String,
+    pub civic: String,
+    pub zip: String,
+    pub city: String,
+    pub province: String,
+    pub country: String,
+    pub phone: String,
+    pub email: String,
+    pub notes: String,
+    /// Destinazione proposta nei nuovi documenti con trasporto.
+    pub default_destination: bool,
+}
+
+impl PartySite {
+    /// Testo dell'indirizzo per il campo "Destinazione" dei documenti.
+    pub fn destination_text(&self) -> String {
+        let mut out = Vec::new();
+        if !self.name.trim().is_empty() {
+            out.push(self.name.trim().to_string());
+        }
+        let street = format!("{} {}", self.address.trim(), self.civic.trim()).trim().to_string();
+        if !street.is_empty() {
+            out.push(street);
+        }
+        let city = format!("{} {} {}", self.zip.trim(), self.city.trim(), if self.province.trim().is_empty() { String::new() } else { format!("({})", self.province.trim()) }).trim().to_string();
+        if !city.is_empty() {
+            out.push(city);
+        }
+        if !self.country.trim().is_empty() && self.country.trim() != "IT" {
+            out.push(self.country.trim().to_string());
+        }
+        out.join("\n")
+    }
 }
 
 /// Referente di un cliente o fornitore.
@@ -274,6 +350,11 @@ impl Default for Party {
             contacts: Vec::new(),
             intents: Vec::new(),
             loyalty_card: String::new(),
+            withholding_profile: String::new(),
+            sites: Vec::new(),
+            credit_limit: None,
+            blocked: false,
+            block_reason: String::new(),
             version: 0,
         }
     }
@@ -1101,6 +1182,9 @@ pub struct Withholding {
     pub base_percent: Decimal,
     /// Causale di pagamento CU (A, M, ...).
     pub payment_reason: String,
+    /// Imponibile massimo assoggettabile (contributo Enasarco: residuo del massimale
+    /// annuo per il preponente). None = nessun limite.
+    pub max_base: Option<Decimal>,
 }
 
 impl Default for Withholding {
@@ -1110,6 +1194,7 @@ impl Default for Withholding {
             rate: Decimal::from(20),
             base_percent: Decimal::ONE_HUNDRED,
             payment_reason: "A".into(),
+            max_base: None,
         }
     }
 }
@@ -1176,6 +1261,8 @@ pub struct Transport {
     pub port: String,
     pub start: Option<NaiveDateTime>,
     pub destination: String,
+    /// Numero di spedizione (lettera di vettura) assegnato dal corriere.
+    pub tracking: String,
 }
 
 /// Riferimento a documento correlato (ordine d'acquisto, contratto, fattura collegata).
@@ -1385,6 +1472,13 @@ pub struct Document {
     /// Ordini: stato e data prevista di conclusione
     pub order_status: OrderStatus,
     pub expected_date: Option<NaiveDate>,
+    /// Fattura emessa per una vendita già certificata con documento commerciale: estremi
+    /// dello scontrino (vanno in AltriDatiGestionali) e documento di vendita al banco.
+    pub from_receipt: Option<RetailRef>,
+    pub from_receipt_id: Option<Id>,
+    /// Commessa interna (lavoro, cantiere, progetto): raggruppa ricavi e costi nelle
+    /// statistiche. Non va in fattura (per la PA c'è il codice commessa dei riferimenti).
+    pub project: String,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub version: i64,
@@ -1434,6 +1528,9 @@ impl Default for Document {
             price_list_id: None,
             order_status: OrderStatus::ToConfirm,
             expected_date: None,
+            from_receipt: None,
+            from_receipt_id: None,
+            project: String::new(),
             created_at: None,
             updated_at: None,
             version: 0,

@@ -441,6 +441,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         SELECT c.id, c.due_date_id, LTRIM(c.amount, '-') FROM cash_entries c WHERE c.id IN (SELECT id FROM payments);
     UPDATE cash_entries SET payment_id = id WHERE id IN (SELECT id FROM payments);
     "#,
+    // giroconti e righe dell'estratto conto già registrate; registro dei versamenti F24
+    r#"
+    ALTER TABLE cash_entries ADD COLUMN link TEXT;
+    CREATE INDEX ix_cash_link ON cash_entries(link);
+    CREATE TABLE f24_payments(
+        id INTEGER PRIMARY KEY,
+        date TEXT NOT NULL,
+        account TEXT NOT NULL,
+        total TEXT NOT NULL,
+        items TEXT NOT NULL,
+        cash_entry_id INTEGER REFERENCES cash_entries(id) ON DELETE SET NULL
+    );
+    "#,
 ];
 
 pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

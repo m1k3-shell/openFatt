@@ -13,13 +13,15 @@ pub struct State {
     check: Option<YearCheck>,
     confirm: bool,
     reopen: Option<i32>,
+    fresh: (bool, bool, bool),
+    reports: Option<Vec<openfatt_store::ScheduledReport>>,
 }
 
 impl Default for State {
     fn default() -> Self {
         let t = chrono::Local::now().date_naive();
         // a inizio anno si chiude l'anno precedente
-        State { year: if t.month() <= 6 { t.year() - 1 } else { t.year() }, check: None, confirm: false, reopen: None }
+        State { year: if t.month() <= 6 { t.year() - 1 } else { t.year() }, check: None, confirm: false, reopen: None, fresh: (true, true, true), reports: None }
     }
 }
 
@@ -129,6 +131,8 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             None => {}
         }
     }
+    ui.add_space(10.0);
+    fresh_and_reports(ui, cx, st);
     if let Some(y) = st.reopen {
         match widgets::confirm(ui.ctx(), "Riapri l'anno", &format!("Riaprire il {}? I documenti tornano modificabili.", y)) {
             Some(true) => {
@@ -139,4 +143,98 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             None => {}
         }
     }
+}
+
+/// Archivio pulito per ripartire e report programmati.
+fn fresh_and_reports(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
+    ui.columns(2, |cols| {
+        theme::card(&mut cols[0], "Archivio pulito", |_| {}, |ui| {
+            ui.label(RichText::new("Un nuovo archivio con clienti, fornitori, articoli, listini, impostazioni e utenti, ma senza documenti né movimenti: per ricominciare da zero o separare gli anni. Questo archivio resta com'è.").color(GRAY));
+            ui.checkbox(&mut st.fresh.0, "Giacenze di magazzino come carico iniziale");
+            ui.checkbox(&mut st.fresh.1, "Saldi di cassa e banche come saldo iniziale");
+            ui.checkbox(&mut st.fresh.2, "Tieni gli utenti e le password");
+            if theme::button(ui, icon::FILE_PLUS, "Crea archivio pulito...").clicked() {
+                let start = chrono::NaiveDate::from_ymd_opt(st.year + 1, 1, 1).unwrap_or_else(|| chrono::Local::now().date_naive());
+                if let Some(p) = rfd::FileDialog::new().add_filter("Archivio openFatt", &["gadb"]).set_directory(crate::config::documents_dir()).set_file_name(format!("Archivio {}.gadb", st.year + 1)).save_file() {
+                    let o = openfatt_store::FreshOptions { start, opening_stock: st.fresh.0, opening_balances: st.fresh.1, keep_users: st.fresh.2 };
+                    match cx.store.create_fresh_archive(&p, &o) {
+                        Ok(r) => {
+                            cx.msgs.info_dialog(
+                                "Archivio pulito creato",
+                                format!(
+                                    "{}\n\n{} clienti e fornitori, {} articoli; {} giacenze iniziali e {} saldi iniziali al {}.{}\n\nSi apre da Archivio > Apri.",
+                                    p.display(),
+                                    r.parties,
+                                    r.products,
+                                    r.stock_rows,
+                                    r.balances,
+                                    start.format("%d/%m/%Y"),
+                                    if r.open_dues > 0 { format!("\n{} scadenze ancora aperte restano in questo archivio: incassarle qui.", r.open_dues) } else { String::new() }
+                                ),
+                            );
+                        }
+                        Err(e) => cx.msgs.err(e.to_string()),
+                    }
+                }
+            }
+        });
+        theme::card(&mut cols[1], "Report programmati", |_| {}, |ui| {
+            ui.label(RichText::new("All'apertura dell'archivio si preparano da soli nella cartella scelta, sul periodo appena chiuso (settimana o mese).").color(GRAY));
+            let list = st.reports.get_or_insert_with(|| cx.store.scheduled_reports().unwrap_or_default());
+            let mut save = false;
+            let mut remove = None;
+            for (i, r) in list.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    save |= ui.checkbox(&mut r.enabled, "").changed();
+                    egui::ComboBox::from_id_salt(("rep_kind", i)).width(250.0).selected_text(r.kind.label()).show_ui(ui, |ui| {
+                        for k in openfatt_store::ReportKind::ALL {
+                            save |= ui.selectable_value(&mut r.kind, k, k.label()).changed();
+                        }
+                    });
+                    egui::ComboBox::from_id_salt(("rep_every", i)).width(90.0).selected_text(if r.every == openfatt_store::Every::Weekly { "ogni settimana" } else { "ogni mese" }).show_ui(ui, |ui| {
+                        save |= ui.selectable_value(&mut r.every, openfatt_store::Every::Weekly, "ogni settimana").changed();
+                        save |= ui.selectable_value(&mut r.every, openfatt_store::Every::Monthly, "ogni mese").changed();
+                    });
+                    if ui.button(if r.folder.is_empty() { "cartella...".to_string() } else { widgets::truncate(&r.folder, 28) }).on_hover_text(&r.folder).clicked() {
+                        if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                            r.folder = d.display().to_string();
+                            save = true;
+                        }
+                    }
+                    if ui.small_button(icon::TRASH).clicked() {
+                        remove = Some(i);
+                    }
+                });
+                if let Some(d) = r.last_period_end {
+                    ui.label(RichText::new(format!("    ultimo periodo preparato: fino al {}", d.format("%d/%m/%Y"))).small().color(GRAY));
+                }
+            }
+            if let Some(i) = remove {
+                list.remove(i);
+                save = true;
+            }
+            ui.horizontal(|ui| {
+                if ui.small_button(format!("{}  Report", icon::PLUS)).clicked() {
+                    list.push(openfatt_store::ScheduledReport { enabled: true, ..Default::default() });
+                    save = true;
+                }
+                if ui.small_button("Prepara ora quelli in scadenza").clicked() {
+                    let (files, errs) = crate::reports::run_scheduled(cx.store, chrono::Local::now().date_naive());
+                    cx.msgs.ok(format!("{} file preparati", files.len()));
+                    for e in errs {
+                        cx.msgs.warn(e);
+                    }
+                    st_reload(list, cx);
+                }
+            });
+            if save {
+                cx.msgs.check(cx.store.set_scheduled_reports(list), "");
+            }
+        });
+    });
+    let _ = (eur, ORANGE, RED, Tone::Neutral);
+}
+
+fn st_reload(list: &mut Vec<openfatt_store::ScheduledReport>, cx: &mut Ctx) {
+    *list = cx.store.scheduled_reports().unwrap_or_default();
 }

@@ -26,9 +26,16 @@ pub struct State {
     warehouse_filter: Option<String>,
     managing: bool,
     wh_edit: Option<Warehouse>,
+    /// Finestra del riordino sotto scorta: proposte (con spunta) aperte.
+    reorder: Option<Vec<(bool, openfatt_store::ReorderLine)>>,
 }
 
 impl State {
+    /// Stato con la finestra del riordino aperta (collaudi e catture dello schermo).
+    pub fn with_reorder(store: &openfatt_store::Store) -> Self {
+        State { reorder: Some(store.reorder_proposals().unwrap_or_default().into_iter().map(|l| (l.supplier_id.is_some(), l)).collect()), ..Default::default() }
+    }
+
     /// Stato con articolo selezionato e/o ricerca di tracciabilità già eseguita.
     pub fn preset(store: &openfatt_store::Store, product_code: Option<&str>, trace: Option<&str>) -> Self {
         let mut st = State::default();
@@ -120,12 +127,20 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     let ctx = ui.ctx().clone();
     let (warehouses, _) = super::memo(&ctx, "warehouses", gen, (), || cx.store.warehouses().unwrap_or_default());
     manage_window(ui, cx, st, &warehouses);
+    reorder_window(ui.ctx(), cx, st);
 
     st.grid.name = "magazzino";
     st.moves_grid.name = "magazzino-movimenti";
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(&mut st.search).hint_text("\u{E30C} articolo").desired_width(260.0));
         ui.checkbox(&mut st.only_under_min, "solo sotto scorta");
+        if ui.button(format!("{}  Riordina sotto scorta...", super::theme::icon::SHOPPING_CART)).on_hover_text("Propone gli ordini a fornitore per riportare gli articoli alla scorta minima").clicked() {
+            match cx.store.reorder_proposals() {
+                Ok(v) if v.is_empty() => cx.msgs.ok("Nessun articolo da riordinare: disponibilità e merce in arrivo coprono le scorte minime"),
+                Ok(v) => st.reorder = Some(v.into_iter().map(|l| (l.supplier_id.is_some(), l)).collect()),
+                Err(e) => cx.msgs.err(e.to_string()),
+            }
+        }
         let text = st.warehouse_filter.clone().unwrap_or_else(|| "Tutti i magazzini".into());
         egui::ComboBox::from_id_salt("wh_filter").width(180.0).selected_text(text).show_ui(ui, |ui| {
             ui.selectable_value(&mut st.warehouse_filter, None, "Tutti i magazzini");
@@ -377,5 +392,84 @@ fn manage_window(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, warehouses: &[
     });
     if !open {
         st.managing = false;
+    }
+}
+
+/// Proposta di riordino: quantità e fornitore modificabili, poi un ordine in bozza per
+/// fornitore.
+fn reorder_window(ctx: &egui::Context, cx: &mut Ctx, st: &mut State) {
+    let Some(rows) = st.reorder.as_mut() else { return };
+    let mut close = false;
+    let mut create = false;
+    let mut change: Option<(usize, i64)> = None;
+    egui::Window::new(format!("{}  Riordino degli articoli sotto scorta", super::theme::icon::SHOPPING_CART))
+        .id(egui::Id::new("reorder_window"))
+        .collapsible(false)
+        .resizable(true)
+        .default_size([980.0, 520.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(940.0);
+            ui.label(RichText::new("Disponibile previsto = giacenza − impegnato dai clienti + in arrivo dai fornitori. Si propone quanto manca alla scorta minima, al multiplo d'ordine dell'articolo.").color(GRAY));
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                egui::Grid::new("reorder_grid").striped(true).num_columns(9).spacing([10.0, 4.0]).show(ui, |ui| {
+                    for h in ["", "Articolo", "Giacenza", "Impegnato", "In arrivo", "Minima", "Da ordinare", "Fornitore", "Prezzo"] {
+                        ui.label(RichText::new(h).strong());
+                    }
+                    ui.end_row();
+                    for (i, (on, l)) in rows.iter_mut().enumerate() {
+                        ui.checkbox(on, "");
+                        ui.add_sized([260.0, 18.0], egui::Label::new(format!("{}  {}", l.code, l.description)).truncate()).on_hover_text(&l.description);
+                        ui.label(fmt_it_trim(l.stock, 0, 3));
+                        ui.label(fmt_it_trim(l.committed, 0, 3));
+                        ui.label(fmt_it_trim(l.incoming, 0, 3));
+                        ui.label(fmt_it_trim(l.min_stock, 0, 3));
+                        super::widgets::dec_field(ui, ("reorder_qty", i), &mut l.qty, 70.0, 3);
+                        let name = if l.supplier_name.is_empty() { "scegli...".to_string() } else { l.supplier_name.clone() };
+                        if let Some(p) = super::widgets::party_picker(ui, cx.store, &format!("reorder_sup_{}", i), &name, Some(openfatt_core::model::PartyRole::Supplier), 200.0) {
+                            change = Some((i, p.id));
+                        }
+                        ui.label(eur(l.price));
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            let chosen: Vec<&openfatt_store::ReorderLine> = rows.iter().filter(|(on, l)| *on && l.qty > Decimal::ZERO).map(|(_, l)| l).collect();
+            let suppliers: std::collections::BTreeSet<i64> = chosen.iter().filter_map(|l| l.supplier_id).collect();
+            let missing = chosen.iter().filter(|l| l.supplier_id.is_none()).count();
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!suppliers.is_empty(), egui::Button::new(if suppliers.len() == 1 { "Crea 1 ordine a fornitore".to_string() } else { format!("Crea {} ordini a fornitore", suppliers.len()) })).clicked() {
+                    create = true;
+                }
+                if ui.button("Chiudi").clicked() {
+                    close = true;
+                }
+                if missing > 0 {
+                    ui.label(RichText::new(format!("{} articoli senza fornitore: sceglierlo o resteranno fuori", missing)).color(ORANGE));
+                }
+            });
+        });
+    if let Some((i, sup)) = change {
+        if let Some((_, l)) = rows.get_mut(i) {
+            match cx.store.reorder_with_supplier(l, sup) {
+                Ok(n) => *l = n,
+                Err(e) => cx.msgs.err(e.to_string()),
+            }
+        }
+    }
+    if create {
+        let lines: Vec<openfatt_store::ReorderLine> = rows.iter().filter(|(on, _)| *on).map(|(_, l)| l.clone()).collect();
+        match cx.store.create_reorder_orders(&lines) {
+            Ok((docs, skipped)) => {
+                cx.msgs.ok(format!("{} ordini a fornitore creati in bozza{}", docs.len(), if skipped.is_empty() { String::new() } else { format!(" ({} articoli senza fornitore esclusi)", skipped.len()) }));
+                cx.nav.push(Nav::Go(super::Screen::Documents(super::DocGroup::SupplierOrders)));
+                close = true;
+            }
+            Err(e) => cx.msgs.err(e.to_string()),
+        }
+    }
+    if close {
+        st.reorder = None;
     }
 }

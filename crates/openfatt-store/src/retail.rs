@@ -22,6 +22,9 @@ pub struct RetailDay {
     /// (aliquota o natura, imponibile, imposta, lordo)
     pub by_rate: Vec<(String, Decimal, Decimal, Decimal)>,
     pub pending_rt: usize,
+    /// Vendite poi fatturate (lordo): scorporate dai corrispettivi del giorno, perché
+    /// l'imposta è già nella fattura (FAQ AdE n. 45 del 21/12/2018).
+    pub invoiced: Decimal,
 }
 
 impl Store {
@@ -130,6 +133,7 @@ impl Store {
     /// Corrispettivi giornalieri per aliquota nel periodo (vendite non annullate).
     pub fn retail_summary(&self, from: NaiveDate, to: NaiveDate) -> Result<Vec<RetailDay>> {
         let mut days: BTreeMap<NaiveDate, (RetailDay, BTreeMap<String, (Decimal, Decimal, Decimal)>)> = BTreeMap::new();
+        let invoiced = self.invoiced_receipts_between(from, to)?;
         for d in self.retail_sales(from, to)? {
             if d.status == DocStatus::Cancelled {
                 continue;
@@ -137,6 +141,20 @@ impl Store {
             let Ok(t) = calc::compute(&d) else { continue };
             let (day, rates) = days.entry(d.date).or_insert_with(|| (RetailDay { date: Some(d.date), ..Default::default() }, BTreeMap::new()));
             day.count += 1;
+            if invoiced.contains(&d.id) {
+                // l'incasso c'è stato, ma l'imposta va con la fattura
+                day.invoiced += t.total;
+                if let Some(r) = &d.retail {
+                    for p in &r.payments {
+                        match p.method {
+                            RetailPayMethod::Cash => day.cash += p.amount,
+                            RetailPayMethod::Electronic => day.electronic += p.amount,
+                            _ => day.other += p.amount,
+                        }
+                    }
+                }
+                continue;
+            }
             day.gross += t.total;
             if let Some(r) = &d.retail {
                 for p in &r.payments {
@@ -265,5 +283,142 @@ mod tests {
         assert_eq!(s.stock_of(p.id).unwrap(), dec!(51));
         let cash: Decimal = s.cash_entries(None, None, Some("Cassa")).unwrap().iter().map(|e| e.amount).sum();
         assert_eq!(cash, dec!(-3));
+    }
+}
+
+impl Store {
+    /// Vendite al banco del periodo fatturate con fatture emesse. La fattura non può
+    /// precedere lo scontrino e si emette al più tardi entro il 15 del mese successivo
+    /// (fattura differita): si leggono solo le fatture di quella finestra.
+    pub fn invoiced_receipts_between(&self, from: NaiveDate, to: NaiveDate) -> Result<std::collections::HashSet<i64>> {
+        let mut st = self.conn().prepare_cached(
+            "SELECT json_extract(data, '$.from_receipt_id') FROM documents WHERE kind IN ('FAT', 'FAC') AND status = ?1 AND date >= ?2 AND date <= ?3 AND json_extract(data, '$.from_receipt_id') IS NOT NULL",
+        )?;
+        let rows = st.query_map(rusqlite::params![DocStatus::Issued.code(), crate::date_to_sql(from), crate::date_to_sql(to + chrono::Duration::days(46))], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Vendite al banco fatturate: con `issued_only` solo dalle fatture emesse (escono dai
+    /// corrispettivi), altrimenti anche dalle bozze (non se ne crea una seconda).
+    pub fn invoiced_receipts(&self, issued_only: bool) -> Result<std::collections::HashSet<i64>> {
+        let sql = if issued_only {
+            "SELECT json_extract(data, '$.from_receipt_id') FROM documents WHERE kind IN ('FAT', 'FAC') AND status = ?1 AND json_extract(data, '$.from_receipt_id') IS NOT NULL"
+        } else {
+            "SELECT json_extract(data, '$.from_receipt_id') FROM documents WHERE kind IN ('FAT', 'FAC') AND status <> ?1 AND json_extract(data, '$.from_receipt_id') IS NOT NULL"
+        };
+        let code = if issued_only { DocStatus::Issued.code() } else { DocStatus::Cancelled.code() };
+        let mut st = self.conn().prepare_cached(sql)?;
+        let rows = st.query_map([code], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Fattura (in bozza) per una vendita al banco già certificata con documento
+    /// commerciale: stesse righe e stessa data, estremi dello scontrino nella fattura
+    /// elettronica (AltriDatiGestionali "N.DOC.COMM"), senza scadenze (già incassata) né
+    /// scarico di magazzino; la vendita esce dai corrispettivi del giorno.
+    pub fn invoice_from_receipt(&self, retail_id: i64, party: &Party) -> Result<Document> {
+        let r = self.document(retail_id)?;
+        if r.kind != DocKind::RetailSale {
+            return Err(StoreError::Invalid("Il documento non è una vendita al banco".into()));
+        }
+        if r.status != DocStatus::Issued {
+            return Err(StoreError::Invalid("La vendita al banco non è registrata o è annullata".into()));
+        }
+        if party.id == 0 {
+            return Err(StoreError::Invalid("Scegliere il cliente da fatturare".into()));
+        }
+        if self.invoiced_receipts(false)?.contains(&retail_id) {
+            return Err(StoreError::Invalid("Questa vendita è già stata fatturata".into()));
+        }
+        let info = r.retail.clone().unwrap_or_default();
+        if info.refund_of.is_some() {
+            return Err(StoreError::Invalid("Un reso non si fattura: emettere una nota di credito".into()));
+        }
+        let mut inv = Document::new(DocKind::Invoice);
+        inv.date = r.date;
+        inv.party_id = Some(party.id);
+        inv.party = party.clone();
+        inv.prices_include_vat = r.prices_include_vat;
+        inv.discount = r.discount.clone();
+        inv.warehouse = r.warehouse.clone();
+        inv.lines = r.lines.iter().map(crate::copy_line).collect();
+        inv.payment_id = party.default_payment_id;
+        let receipt = RetailRef { rt_serial: info.rt_serial.clone(), z_number: info.z_number.clone(), receipt_number: info.receipt_number.clone(), date: Some(r.date) };
+        let label = if receipt.receipt_number.trim().is_empty() {
+            format!("n. {} del {}", r.number_label(), r.date.format("%d/%m/%Y"))
+        } else {
+            format!("n. {}-{} del {}", receipt.z_number.trim(), receipt.receipt_number.trim(), r.date.format("%d/%m/%Y"))
+        };
+        inv.notes = format!("Fattura relativa al documento commerciale {}, già pagato.", label);
+        inv.from_receipt = Some(receipt);
+        inv.from_receipt_id = Some(r.id);
+        self.save_document(&inv)
+    }
+}
+
+#[cfg(test)]
+mod receipt_invoice_tests {
+    use super::*;
+    use openfatt_core::dec;
+
+    #[test]
+    fn scontrino_fatturato_senza_contare_due_volte_iva_magazzino_e_incasso() {
+        let s = Store::open_in_memory().unwrap();
+        let v = s.vat_codes().unwrap().into_iter().find(|v| v.code == "22").unwrap();
+        let p = s.save_product(&Product { code: "SEDIA".into(), description: "Sedia".into(), price: dec!(122), vat_id: Some(v.id), manage_stock: true, ..Default::default() }).unwrap();
+        s.add_manual_stock_move(&StockMove { product_id: p.id, qty: dec!(10), ..Default::default() }).unwrap();
+        let c = s.save_party(&Party { name: "Mario Bianchi".into(), tax_code: "BNCMRA80A01L378B".into(), address: "Via Verdi 3".into(), zip: "38122".into(), city: "Trento".into(), province: "TN".into(), ..Default::default() }).unwrap();
+        let mut d = Document::new(DocKind::RetailSale);
+        d.prices_include_vat = true;
+        d.lines.push(DocLine { product_id: Some(p.id), code: p.code.clone(), description: p.description.clone(), qty: dec!(1), unit_price: dec!(122), vat: VatRef::from_code(&v), ..Default::default() });
+        d.retail = Some(RetailInfo { payments: vec![RetailPayment { method: RetailPayMethod::Cash, amount: dec!(122) }], ..Default::default() });
+        let sale = s.record_retail_sale(&d, "Cassa", "Banca").unwrap();
+        let sale = s.set_retail_outcome(sale.id, RtStatus::Printed, "99MEX000001", "0012", "0034", "ok").unwrap();
+        let day = sale.date;
+        let period = openfatt_core::vat::Period::containing(day, openfatt_core::vat::Periodicity::Monthly);
+        let before = s.vat_period_totals(period).unwrap();
+        assert_eq!(before.vat_due, dec!(22.00));
+        let stock_before = s.stock_of(p.id).unwrap();
+        let cash_before: Decimal = s.cash_entries(None, None, Some("Cassa")).unwrap().iter().map(|e| e.amount).sum();
+
+        let inv = s.invoice_from_receipt(sale.id, &c).unwrap();
+        // finché la fattura è in bozza la vendita resta nei corrispettivi
+        assert_eq!(s.vat_period_totals(period).unwrap().vat_due, before.vat_due);
+        assert_eq!(s.retail_summary(day, day).unwrap()[0].gross, dec!(122.00));
+        assert!(s.invoice_from_receipt(sale.id, &c).is_err(), "una sola fattura anche in bozza");
+        // la copia della fattura non è legata allo scontrino
+        let dup = s.duplicate_document(inv.id, None).unwrap();
+        assert!(dup.from_receipt_id.is_none() && dup.from_receipt.is_none());
+        s.delete_document(dup.id).unwrap();
+        assert_eq!(inv.date, day);
+        assert_eq!(inv.from_receipt_id, Some(sale.id));
+        let inv = s.issue_document(inv.id).unwrap();
+        // stessa imposta: la fattura entra nel registro vendite, la vendita esce dai corrispettivi
+        let after = s.vat_period_totals(period).unwrap();
+        assert_eq!(after.vat_due, before.vat_due);
+        assert_eq!(after.sales_taxable, before.sales_taxable);
+        let sum = s.retail_summary(day, day).unwrap();
+        assert_eq!(sum[0].invoiced, dec!(122.00));
+        assert_eq!(sum[0].gross, dec!(0));
+        assert_eq!(sum[0].cash, dec!(122));
+        // niente secondo scarico, niente scadenze da incassare, niente doppio incasso
+        assert_eq!(s.stock_of(p.id).unwrap(), stock_before);
+        assert!(s.dues_of_document(inv.id).unwrap().is_empty());
+        let cash_after: Decimal = s.cash_entries(None, None, Some("Cassa")).unwrap().iter().map(|e| e.amount).sum();
+        assert_eq!(cash_after, cash_before);
+        // una sola fattura per scontrino
+        assert!(s.invoice_from_receipt(sale.id, &c).is_err());
+        // fattura elettronica: estremi del documento commerciale (FAQ 45)
+        let mut company = Company { name: "Negozio".into(), vat_number: "01234567890".into(), regime_fiscale: "RF01".into(), address: "Via Roma".into(), zip: "38122".into(), city: "Trento".into(), province: "TN".into(), country: "IT".into(), vat_country: "IT".into(), ..Default::default() };
+        company.transmitter_country = "IT".into();
+        let t = calc::compute(&inv).unwrap();
+        let f = openfatt_fatturapa::build::build(&company, &inv, &t, &Default::default()).unwrap();
+        let xml = openfatt_fatturapa::write::to_xml(&f);
+        assert!(xml.contains("<TipoDato>N.DOC.COMM</TipoDato>"), "{}", xml);
+        assert!(xml.contains("<RiferimentoTesto>0012-0034</RiferimentoTesto>"));
+        assert!(xml.contains(&format!("<RiferimentoData>{}</RiferimentoData>", day.format("%Y-%m-%d"))));
+        // annullando la fattura la vendita torna nei corrispettivi
+        s.cancel_document(inv.id).unwrap();
+        assert_eq!(s.retail_summary(day, day).unwrap()[0].gross, dec!(122.00));
     }
 }

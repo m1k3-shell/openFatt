@@ -3,7 +3,8 @@
 use eframe::egui::{self, RichText};
 use openfatt_core::codes;
 use openfatt_core::fiscal;
-use openfatt_core::model::{DocKind, Party, PartyRole};
+use openfatt_core::model::{DocKind, Party, PartyRole, PartySite, SiteKind};
+use rust_decimal::Decimal;
 use openfatt_store::PartyFilter;
 
 use super::grid::{Col, Grid, Val};
@@ -861,10 +862,54 @@ fn payment_and_vat(ui: &mut egui::Ui, cx: &mut Ctx, p: &mut Party) {
             ui.label("Carta fedeltà");
             ui.add(egui::TextEdit::singleline(&mut p.loyalty_card).desired_width(150.0).hint_text("numero della carta"));
         });
+        ui.horizontal(|ui| {
+            ui.label("Ritenute nei documenti");
+            let label = |c: &str| match c {
+                "rt20" => "Ritenuta d'acconto 20%",
+                "agente" => "Agente di commercio (23% sul 50% + Enasarco)",
+                _ => "nessuna",
+            };
+            egui::ComboBox::from_id_salt("party_wh").width(300.0).selected_text(label(&p.withholding_profile)).show_ui(ui, |ui| {
+                for c in ["", "rt20", "agente"] {
+                    ui.selectable_value(&mut p.withholding_profile, c.to_string(), label(c));
+                }
+            }).response.on_hover_text("Ritenute proposte nelle nuove fatture e parcelle a questo cliente (sostituto d'imposta)");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Fido €");
+            let mut has = p.credit_limit.is_some();
+            let mut v = p.credit_limit.unwrap_or_default();
+            if ui.checkbox(&mut has, "").on_hover_text("Esposizione massima: scadenze aperte meno note di credito").changed() {
+                p.credit_limit = if has { Some(v) } else { None };
+            }
+            if has && widgets::dec_field(ui, "party_fido", &mut v, 100.0, 2) {
+                p.credit_limit = Some(v);
+            }
+            ui.add_space(12.0);
+            let col = if p.blocked { RED } else { theme::INK };
+            ui.checkbox(&mut p.blocked, RichText::new("Cliente bloccato").color(col)).on_hover_text("Insolvente: i nuovi documenti di vendita chiedono conferma");
+            if p.blocked {
+                ui.add(egui::TextEdit::singleline(&mut p.block_reason).desired_width(220.0).hint_text("motivo (es. insoluto RiBa)"));
+            }
+        });
+        if p.id != 0 && (p.credit_limit.is_some() || p.blocked) {
+            let today = chrono::Local::now().date_naive();
+            if let Ok(st) = cx.store.credit_status(p, today, None) {
+                let mut t = format!("Da incassare € {} · scaduto € {}", widgets::eur(st.exposure), widgets::eur(st.overdue));
+                if let Some(a) = st.available() {
+                    t.push_str(&format!(" · fido {} € {}", if a < Decimal::ZERO { "superato di" } else { "disponibile" }, widgets::eur(a.abs())));
+                }
+                let bad = st.blocked || st.available().map(|a| a < Decimal::ZERO).unwrap_or(false);
+                ui.label(RichText::new(t).color(if bad { RED } else { GRAY }));
+            }
+        }
     }
     let _ = codes::NATURA;
     ui.separator();
 }
+
+/// Ruoli tipici dei referenti.
+const CONTACT_ROLES: [&str; 9] = ["Titolare", "Amministrazione", "Pagamenti", "Acquisti", "Commerciale", "Logistica", "Magazzino", "Tecnico", "Qualità"];
 
 /// Referenti, dichiarazioni d'intento e allegati del soggetto.
 fn extra_sections(ui: &mut egui::Ui, cx: &mut Ctx, p: &mut Party, attachments: &mut Option<super::linetools::Attachments>) {
@@ -877,7 +922,17 @@ fn extra_sections(ui: &mut egui::Ui, cx: &mut Ctx, p: &mut Party, attachments: &
             ui.end_row();
             for (i, c) in p.contacts.iter_mut().enumerate() {
                 ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(150.0));
-                ui.add(egui::TextEdit::singleline(&mut c.role).desired_width(110.0).hint_text("amministrazione"));
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut c.role).desired_width(110.0).hint_text("amministrazione"));
+                    ui.menu_button(super::theme::icon::CARET_DOWN, |ui| {
+                        for r in CONTACT_ROLES {
+                            if ui.button(r).clicked() {
+                                c.role = r.to_string();
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
                 ui.add(egui::TextEdit::singleline(&mut c.phone).desired_width(110.0));
                 ui.add(egui::TextEdit::singleline(&mut c.email).desired_width(190.0));
                 ui.checkbox(&mut c.gets_documents, "").on_hover_text("Riceve in copia i documenti inviati per email");
@@ -892,6 +947,48 @@ fn extra_sections(ui: &mut egui::Ui, cx: &mut Ctx, p: &mut Party, attachments: &
         }
         if ui.button("\u{E3D4} Referente").clicked() {
             p.contacts.push(Default::default());
+        }
+    });
+    egui::CollapsingHeader::new(format!("Sedi e destinazioni ({})", p.sites.len())).default_open(false).show(ui, |ui| {
+        ui.label(RichText::new("Sede legale, operativa, amministrativa e destinazioni della merce. La destinazione proposta compare da sola nei nuovi DDT; le altre si scelgono nella scheda Indirizzi del documento.").small().color(GRAY));
+        let mut remove = None;
+        egui::Grid::new("sites").striped(true).num_columns(9).spacing([6.0, 4.0]).show(ui, |ui| {
+            for h in ["Tipo", "Nome", "Indirizzo", "N.", "CAP", "Comune", "Prov.", "Proposta", ""] {
+                ui.label(RichText::new(h).strong());
+            }
+            ui.end_row();
+            let mut make_default = None;
+            for (i, s) in p.sites.iter_mut().enumerate() {
+                egui::ComboBox::from_id_salt(("site_kind", i)).width(150.0).selected_text(s.kind.label()).show_ui(ui, |ui| {
+                    for k in SiteKind::ALL {
+                        ui.selectable_value(&mut s.kind, k, k.label());
+                    }
+                });
+                ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(140.0).hint_text("es. Magazzino"));
+                ui.add(egui::TextEdit::singleline(&mut s.address).desired_width(170.0));
+                ui.add(egui::TextEdit::singleline(&mut s.civic).desired_width(40.0));
+                ui.add(egui::TextEdit::singleline(&mut s.zip).desired_width(50.0));
+                ui.add(egui::TextEdit::singleline(&mut s.city).desired_width(120.0));
+                ui.add(egui::TextEdit::singleline(&mut s.province).desired_width(32.0));
+                if ui.checkbox(&mut s.default_destination, "").on_hover_text("Destinazione proposta nei nuovi documenti con trasporto").changed() && s.default_destination {
+                    make_default = Some(i);
+                }
+                if ui.small_button(super::theme::icon::TRASH).clicked() {
+                    remove = Some(i);
+                }
+                ui.end_row();
+            }
+            if let Some(i) = make_default {
+                for (j, s) in p.sites.iter_mut().enumerate() {
+                    s.default_destination = i == j;
+                }
+            }
+        });
+        if let Some(i) = remove {
+            p.sites.remove(i);
+        }
+        if ui.button("\u{E3D4} Sede").clicked() {
+            p.sites.push(PartySite { country: "IT".into(), ..Default::default() });
         }
     });
     if p.role.is_customer() {

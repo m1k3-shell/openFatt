@@ -38,6 +38,8 @@ pub mod tracking;
 pub mod vat;
 pub mod users;
 pub mod widgets;
+pub mod accounting;
+pub mod withholdings;
 pub mod yearend;
 
 use std::time::Instant;

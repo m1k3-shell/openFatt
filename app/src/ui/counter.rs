@@ -38,6 +38,8 @@ pub struct State {
     pending: Option<(i64, Receiver<Result<RtOutcome, String>>)>,
     manual: Option<(i64, String, String, String)>,
     confirm_cancel: Option<i64>,
+    /// Fattura richiesta per una vendita già certificata: (vendita, cliente scelto).
+    invoice: Option<(i64, Option<Party>)>,
     from: NaiveDate,
     to: NaiveDate,
     focus_code: bool,
@@ -62,6 +64,7 @@ impl Default for State {
             electronic: Decimal::ZERO,
             refund: false,
             refund_ref: RetailRef::default(),
+            invoice: None,
             last: None,
             pending: None,
             manual: None,
@@ -293,6 +296,39 @@ fn windows(ui: &egui::Ui, cx: &mut Ctx, st: &mut State) {
     }
     if close {
         st.manual = None;
+    }
+    let mut close_inv = false;
+    if let Some((id, party)) = &mut st.invoice {
+        egui::Window::new("Fattura per una vendita al banco").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+            ui.set_width(460.0);
+            ui.label("La fattura riprende righe e data della vendita e riporta gli estremi del documento commerciale. La vendita esce dai corrispettivi del giorno (l'imposta va con la fattura); merce e incasso restano quelli del banco.");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Cliente");
+                let cur = party.as_ref().map(|p| p.display_name()).unwrap_or_default();
+                if let Some(p) = widgets::party_picker(ui, cx.store, "receipt_invoice_party", &cur, Some(PartyRole::Customer), 320.0) {
+                    *party = Some(p);
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let ready = party.is_some();
+                if ui.add_enabled(ready, egui::Button::new("Crea fattura")).clicked() {
+                    if let Some(p) = party.as_ref() {
+                        if let Some(inv) = cx.msgs.check(cx.store.invoice_from_receipt(*id, p), "Fattura creata in bozza: controllarla ed emetterla") {
+                            cx.nav.push(Nav::OpenDocument(inv.id));
+                            close_inv = true;
+                        }
+                    }
+                }
+                if ui.button("Annulla").clicked() {
+                    close_inv = true;
+                }
+            });
+        });
+    }
+    if close_inv {
+        st.invoice = None;
     }
     if let Some(id) = st.confirm_cancel {
         match widgets::confirm(ui.ctx(), "Annulla vendita", "Annullare la vendita? Merce e incasso vengono stornati. Possibile solo se il documento commerciale non è stato emesso.") {
@@ -630,7 +666,10 @@ fn sales(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         Cancel(i64),
         Refund(i64),
         Open(i64),
+        Invoice(i64),
     }
+    let (invoiced, _) = super::memo(ui.ctx(), "receipts_invoiced", cx.store.generation(), (), || cx.store.invoiced_receipts(false).unwrap_or_default());
+    let invoiced_ref = &invoiced;
     let action = std::cell::Cell::new(None);
     let act = &action;
     let total_of = |d: &Document| calc::compute(d).map(|t| t.total).unwrap_or_default();
@@ -671,8 +710,16 @@ fn sales(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     act.set(Some(Act::Cancel(d.id)));
                 }
             }
-            if d.status != DocStatus::Cancelled && matches!(r.rt_status, RtStatus::Printed | RtStatus::Manual) && total_of(d) > Decimal::ZERO && ui.small_button("Reso").clicked() {
+            // una vendita fatturata si storna con nota di credito sulla fattura
+            if d.status != DocStatus::Cancelled && matches!(r.rt_status, RtStatus::Printed | RtStatus::Manual) && total_of(d) > Decimal::ZERO && !invoiced_ref.contains(&d.id) && ui.small_button("Reso").clicked() {
                 act.set(Some(Act::Refund(d.id)));
+            }
+            if d.status != DocStatus::Cancelled && matches!(r.rt_status, RtStatus::Printed | RtStatus::Manual) && r.refund_of.is_none() && total_of(d) > Decimal::ZERO {
+                if invoiced_ref.contains(&d.id) {
+                    ui.label(RichText::new("fatturata").color(GRAY));
+                } else if ui.small_button("Fattura").on_hover_text("Il cliente chiede la fattura per questa vendita").clicked() {
+                    act.set(Some(Act::Invoice(d.id)));
+                }
             }
             if ui.small_button("Apri").clicked() {
                 act.set(Some(Act::Open(d.id)));
@@ -713,6 +760,10 @@ fn sales(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
             }
         }
         Some(Act::Open(id)) => cx.nav.push(Nav::OpenDocument(id)),
+        Some(Act::Invoice(id)) => {
+            let party = list.iter().find(|d| d.id == id).and_then(|d| d.party_id).and_then(|pid| cx.store.party(pid).ok().flatten());
+            st.invoice = Some((id, party));
+        }
         None => {}
     }
 }
@@ -753,7 +804,7 @@ fn summary(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     if i == 0 {
                         ui.label(RichText::new(&date).strong());
                         ui.label(format!("{}{}", d.count, if d.pending_rt > 0 { format!(" ({} da emettere)", d.pending_rt) } else { String::new() }));
-                        ui.label(RichText::new(eur(d.gross)).strong());
+                        ui.label(RichText::new(eur(d.gross)).strong()).on_hover_text(if d.invoiced.is_zero() { String::new() } else { format!("Escluse le vendite poi fatturate: € {}", eur(d.invoiced)) });
                         ui.label(eur(d.cash));
                         ui.label(eur(d.electronic));
                     } else {

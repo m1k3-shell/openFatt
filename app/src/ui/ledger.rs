@@ -68,6 +68,7 @@ pub struct State {
     cash_to: NaiveDate,
     cash_account: Option<String>,
     new_entry: Option<(CashEntry, bool)>,
+    pub acc: super::accounting::State,
     due_grid: Grid,
     cash_grid: Grid,
 }
@@ -95,6 +96,7 @@ impl Default for State {
             cash_to: NaiveDate::from_ymd_opt(today.year(), 12, 31).unwrap(),
             cash_account: None,
             new_entry: None,
+            acc: Default::default(),
             due_grid: Grid::new("scadenzario").soft(),
             cash_grid: Grid::new("prima-nota"),
         }
@@ -667,8 +669,11 @@ pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
                     ui.add(egui::TextEdit::singleline(&mut e.account).desired_width(120.0).hint_text("o nuovo conto"));
                 });
                 ui.end_row();
-                ui.label("Categoria");
-                ui.add(egui::TextEdit::singleline(&mut e.category).desired_width(200.0).hint_text("es. Affitto, Utenze, Giroconto"));
+                ui.label("Voce");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut e.category).desired_width(200.0).hint_text("es. Affitto, Utenze"));
+                    super::accounting::category_menu(ui, cx.store, &mut e.category);
+                });
                 ui.end_row();
             });
             ui.horizontal(|ui| {
@@ -689,6 +694,10 @@ pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
         st.new_entry = None;
     }
 
+    super::accounting::windows(ui.ctx(), cx, &mut st.acc, &accounts);
+    ui.horizontal_wrapped(|ui| {
+        super::accounting::toolbar(ui, cx, &mut st.acc, &accounts);
+    });
     ui.horizontal(|ui| {
         if ui.button("\u{E3D4} Movimento").clicked() {
             st.new_entry = Some((CashEntry::default(), false));
@@ -756,6 +765,6 @@ pub fn show_cash(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State) {
     }
     let delete = delete_req.get();
     if let Some(id) = delete {
-        cx.msgs.check(cx.store.delete_cash_entry(id), "Movimento eliminato");
+        cx.msgs.check(cx.store.delete_cash_entry_linked(id), "Movimento eliminato");
     }
 }

@@ -9,7 +9,7 @@ license.workspace = true
 openfatt-core.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
+roxmltree.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
-roxmltree.workspace = true

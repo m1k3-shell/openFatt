@@ -137,6 +137,105 @@ fn collaudo_completo() {
     assert!(xml.contains("<CodiceCommessaConvenzione>#B9BGAQ#</CodiceCommessaConvenzione>"), "{}", xml);
     r.file("fe", &e.file_name, &e.xml);
     r.ok("NSO", "ordine UBL importato, evaso in fattura con la tripletta in DatiOrdineAcquisto");
+    // ------------------------------------------------------------- novità del 28/11/2026
+    // agente di commercio: ritenuta 23% sul 50% e contributo Enasarco entro il massimale
+    let mut ag = Document::new(DocKind::Invoice);
+    ag.party_id = Some(rossi.id);
+    ag.lines.push(DocLine { description: "Provvigioni del trimestre".into(), qty: dec!(1), unit_price: dec!(3000), vat: VatRef::from_code(&v22), withholding: true, ..Default::default() });
+    ag.withholdings = s.withholdings_for("agente", Some(rossi.id), ag.date, None).unwrap();
+    let ag = s.issue_document(s.save_document(&ag).unwrap().id).unwrap();
+    let (e, issues) = crate::services::create_einvoice(&s, ag.id).unwrap();
+    assert!(!openfatt_fatturapa::has_errors(&issues), "{:?}", issues);
+    let xml = String::from_utf8(e.xml.clone()).unwrap();
+    assert!(xml.contains("<TipoRitenuta>RT04</TipoRitenuta>") && xml.contains("<TipoRitenuta>RT01</TipoRitenuta>") && xml.contains("<CausalePagamento>Q</CausalePagamento>"), "{}", xml);
+    r.file("fe", &e.file_name, &e.xml);
+    let u = s.enasarco_usage(rossi.id, ag.date.year(), None).unwrap();
+    r.ok("Ritenute", format!("fattura dell'agente con RT01 23% sul 50% e Enasarco RT04 8,5%: massimale residuo € {}", u.residual.unwrap_or_default()));
+    let rows = s.withholding_rows(ag.date.year(), false).unwrap();
+    assert!(rows.iter().any(|w| w.document_id == ag.id && w.kind == "RT04"));
+    r.ok("Ritenute", format!("riepilogo per sostituto: {} righe", rows.len()));
+    // scontrino fatturato: estremi del documento commerciale, IVA contata una volta
+    let mut sale = Document::new(DocKind::RetailSale);
+    sale.prices_include_vat = true;
+    sale.lines.push(DocLine { description: "Vendita al banco".into(), qty: dec!(1), unit_price: dec!(61), vat: VatRef::from_code(&v22), ..Default::default() });
+    sale.retail = Some(RetailInfo { payments: vec![RetailPayment { method: RetailPayMethod::Cash, amount: dec!(61) }], ..Default::default() });
+    let sale = s.record_retail_sale(&sale, "Cassa", "Banca").unwrap();
+    let sale = s.set_retail_outcome(sale.id, RtStatus::Manual, "99MEX000001", "0042", "0007", "collaudo").unwrap();
+    let period = openfatt_core::vat::Period::containing(sale.date, s.vat_settings().unwrap().periodicity);
+    let before = s.vat_period_totals(period).unwrap();
+    let fi = s.invoice_from_receipt(sale.id, &rossi).unwrap();
+    let fi = s.issue_document(fi.id).unwrap();
+    assert_eq!(s.vat_period_totals(period).unwrap().vat_due, before.vat_due);
+    let (e, issues) = crate::services::create_einvoice(&s, fi.id).unwrap();
+    assert!(!openfatt_fatturapa::has_errors(&issues), "{:?}", issues);
+    assert!(String::from_utf8_lossy(&e.xml).contains("<TipoDato>N.DOC.COMM</TipoDato>"));
+    r.file("fe", &e.file_name, &e.xml);
+    r.ok("Banco", "scontrino fatturato: N.DOC.COMM in AltriDatiGestionali, liquidazione IVA invariata");
+    // riconciliazione con un estratto conto camt.053 sintetico
+    let open = s.open_dues_of_party(Some(rossi.id), &rossi.display_name(), true).unwrap();
+    if let Some(due) = open.iter().find(|d| !d.draft) {
+        let camt = format!(
+            r#"<?xml version="1.0"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt><Acct><Id><IBAN>IT60X0542811101000000123456</IBAN></Id></Acct><Ntry><Amt Ccy="EUR">{}</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>{}</Dt></BookgDt><NtryDtls><TxDtls><RltdPties><Dbtr><Nm>{}</Nm></Dbtr></RltdPties><RmtInf><Ustrd>Pagamento {}</Ustrd></RmtInf></TxDtls></NtryDtls></Ntry><Ntry><Amt Ccy="EUR">3.20</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>{}</Dt></BookgDt><AddtlNtryInf>Commissioni bonifico</AddtlNtryInf></Ntry></Stmt></BkToCstmrStmt></Document>"#,
+            due.residual(),
+            today.format("%Y-%m-%d"),
+            rossi.display_name(),
+            due.doc_label,
+            today.format("%Y-%m-%d")
+        );
+        r.file("banca", "estratto_conto.camt053.xml", camt.as_bytes());
+        let st = openfatt_bank::camt::parse_statement(&camt).unwrap();
+        let rec = s.reconcile("Banca", &st.lines).unwrap();
+        assert!(matches!(rec[0].matched, openfatt_store::ReconMatch::Dues(_)), "{:?}", rec[0]);
+        let n = s.apply_reconciliation("Banca", &rec).unwrap();
+        assert_eq!(n, 2);
+        assert!(s.reconcile("Banca", &st.lines).unwrap().iter().all(|x| matches!(x.matched, openfatt_store::ReconMatch::Recorded(_))));
+        r.ok("Banca", format!("estratto camt.053: incasso di {} abbinato alla scadenza, spese registrate, reimportazione senza doppioni", due.doc_label));
+    }
+    // giroconto, F24, esportazione per lo studio
+    s.transfer("Cassa", "Banca", today, dec!(100), "Versamento contanti").unwrap();
+    let f24 = s.f24_proposals(today.year(), today.month()).unwrap();
+    r.ok("Contabilità", format!("giroconto registrato; proposte F24 del mese: {}", f24.len()));
+    let from = NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap();
+    r.file("studio", "prima_nota.csv", s.ledger_export_csv(from, today).unwrap().as_bytes());
+    r.file("studio", "registri_iva.csv", s.vat_export_csv(from, today).unwrap().as_bytes());
+    r.ok("Contabilità", "prima nota e registri IVA in CSV con i codici del piano dei conti");
+    // riordino sotto scorta: due articoli con scorta minima alta
+    let supplier = parties.iter().find(|p| p.role.is_supplier()).cloned();
+    for code in ["SED01", "LED10"] {
+        let mut p = s.product_by_code(code).unwrap().unwrap();
+        p.manage_stock = true;
+        p.min_stock = dec!(60);
+        p.order_multiple = dec!(10);
+        if p.supplier_id.is_none() {
+            p.supplier_id = supplier.as_ref().map(|s| s.id);
+        }
+        s.save_product(&p).unwrap();
+    }
+    let props = s.reorder_proposals().unwrap();
+    assert!(props.len() >= 2, "{:?}", props);
+    assert!(props.iter().all(|l| (l.qty % dec!(10)).is_zero()));
+    let (orders, skipped) = s.create_reorder_orders(&props).unwrap();
+    r.ok("Magazzino", format!("riordino sotto scorta: {} proposte, {} ordini a fornitore, {} senza fornitore", props.len(), orders.len(), skipped.len()));
+    // fido e SdI da gestire
+    let mut risky = rossi.clone();
+    risky.credit_limit = Some(dec!(1));
+    assert!(s.credit_warning(&risky, Decimal::ZERO, None).unwrap().is_some());
+    r.ok("Anagrafiche", "fido superato segnalato all'emissione");
+    let tasks = s.sdi_tasks(today).unwrap();
+    r.ok("Fattura elettronica", format!("fatture da gestire secondo l'esito SdI: {}", tasks.len()));
+    // stampa su rotolo da 80 mm
+    let ps = crate::printing::settings(&s);
+    let pd = crate::printing::print_doc(&s, &fi, &ps, &crate::printing::style(&s, &ps)).unwrap();
+    let roll = openfatt_pdf::receipt::render_roll(&[pd], 80.0);
+    assert!(pdf_ok(&roll));
+    r.file("pdf", "fattura_rotolo_80mm.pdf", &roll);
+    r.ok("Stampe", "fattura su rotolo da 80 mm");
+    // archivio pulito
+    let fresh = dir.join("archivio_pulito.gadb");
+    let rep = s.create_fresh_archive(&fresh, &openfatt_store::FreshOptions { start: NaiveDate::from_ymd_opt(today.year() + 1, 1, 1).unwrap(), opening_stock: true, opening_balances: true, keep_users: true }).unwrap();
+    assert!(Store::open(&fresh).unwrap().documents(&DocFilter::default()).unwrap().is_empty());
+    r.ok("Archivio", format!("archivio pulito: {} soggetti, {} articoli, {} giacenze e {} saldi iniziali", rep.parties, rep.products, rep.stock_rows, rep.balances));
+
     // fattura passiva: carico articoli in anagrafica
     let purchase = s.documents(&DocFilter { kinds: vec![DocKind::PurchaseInvoice], ..Default::default() }).unwrap();
     if let Some(p) = purchase.first() {

@@ -42,6 +42,8 @@ pub enum StatBy {
     Category,
     Agent,
     Supplier,
+    /// Commessa interna: ricavi delle vendite, costo della merce e acquisti della commessa.
+    Project,
 }
 
 /// Flussi previsti per mese: incassi e pagamenti da scadenzario.
@@ -69,6 +71,8 @@ pub(crate) struct StatDoc {
     party_id: Option<i64>,
     party_name: String,
     agent_id: Option<i64>,
+    project: String,
+    purchase: bool,
     lines: Vec<StatLine>,
 }
 
@@ -85,6 +89,10 @@ struct StatLine {
 
 impl StatDoc {
     fn from(d: &openfatt_core::model::Document) -> Option<StatDoc> {
+        // fattura di una vendita al banco: la vendita è già contata sullo scontrino
+        if d.from_receipt_id.is_some() {
+            return None;
+        }
         let t = calc::compute(d).ok()?;
         let sign = if d.kind.is_credit() { Decimal::NEGATIVE_ONE } else { Decimal::ONE };
         let mut lines = Vec::new();
@@ -106,7 +114,7 @@ impl StatDoc {
                 unit_cost: l.map(|l| l.unit_cost).unwrap_or_default(),
             });
         }
-        Some(StatDoc { date: d.date, party_id: d.party_id, party_name: d.party.display_name(), agent_id: d.agent_id, lines })
+        Some(StatDoc { date: d.date, party_id: d.party_id, party_name: d.party.display_name(), agent_id: d.agent_id, project: d.project.trim().to_string(), purchase: d.kind.is_purchase(), lines })
     }
 }
 
@@ -117,7 +125,11 @@ impl Store {
     /// Statistica nel periodo, raggruppata come indicato. Le note di credito sottraggono.
     /// Le fatture differite che evadono DDT si contano una volta (sulla fattura).
     pub fn statistics(&self, by: StatBy, from: NaiveDate, to: NaiveDate) -> Result<Vec<StatRow>> {
-        let kinds: Vec<DocKind> = if by == StatBy::Supplier { PURCHASE_STAT.to_vec() } else { SALES_STAT.to_vec() };
+        let kinds: Vec<DocKind> = match by {
+            StatBy::Supplier => PURCHASE_STAT.to_vec(),
+            StatBy::Project => SALES_STAT.iter().chain(PURCHASE_STAT.iter()).copied().collect(),
+            _ => SALES_STAT.to_vec(),
+        };
         let agents: BTreeMap<i64, String> = self.agents(true)?.into_iter().map(|a| (a.id, a.name)).collect();
         let mut rows: BTreeMap<String, StatRow> = BTreeMap::new();
         // dell'articolo servono solo codice, descrizione, categoria e costo: si leggono senza
@@ -137,6 +149,9 @@ impl Store {
                 }
             };
             let mut touched: Vec<String> = Vec::new();
+            if by == StatBy::Project && d.project.is_empty() {
+                continue;
+            }
             for lc in &d.lines {
                 let product = match lc.product_id {
                     Some(id) => product_cache
@@ -161,12 +176,21 @@ impl Store {
                         let c = if c.trim().is_empty() { "Senza categoria".to_string() } else { c };
                         (c.clone(), c)
                     }
+                    StatBy::Project => (d.project.to_lowercase(), d.project.clone()),
                     StatBy::Agent => match d.agent_id {
                         Some(a) => (a.to_string(), agents.get(&a).cloned().unwrap_or_else(|| "(agente eliminato)".into())),
                         None => ("-".into(), "Senza agente".into()),
                     },
                 };
                 let r = rows.entry(key.clone()).or_insert_with(|| StatRow { key: key.clone(), label, ..Default::default() });
+                // commessa: gli acquisti sono costi della commessa
+                if by == StatBy::Project && d.purchase {
+                    r.cost += lc.revenue;
+                    if !touched.contains(&key) {
+                        touched.push(key);
+                    }
+                    continue;
+                }
                 r.revenue += lc.revenue;
                 if lc.item {
                     r.qty += lc.qty;
@@ -290,5 +314,86 @@ mod tests {
         assert_eq!(m[1].1, dec!(300));
         // flussi: le fatture senza pagamento non hanno scadenze
         assert_eq!(s.cash_flow(NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(), 3).unwrap().len(), 3);
+    }
+}
+
+/// Classe ABC (analisi di Pareto) di ogni riga: in ordine di valore decrescente, "A" fino
+/// all'80% del totale cumulato, "B" fino al 95%, "C" il resto (e i valori nulli o negativi).
+/// Restituisce per chiave la classe e la percentuale cumulata.
+pub fn abc_classes(rows: &[StatRow]) -> std::collections::HashMap<String, (char, Decimal)> {
+    let mut v: Vec<&StatRow> = rows.iter().collect();
+    v.sort_by(|a, b| b.revenue.cmp(&a.revenue));
+    let total: Decimal = v.iter().map(|r| r.revenue.max(Decimal::ZERO)).sum();
+    let mut out = std::collections::HashMap::new();
+    let mut cum = Decimal::ZERO;
+    for r in v {
+        if r.revenue <= Decimal::ZERO || total.is_zero() {
+            out.insert(r.key.clone(), ('C', Decimal::ONE_HUNDRED));
+            continue;
+        }
+        let before = cum / total * Decimal::ONE_HUNDRED;
+        cum += r.revenue;
+        let class = if before < Decimal::from(80) {
+            'A'
+        } else if before < Decimal::from(95) {
+            'B'
+        } else {
+            'C'
+        };
+        out.insert(r.key.clone(), (class, openfatt_core::money::round2(cum / total * Decimal::ONE_HUNDRED)));
+    }
+    out
+}
+
+#[cfg(test)]
+mod abc_tests {
+    use super::*;
+    use openfatt_core::dec;
+    use openfatt_core::model::*;
+
+    fn row(k: &str, v: Decimal) -> StatRow {
+        StatRow { key: k.into(), label: k.into(), revenue: v, ..Default::default() }
+    }
+
+    #[test]
+    fn classi_abc_pareto() {
+        let rows = vec![row("a", dec!(500)), row("b", dec!(300)), row("c", dec!(100)), row("d", dec!(60)), row("e", dec!(40)), row("z", dec!(-10))];
+        let m = abc_classes(&rows);
+        assert_eq!(m["a"], ('A', dec!(50.00)));
+        // b parte dal 50%: è ancora A anche se porta il cumulato all'80%
+        assert_eq!(m["b"].0, 'A');
+        assert_eq!(m["c"].0, 'B');
+        assert_eq!(m["d"].0, 'B');
+        assert_eq!(m["e"].0, 'C');
+        assert_eq!(m["z"].0, 'C');
+        assert!(abc_classes(&[]).is_empty());
+    }
+
+    #[test]
+    fn commessa_con_ricavi_e_acquisti() {
+        let s = crate::Store::open_in_memory().unwrap();
+        let v = VatRef::from_code(&s.vat_codes().unwrap().into_iter().find(|v| v.code == "22").unwrap());
+        let c = s.save_party(&Party { name: "Committente".into(), ..Default::default() }).unwrap();
+        let f = s.save_party(&Party { role: PartyRole::Supplier, name: "Fornitore".into(), ..Default::default() }).unwrap();
+        let d = NaiveDate::from_ymd_opt(2026, 5, 10).unwrap();
+        let mk = |kind: DocKind, party: i64, amount: Decimal, project: &str| {
+            let mut doc = Document::new(kind);
+            doc.date = d;
+            doc.party_id = Some(party);
+            doc.project = project.into();
+            doc.external_number = "1".into();
+            doc.lines.push(DocLine { description: "Lavori".into(), qty: dec!(1), unit_price: amount, vat: v.clone(), ..Default::default() });
+            s.issue_document(s.save_document(&doc).unwrap().id).unwrap();
+        };
+        mk(DocKind::Invoice, c.id, dec!(10000), "Cantiere Via Roma");
+        mk(DocKind::PurchaseInvoice, f.id, dec!(6500), "Cantiere Via Roma");
+        mk(DocKind::Invoice, c.id, dec!(999), "");
+        let rows = s.statistics(StatBy::Project, NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Cantiere Via Roma");
+        assert_eq!(rows[0].revenue, dec!(10000.00));
+        assert_eq!(rows[0].cost, dec!(6500.00));
+        assert_eq!(rows[0].margin(), dec!(3500.00));
+        assert_eq!(rows[0].documents, 2);
     }
 }

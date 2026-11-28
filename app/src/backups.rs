@@ -313,3 +313,57 @@ pub fn cloud_folders() -> Vec<(String, PathBuf)> {
     }
     out
 }
+
+/// Trasferimento della postazione su un altro computer: nella cartella scelta (chiavetta,
+/// disco esterno, cartella condivisa) una copia verificata dell'archivio, le impostazioni
+/// delle copie di sicurezza (senza password: restano nel Gestore credenziali di questo
+/// computer) e le istruzioni. Restituisce il percorso dell'archivio copiato.
+pub fn export_transfer(store: &Store, dir: &std::path::Path, stem: &str) -> Result<PathBuf, String> {
+    let stem = if stem.trim().is_empty() { "archivio" } else { stem.trim() };
+    let dest = dir.join(format!("{}.gadb", stem));
+    if dest.exists() {
+        return Err(format!("Nella cartella c'è già {}: sceglierne un'altra", dest.display()));
+    }
+    store.backup_to(&dest).map_err(|e| e.to_string())?;
+    // rilettura della copia: deve aprirsi ed essere integra
+    let check = Store::open(&dest).and_then(|s| s.integrity_check()).map_err(|e| e.to_string())?;
+    if check != "ok" {
+        let _ = std::fs::remove_file(&dest);
+        return Err(format!("La copia non è integra ({}): riprovare", check));
+    }
+    if let Ok(cfg) = std::fs::read(cfg_path()) {
+        std::fs::write(dir.join("openfatt-copie-di-sicurezza.json"), cfg).map_err(|e| e.to_string())?;
+    }
+    let readme = format!(
+        "Trasferimento di openFatt su un altro computer\r\n\r\n\
+         1. Installare openFatt sul computer nuovo (openFatt-Setup-<versione>.exe).\r\n\
+         2. Aprire openFatt, menu Copie di sicurezza > Ripristina da un file..., scegliere {}.gadb da questa cartella.\r\n\
+            Il ripristino crea l'archivio nella cartella Documenti\\openFatt e lo apre.\r\n\
+         3. Sempre in Copie di sicurezza: Importa impostazioni... e scegliere openfatt-copie-di-sicurezza.json, poi reinserire le password delle destinazioni (non vengono copiate).\r\n\
+         4. Reinserire le password della PEC, dell'email e del negozio online in Opzioni: per sicurezza restano sul vecchio computer.\r\n\
+         5. Controllare in Opzioni il registratore telematico e la stampante.\r\n\r\n\
+         Copia creata il {} e verificata (controllo di integrità superato).\r\n",
+        stem,
+        chrono::Local::now().format("%d/%m/%Y %H:%M")
+    );
+    std::fs::write(dir.join("LEGGIMI - trasferimento.txt"), readme).map_err(|e| e.to_string())?;
+    Ok(dest)
+}
+
+impl Manager {
+    /// Importa le destinazioni delle copie da un altro computer (senza password). Le
+    /// destinazioni già presenti con lo stesso nome si tengono. Restituisce quante ne aggiunge.
+    pub fn import_settings(&mut self, file: &std::path::Path) -> Result<usize, String> {
+        let b = std::fs::read(file).map_err(|e| e.to_string())?;
+        let other: Config = serde_json::from_slice(&b).map_err(|_| "Il file non contiene impostazioni delle copie di openFatt".to_string())?;
+        let mut n = 0;
+        for d in other.dests {
+            if !self.cfg.dests.iter().any(|x| x.id == d.id || x.name == d.name) {
+                self.cfg.dests.push(d);
+                n += 1;
+            }
+        }
+        self.save_cfg();
+        Ok(n)
+    }
+}

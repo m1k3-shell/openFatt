@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 openfatt-core.workspace = true
 openfatt-fatturapa.workspace = true
+openfatt-bank.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 serde.workspace = true

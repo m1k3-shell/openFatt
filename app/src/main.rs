@@ -16,6 +16,7 @@ mod services;
 mod ui;
 mod updates;
 mod vatfiles;
+mod whatsapp;
 
 fn main() -> eframe::Result<()> {
     // openfatt --crea-demo <file.gadb>: crea un archivio dimostrativo ed esce

@@ -40,6 +40,7 @@ fn by_label(b: StatBy) -> &'static str {
         StatBy::Category => "Categoria",
         StatBy::Agent => "Agente",
         StatBy::Supplier => "Fornitore (acquisti)",
+        StatBy::Project => "Commessa",
     }
 }
 
@@ -104,7 +105,7 @@ fn breakdown(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, gen: u64) {
     ui.horizontal(|ui| {
         ui.label("Per");
         egui::ComboBox::from_id_salt("stat_by").selected_text(by_label(st.by)).show_ui(ui, |ui| {
-            for b in [StatBy::Customer, StatBy::Product, StatBy::Category, StatBy::Agent, StatBy::Month, StatBy::Supplier] {
+            for b in [StatBy::Customer, StatBy::Product, StatBy::Category, StatBy::Agent, StatBy::Month, StatBy::Supplier, StatBy::Project] {
                 ui.selectable_value(&mut st.by, b, by_label(b));
             }
         });
@@ -141,7 +142,15 @@ fn breakdown(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, gen: u64) {
     let by = st.by;
     let codes_rc = st.codes.get(cx.store.generation(), &(), || cx.store.products("", true).unwrap_or_default().into_iter().map(|p| (p.code, p.id)).collect());
     let codes: &std::collections::HashMap<String, i64> = &codes_rc;
-    let cols: Vec<Col<StatRow>> = vec![
+    let abc_rc = std::rc::Rc::new(openfatt_store::abc_classes(&rows));
+    let abc = abc_rc.clone();
+    let abc2 = abc_rc.clone();
+    let pareto = matches!(by, StatBy::Customer | StatBy::Product | StatBy::Category | StatBy::Supplier);
+    if pareto && !rows.is_empty() {
+        let count = |c: char| abc_rc.values().filter(|(x, _)| *x == c).count();
+        ui.label(RichText::new(format!("Analisi ABC: {} in classe A (80% del valore), {} in B (fino al 95%), {} in C.", count('A'), count('B'), count('C'))).color(GRAY));
+    }
+    let mut cols: Vec<Col<StatRow>> = vec![
         Col::text("label", by_label(by), 320.0, |r: &StatRow| r.label.clone()).opens(move |r: &StatRow| match by {
             StatBy::Customer | StatBy::Supplier => r.key.parse().ok().map(Ref::Party),
             StatBy::Product => codes.get(&r.key).copied().map(Ref::Product),
@@ -154,6 +163,10 @@ fn breakdown(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, gen: u64) {
         Col::new("margin_pct", "Margine %", 80.0, |r: &StatRow| r.margin_pct().map(|m| Val::Num(m, 1)).unwrap_or(Val::Text(String::new()))).right(),
         Col::new("docs", "Documenti", 80.0, |r: &StatRow| Val::Num(Decimal::from(r.documents as i64), 0)).right(),
     ];
+    if pareto {
+        cols.push(Col::text("abc", "Classe ABC", 80.0, move |r: &StatRow| abc.get(&r.key).map(|x| x.0.to_string()).unwrap_or_default()).group());
+        cols.push(Col::new("abc_cum", "Cumulato %", 90.0, move |r: &StatRow| abc2.get(&r.key).map(|x| Val::Num(x.1, 1)).unwrap_or(Val::Text(String::new()))).right());
+    }
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             st.grid.toolbar(ui, cx.store, cx.msgs, &cols, &rows, "Statistiche");

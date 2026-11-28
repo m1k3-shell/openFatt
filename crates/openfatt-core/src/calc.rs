@@ -469,8 +469,12 @@ pub fn compute(doc: &Document) -> Result<Totals, CalcError> {
                 base += pf.amount;
             }
         }
-        let base = round2(pct_of(base, w.base_percent));
-        if base.is_zero() {
+        let mut base = round2(pct_of(base, w.base_percent));
+        // massimale (Enasarco): oltre il residuo dell'anno non si trattiene
+        if let Some(max) = w.max_base {
+            base = base.min(max.max(Decimal::ZERO));
+        }
+        if base.is_zero() && w.max_base.is_none() {
             warnings.push(format!("Ritenuta {} indicata ma nessuna riga è soggetta a ritenuta", w.kind));
         }
         withholdings.push(WithholdingCalc {

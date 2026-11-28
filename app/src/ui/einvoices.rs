@@ -187,6 +187,9 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, dir: Direction) {
 
     let gen = cx.store.generation();
     let ctx = ui.ctx().clone();
+    if dir == Direction::Out {
+        todo_panel(ui, cx);
+    }
     let search = super::settled(&ctx, ("fe_search", dir == Direction::Out), &st.search);
     let (list, list_version) = super::memo(&ctx, ("einvoices", dir == Direction::Out), gen, (search.clone(), st.year), || cx.store.einvoices(dir, &search, st.year).unwrap_or_default());
     let sel = st.selected.and_then(|id| list.iter().find(|e| e.id == id)).cloned();
@@ -342,4 +345,72 @@ pub fn show(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut State, dir: Direction) {
     if ev.opened.is_some() {
         st.viewing = ev.opened;
     }
+}
+
+/// Fatture da gestire secondo l'esito dello SdI: cosa fare ed entro quando.
+fn todo_panel(ui: &mut egui::Ui, cx: &mut Ctx) {
+    let today = chrono::Local::now().date_naive();
+    let (tasks, _) = super::memo(ui.ctx(), "sdi_tasks", cx.store.generation(), today, || cx.store.sdi_tasks(today).unwrap_or_default());
+    if tasks.is_empty() {
+        return;
+    }
+    let urgent = tasks.iter().filter(|t| t.needs_action()).count();
+    let title = if urgent == 0 { format!("In attesa di esito ({})", tasks.len()) } else { format!("Da gestire ({}){}", urgent, if tasks.len() > urgent { format!(" · in attesa {}", tasks.len() - urgent) } else { String::new() }) };
+    egui::CollapsingHeader::new(RichText::new(title).strong()).id_salt("sdi_todo").default_open(urgent > 0).show(ui, |ui| {
+        egui::Grid::new("sdi_todo_grid").striped(true).num_columns(5).spacing([12.0, 4.0]).show(ui, |ui| {
+            for t in tasks.iter() {
+                let late = t.overdue(today);
+                let color = if late { super::widgets::RED } else if t.needs_action() { ORANGE } else { GRAY };
+                ui.label(RichText::new(t.action.label()).color(color).strong());
+                ui.label(format!("{} {} · {}", t.doc_number, t.doc_date.get(..10).map(|d| d.split('-').rev().collect::<Vec<_>>().join("/")).unwrap_or_default(), t.party_name));
+                ui.label(match t.deadline {
+                    Some(d) if late => RichText::new(format!("scaduto il {}", d.format("%d/%m/%Y"))).color(super::widgets::RED),
+                    Some(d) => RichText::new(format!("entro il {}", d.format("%d/%m/%Y"))),
+                    None => RichText::new(format!("dal {}", t.since.format("%d/%m/%Y"))).color(GRAY),
+                });
+                ui.add(egui::Label::new(RichText::new(&t.detail).small().color(GRAY)).truncate()).on_hover_text(&t.detail);
+                ui.horizontal(|ui| {
+                    if let Some(doc_id) = t.document_id {
+                        match t.action {
+                            openfatt_store::SdiAction::CourtesyCopy => {
+                                if ui.small_button("Prepara email").clicked() {
+                                    match cx.store.document(doc_id).map_err(|e| e.to_string()).and_then(|d| crate::mailer::for_document(cx.store, &d)) {
+                                        Ok(mut c) => {
+                                            c.subject = format!("Copia di cortesia - {}", c.subject);
+                                            c.body = format!("La fattura elettronica non è stata recapitata dal Sistema di Interscambio al suo indirizzo telematico: l'originale è comunque emesso e disponibile nella sua area riservata del sito dell'Agenzia delle Entrate (Fatture e Corrispettivi). In allegato una copia di cortesia.\n\n{}", c.body);
+                                            cx.nav.push(Nav::Mail(vec![c]));
+                                            cx.msgs.check(cx.store.mark_courtesy_copy(t.einvoice_id), "");
+                                        }
+                                        Err(e) => cx.msgs.err(e),
+                                    }
+                                }
+                                if ui.small_button("Già fatto").clicked() {
+                                    cx.msgs.check(cx.store.mark_courtesy_copy(t.einvoice_id), "Segnata come inviata");
+                                }
+                            }
+                            openfatt_store::SdiAction::CreditNote => {
+                                if ui.small_button("Nota di credito").on_hover_text("Crea la nota di credito che storna la fattura rifiutata").clicked() {
+                                    match cx.store.transform(&[doc_id], openfatt_core::model::DocKind::CreditNote) {
+                                        Ok(nc) => cx.nav.push(Nav::EditDocument(nc)),
+                                        Err(e) => cx.msgs.err(e.to_string()),
+                                    }
+                                }
+                            }
+                            openfatt_store::SdiAction::CheckMailbox => {
+                                if ui.small_button("Ricevi dalla PEC").clicked() {
+                                    cx.nav.push(Nav::PecFetch);
+                                }
+                            }
+                            _ => {}
+                        }
+                        if ui.small_button("Apri").clicked() {
+                            cx.nav.push(Nav::OpenDocument(doc_id));
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    });
+    ui.add_space(6.0);
 }

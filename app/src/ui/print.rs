@@ -127,6 +127,38 @@ pub fn settings_tab(ui: &mut egui::Ui, cx: &mut Ctx, st: &mut SettingsState) {
             ui.label("Testo in fondo");
             ui.add(egui::TextEdit::multiline(&mut k.note).desired_width(520.0).desired_rows(3).hint_text("es. condizioni di vendita, validità dell'offerta, coordinate per il pagamento"));
             ui.end_row();
+            ui.label("Copie");
+            ui.vertical(|ui| {
+                let mut remove = None;
+                for (i, c) in k.copies.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(c).desired_width(260.0).hint_text("dicitura della copia"));
+                        if ui.small_button(icon::TRASH).clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    k.copies.remove(i);
+                }
+                ui.horizontal(|ui| {
+                    if ui.small_button(format!("{}  Copia", icon::PLUS)).clicked() {
+                        k.copies.push(if k.copies.is_empty() { "Originale".into() } else { "Copia".into() });
+                    }
+                    if *kind == DocKind::DeliveryNote && k.copies.is_empty() && ui.small_button("Destinatario, mittente, vettore").clicked() {
+                        k.copies = printing::DDT_COPIES.iter().map(|s| s.to_string()).collect();
+                    }
+                });
+                ui.label(RichText::new("Ogni copia si stampa con la sua dicitura sotto il numero. Nessuna copia = una sola stampa.").small().color(super::widgets::GRAY));
+            });
+            ui.end_row();
+            ui.label("Carta");
+            ui.horizontal(|ui| {
+                for (v, l) in [(0u32, "Foglio A4"), (80, "Rotolo 80 mm"), (58, "Rotolo 58 mm")] {
+                    ui.radio_value(&mut k.roll_mm, v, l);
+                }
+            }).response.on_hover_text("Rotolo: per le stampanti termiche, una colonna stretta alta quanto serve");
+            ui.end_row();
         });
     });
     ui.add_space(10.0);

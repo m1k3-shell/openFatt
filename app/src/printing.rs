@@ -22,6 +22,33 @@ pub struct KindPrint {
     pub prices: Option<bool>,
     /// Testo aggiunto in fondo (es. condizioni di vendita).
     pub note: String,
+    /// Copie da stampare, ciascuna con la sua dicitura (es. "Copia per il destinatario",
+    /// "Copia per il mittente"). Vuoto = una sola copia senza dicitura.
+    pub copies: Vec<String>,
+    /// Stampa su rotolo per stampante termica: larghezza in mm (80 o 58), 0 = foglio A4.
+    pub roll_mm: u32,
+}
+
+/// Diciture proposte per le copie dei DDT (destinatario, mittente, vettore).
+pub const DDT_COPIES: [&str; 3] = ["Copia per il destinatario", "Copia per il mittente", "Copia per il vettore"];
+
+/// Le copie di un documento: lo stesso documento con la dicitura di ciascuna copia.
+pub fn with_copies(p: PrintDoc, copies: &[String]) -> Vec<PrintDoc> {
+    let labels: Vec<&String> = copies.iter().filter(|c| !c.trim().is_empty()).collect();
+    if labels.is_empty() {
+        return vec![p];
+    }
+    labels
+        .into_iter()
+        .map(|c| {
+            let mut d = p.clone();
+            d.watermark = Some(match &p.watermark {
+                Some(w) => format!("{} - {}", w, c.trim().to_uppercase()),
+                None => c.trim().to_uppercase(),
+            });
+            d
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,7 +168,9 @@ pub fn document_pdf(store: &Store, doc: &Document) -> Result<Vec<u8>, String> {
     }
     let s = settings(store);
     let st = style(store, &s);
-    Ok(openfatt_pdf::render(&print_doc(store, doc, &s, &st)?))
+    let k = s.kinds.get(doc.kind.code()).cloned().unwrap_or_default();
+    let docs = with_copies(print_doc(store, doc, &s, &st)?, &k.copies);
+    Ok(if k.roll_mm > 0 { openfatt_pdf::receipt::render_roll(&docs, k.roll_mm as f32) } else { openfatt_pdf::render_many(&docs) })
 }
 
 /// Più documenti in un solo PDF (stampa in blocco).
@@ -151,7 +180,8 @@ pub fn documents_pdf(store: &Store, ids: &[i64]) -> Result<Vec<u8>, String> {
     let mut docs = Vec::new();
     for id in ids {
         let d = store.document(*id).map_err(|e| e.to_string())?;
-        docs.push(print_doc(store, &d, &s, &st)?);
+        let copies = s.kinds.get(d.kind.code()).map(|k| k.copies.clone()).unwrap_or_default();
+        docs.extend(with_copies(print_doc(store, &d, &s, &st)?, &copies));
     }
     if docs.is_empty() {
         return Err("Nessun documento".into());
@@ -324,7 +354,7 @@ mod tests {
         ps.template = "moderno".into();
         ps.accent = "#0a7d4b".into();
         ps.show_codes = false;
-        ps.kinds.insert("DDT".into(), KindPrint { title: "Documento di trasporto".into(), prices: Some(true), note: "Merce viaggiante a rischio del destinatario.".into() });
+        ps.kinds.insert("DDT".into(), KindPrint { title: "Documento di trasporto".into(), prices: Some(true), note: "Merce viaggiante a rischio del destinatario.".into(), ..Default::default() });
         s.set_setting("print", &ps).unwrap();
         let docs = s.documents(&openfatt_store::DocFilter::default()).unwrap();
         let d = docs
@@ -343,6 +373,18 @@ mod tests {
         let pdf = document_pdf(&s, &d).unwrap();
         let txt = String::from_utf8_lossy(&pdf);
         assert!(txt.contains("/Subtype /Image") && txt.contains("/SMask"));
+        // tre copie del DDT, ciascuna con la sua dicitura; poi su rotolo da 80 mm
+        let mut ps3 = ps.clone();
+        ps3.kinds.get_mut("DDT").unwrap().copies = DDT_COPIES.iter().map(|c| c.to_string()).collect();
+        s.set_setting("print", &ps3).unwrap();
+        let three = String::from_utf8_lossy(&document_pdf(&s, &d).unwrap()).to_string();
+        assert!(three.contains("/Count 3"), "tre pagine");
+        assert!(three.contains("(COPIA PER IL VETTORE)"));
+        ps3.kinds.get_mut("DDT").unwrap().roll_mm = 80;
+        s.set_setting("print", &ps3).unwrap();
+        let roll = String::from_utf8_lossy(&document_pdf(&s, &d).unwrap()).to_string();
+        assert!(roll.contains("226.77") && roll.contains("/Count 3"));
+        s.set_setting("print", &ps).unwrap();
         let ids: Vec<i64> = docs.iter().filter(|d| d.number.is_some()).map(|d| d.id).take(3).collect();
         let all = documents_pdf(&s, &ids).unwrap();
         assert!(String::from_utf8_lossy(&all).matches("/Type /Page ").count() >= 3);

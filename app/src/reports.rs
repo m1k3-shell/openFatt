@@ -209,3 +209,52 @@ pub fn annual_vat_xlsx(path: &Path, a: &openfatt_store::AnnualVat) -> Result<(),
     }
     export_table(path, "Dichiarazione IVA", &format!("Prospetto dichiarazione IVA - anno {}", a.year), &cols, &data)
 }
+
+/// Prepara i report programmati arrivati a scadenza (all'apertura dell'archivio).
+/// Restituisce i file scritti e gli errori.
+pub fn run_scheduled(store: &Store, today: chrono::NaiveDate) -> (Vec<String>, Vec<String>) {
+    let mut done = Vec::new();
+    let mut errors = Vec::new();
+    let list = store.scheduled_reports().unwrap_or_default();
+    for (i, r) in list.iter().enumerate() {
+        let Some((from, to)) = r.due(today) else { continue };
+        let dir = std::path::PathBuf::from(r.folder.trim());
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            errors.push(format!("{}: {}", dir.display(), e));
+            continue;
+        }
+        let tag = format!("{}_{}", from.format("%Y%m%d"), to.format("%Y%m%d"));
+        let res: Result<Vec<std::path::PathBuf>, String> = (|| {
+            Ok(match r.kind {
+                openfatt_store::ReportKind::Accountant => {
+                    let a = dir.join(format!("prima_nota_{}.csv", tag));
+                    let b = dir.join(format!("registri_iva_{}.csv", tag));
+                    std::fs::write(&a, store.ledger_export_csv(from, to).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                    std::fs::write(&b, store.vat_export_csv(from, to).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                    vec![a, b]
+                }
+                openfatt_store::ReportKind::SalesByCustomer | openfatt_store::ReportKind::SalesByProduct => {
+                    let by = if r.kind == openfatt_store::ReportKind::SalesByCustomer { openfatt_store::StatBy::Customer } else { openfatt_store::StatBy::Product };
+                    let rows = store.statistics(by, from, to).map_err(|e| e.to_string())?;
+                    let name = if by == openfatt_store::StatBy::Customer { "vendite_per_cliente" } else { "vendite_per_articolo" };
+                    let p = dir.join(format!("{}_{}.xlsx", name, tag));
+                    stats_xlsx(&p, &format!("{} dal {} al {}", r.kind.label(), from.format("%d/%m/%Y"), to.format("%d/%m/%Y")), &rows)?;
+                    vec![p]
+                }
+                openfatt_store::ReportKind::OpenDues => {
+                    let p = dir.join(format!("scadenze_aperte_{}.csv", to.format("%Y%m%d")));
+                    std::fs::write(&p, store.open_dues_csv().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                    vec![p]
+                }
+            })
+        })();
+        match res {
+            Ok(files) => {
+                let _ = store.mark_report_done(i, to);
+                done.extend(files.into_iter().map(|f| f.display().to_string()));
+            }
+            Err(e) => errors.push(format!("{}: {}", r.kind.label(), e)),
+        }
+    }
+    (done, errors)
+}
